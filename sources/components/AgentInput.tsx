@@ -20,6 +20,8 @@ import { GitStatusBadge, useHasMeaningfulGitStatus } from './GitStatusBadge';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSetting } from '@/sync/storage';
 import { Theme } from '@/theme';
+import { t } from '@/text';
+import { Metadata } from '@/sync/storageTypes';
 
 interface AgentInputProps {
     value: string;
@@ -34,6 +36,7 @@ interface AgentInputProps {
     onPermissionModeChange?: (mode: PermissionMode) => void;
     modelMode?: ModelMode;
     onModelModeChange?: (mode: ModelMode) => void;
+    metadata?: Metadata | null;
     onAbort?: () => void | Promise<void>;
     showAbortButton?: boolean;
     connectionStatus?: {
@@ -262,12 +265,12 @@ const getContextWarning = (contextSize: number, alwaysShow: boolean = false, the
     const percentageRemaining = Math.max(0, Math.min(100, 100 - percentageUsed));
 
     if (percentageRemaining <= 5) {
-        return { text: `${Math.round(percentageRemaining)}% left`, color: theme.colors.warningCritical };
+        return { text: t('agentInput.context.remaining', { percent: Math.round(percentageRemaining) }), color: theme.colors.warningCritical };
     } else if (percentageRemaining <= 10) {
-        return { text: `${Math.round(percentageRemaining)}% left`, color: theme.colors.warning };
+        return { text: t('agentInput.context.remaining', { percent: Math.round(percentageRemaining) }), color: theme.colors.warning };
     } else if (alwaysShow) {
         // Show context remaining in neutral color when not near limit
-        return { text: `${Math.round(percentageRemaining)}% left`, color: theme.colors.warning };
+        return { text: t('agentInput.context.remaining', { percent: Math.round(percentageRemaining) }), color: theme.colors.warning };
     }
     return null; // No display needed
 };
@@ -276,9 +279,11 @@ export const AgentInput = React.memo((props: AgentInputProps) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const screenWidth = useWindowDimensions().width;
-    const experimental = useSetting('experiments');
 
     const hasText = props.value.trim().length > 0;
+    
+    // Check if this is a Codex session
+    const isCodex = props.metadata?.flavor === 'codex';
 
     // Calculate context warning
     const contextWarning = props.usageData?.contextSize
@@ -435,7 +440,9 @@ export const AgentInput = React.memo((props: AgentInputProps) => {
             }
             // Handle Shift+Tab for mode switching
             if (event.key === 'Tab' && event.shiftKey && props.onPermissionModeChange) {
-                const modeOrder: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+                const modeOrder: PermissionMode[] = isCodex 
+                    ? ['default', 'read-only', 'safe-yolo', 'yolo']
+                    : ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
                 const currentIndex = modeOrder.indexOf(props.permissionMode || 'default');
                 const nextIndex = (currentIndex + 1) % modeOrder.length;
                 props.onPermissionModeChange(modeOrder[nextIndex]);
@@ -490,16 +497,25 @@ export const AgentInput = React.memo((props: AgentInputProps) => {
                                 {/* Permission Mode Section */}
                                 <View style={styles.overlaySection}>
                                     <Text style={styles.overlaySectionTitle}>
-                                        PERMISSION MODE
+                                        {isCodex ? t('agentInput.codexPermissionMode.title') : t('agentInput.permissionMode.title')}
                                     </Text>
-                                    {(['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const).map((mode) => {
-                                        const modeConfig = {
-                                            default: { label: 'Default' },
-                                            acceptEdits: { label: 'Accept Edits' },
-                                            plan: { label: 'Plan Mode' },
-                                            bypassPermissions: { label: 'Yolo Mode' },
+                                    {(isCodex 
+                                        ? (['default', 'read-only', 'safe-yolo', 'yolo'] as const)
+                                        : (['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const)
+                                    ).map((mode) => {
+                                        const modeConfig = isCodex ? {
+                                            'default': { label: t('agentInput.codexPermissionMode.default') },
+                                            'read-only': { label: t('agentInput.codexPermissionMode.readOnly') },
+                                            'safe-yolo': { label: t('agentInput.codexPermissionMode.safeYolo') },
+                                            'yolo': { label: t('agentInput.codexPermissionMode.yolo') },
+                                        } : {
+                                            default: { label: t('agentInput.permissionMode.default') },
+                                            acceptEdits: { label: t('agentInput.permissionMode.acceptEdits') },
+                                            plan: { label: t('agentInput.permissionMode.plan') },
+                                            bypassPermissions: { label: t('agentInput.permissionMode.bypassPermissions') },
                                         };
-                                        const config = modeConfig[mode];
+                                        const config = modeConfig[mode as keyof typeof modeConfig];
+                                        if (!config) return null;
                                         const isSelected = props.permissionMode === mode;
 
                                         return (
@@ -562,16 +578,26 @@ export const AgentInput = React.memo((props: AgentInputProps) => {
                                         paddingBottom: 4,
                                         ...Typography.default('semiBold')
                                     }}>
-                                        MODEL
+                                        {isCodex ? t('agentInput.codexModel.title') : t('agentInput.model.title')}
                                     </Text>
-                                    {(['default', 'adaptiveUsage', 'sonnet', 'opus'] as const).map((model) => {
-                                        const modelConfig = {
-                                            default: { label: 'Use CLI settings' },
-                                            adaptiveUsage: { label: 'Opus up to 50% usage, then Sonnet' },
-                                            sonnet: { label: 'Sonnet' },
-                                            opus: { label: 'Opus' },
+                                    {(isCodex 
+                                        ? (['default', 'gpt-5-minimal', 'gpt-5-low', 'gpt-5-medium', 'gpt-5-high'] as const)
+                                        : (['default', 'adaptiveUsage', 'sonnet', 'opus'] as const)
+                                    ).map((model) => {
+                                        const modelConfig = isCodex ? {
+                                            'default': { label: t('agentInput.model.default') },
+                                            'gpt-5-minimal': { label: t('agentInput.codexModel.gpt5Minimal') },
+                                            'gpt-5-low': { label: t('agentInput.codexModel.gpt5Low') },
+                                            'gpt-5-medium': { label: t('agentInput.codexModel.gpt5Medium') },
+                                            'gpt-5-high': { label: t('agentInput.codexModel.gpt5High') },
+                                        } : {
+                                            default: { label: t('agentInput.model.default') },
+                                            adaptiveUsage: { label: t('agentInput.model.adaptiveUsage') },
+                                            sonnet: { label: t('agentInput.model.sonnet') },
+                                            opus: { label: t('agentInput.model.opus') },
                                         };
-                                        const config = modelConfig[model];
+                                        const config = modelConfig[model as keyof typeof modelConfig];
+                                        if (!config) return null;
                                         const isSelected = props.modelMode === model || (model === 'default' && !props.modelMode);
 
                                         return (
@@ -621,8 +647,8 @@ export const AgentInput = React.memo((props: AgentInputProps) => {
                     </>
                 )}
 
-                {/* Connection status and permission mode */}
-                {(props.connectionStatus || (props.permissionMode && props.permissionMode !== 'default')) && (
+                {/* Connection status, context warning, and permission mode */}
+                {(props.connectionStatus || contextWarning || (props.permissionMode && props.permissionMode !== 'default')) && (
                     <View style={{
                         flexDirection: 'row',
                         alignItems: 'center',
@@ -630,45 +656,57 @@ export const AgentInput = React.memo((props: AgentInputProps) => {
                         paddingHorizontal: 16,
                         paddingBottom: 4,
                     }}>
-                        {props.connectionStatus && (
-                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                <StatusDot
-                                    color={props.connectionStatus.dotColor}
-                                    isPulsing={props.connectionStatus.isPulsing}
-                                    size={6}
-                                    style={{ marginRight: 6 }}
-                                />
-                                <Text style={{
-                                    fontSize: 11,
-                                    color: props.connectionStatus.color,
-                                    ...Typography.default()
-                                }}>
-                                    {props.connectionStatus.text}
-                                </Text>
-                                {contextWarning && (
+                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                            {props.connectionStatus && (
+                                <>
+                                    <StatusDot
+                                        color={props.connectionStatus.dotColor}
+                                        isPulsing={props.connectionStatus.isPulsing}
+                                        size={6}
+                                        style={{ marginRight: 6 }}
+                                    />
                                     <Text style={{
                                         fontSize: 11,
-                                        color: contextWarning.color,
-                                        marginLeft: 8,
+                                        color: props.connectionStatus.color,
                                         ...Typography.default()
                                     }}>
-                                        • {contextWarning.text}
+                                        {props.connectionStatus.text}
                                     </Text>
-                                )}
-                            </View>
-                        )}
+                                </>
+                            )}
+                            {contextWarning && (
+                                <Text style={{
+                                    fontSize: 11,
+                                    color: contextWarning.color,
+                                    marginLeft: props.connectionStatus ? 8 : 0,
+                                    ...Typography.default()
+                                }}>
+                                    {props.connectionStatus ? '• ' : ''}{contextWarning.text}
+                                </Text>
+                            )}
+                        </View>
                         <View style={{ flexDirection: 'column', alignItems: 'flex-end' }}>
                             {props.permissionMode && props.permissionMode !== 'default' && (
                                 <Text style={{
                                     fontSize: 11,
                                     color: props.permissionMode === 'acceptEdits' ? theme.colors.permission.acceptEdits :
                                         props.permissionMode === 'bypassPermissions' ? theme.colors.permission.bypass :
-                                            props.permissionMode === 'plan' ? theme.colors.permission.plan : theme.colors.permission.default,
+                                            props.permissionMode === 'plan' ? theme.colors.permission.plan :
+                                                props.permissionMode === 'read-only' ? theme.colors.permission.readOnly :
+                                                    props.permissionMode === 'safe-yolo' ? theme.colors.permission.safeYolo :
+                                                        props.permissionMode === 'yolo' ? theme.colors.permission.yolo :
+                                                            theme.colors.permission.default,
                                     ...Typography.default()
                                 }}>
-                                    {props.permissionMode === 'acceptEdits' ? 'Accept All Edits' :
-                                        props.permissionMode === 'bypassPermissions' ? 'Bypass All Permissions' :
-                                            props.permissionMode === 'plan' ? 'Plan Mode' : ''}
+                                    {isCodex ? (
+                                        props.permissionMode === 'read-only' ? t('agentInput.codexPermissionMode.badgeReadOnly') :
+                                            props.permissionMode === 'safe-yolo' ? t('agentInput.codexPermissionMode.badgeSafeYolo') :
+                                                props.permissionMode === 'yolo' ? t('agentInput.codexPermissionMode.badgeYolo') : ''
+                                    ) : (
+                                        props.permissionMode === 'acceptEdits' ? t('agentInput.permissionMode.badgeAcceptAllEdits') :
+                                            props.permissionMode === 'bypassPermissions' ? t('agentInput.permissionMode.badgeBypassAllPermissions') :
+                                                props.permissionMode === 'plan' ? t('agentInput.permissionMode.badgePlanMode') : ''
+                                    )}
                                 </Text>
                             )}
                         </View>
@@ -756,9 +794,7 @@ export const AgentInput = React.memo((props: AgentInputProps) => {
                             )}
 
                             {/* Git Status Badge */}
-                            {experimental && (
-                                <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
-                            )}
+                            <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
                         </View>
 
                         {/* Send/Voice button */}
@@ -861,7 +897,7 @@ function GitStatusButton({ sessionId, onPress }: { sessionId?: string, onPress?:
                 <GitStatusBadge sessionId={sessionId} />
             ) : (
                 <Octicons
-                    name="file-directory"
+                    name="git-branch"
                     size={16}
                     color={theme.colors.button.secondary.tint}
                 />

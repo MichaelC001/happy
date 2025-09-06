@@ -1,5 +1,5 @@
-import React, { useState, useMemo, useCallback } from 'react';
-import { View, Text, ScrollView, ActivityIndicator, RefreshControl, Platform, Pressable } from 'react-native';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
+import { View, Text, ScrollView, ActivityIndicator, RefreshControl, Platform, Pressable, TextInput } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
@@ -8,14 +8,59 @@ import { Typography } from '@/constants/Typography';
 import { useSessions, useAllMachines } from '@/sync/storage';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import type { Session } from '@/sync/storageTypes';
-import { machineSpawnNewSession, machineStopDaemon, machineUpdateMetadata } from '@/sync/ops';
+import { machineStopDaemon, machineUpdateMetadata } from '@/sync/ops';
 import { Modal } from '@/modal';
-import { formatPathRelativeToHome } from '@/utils/sessionUtils';
+import { formatPathRelativeToHome, getSessionName, getSessionSubtitle } from '@/utils/sessionUtils';
 import { isMachineOnline } from '@/utils/machineUtils';
-import { MachineSessionLauncher } from '@/components/MachineSessionLauncher';
-import { storage } from '@/sync/storage';
 import { sync } from '@/sync/sync';
-import { useUnistyles } from 'react-native-unistyles';
+import { useUnistyles, StyleSheet } from 'react-native-unistyles';
+import { t } from '@/text';
+import { useNavigateToSession } from '@/hooks/useNavigateToSession';
+import { machineSpawnNewSession } from '@/sync/ops';
+import { resolveAbsolutePath } from '@/utils/pathUtils';
+import { MultiTextInput, type MultiTextInputHandle } from '@/components/MultiTextInput';
+
+const styles = StyleSheet.create((theme) => ({
+    pathInputContainer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        paddingHorizontal: 16,
+        paddingVertical: 16,
+    },
+    pathInput: {
+        flex: 1,
+        borderRadius: 8,
+        backgroundColor: theme.colors.input?.background ?? theme.colors.groupped.background,
+        borderWidth: 1,
+        borderColor: theme.colors.divider,
+        minHeight: 44,
+        position: 'relative',
+        paddingHorizontal: 12,
+        paddingVertical: Platform.select({ web: 10, ios: 8, default: 10 }) as any,
+    },
+    inlineSendButton: {
+        position: 'absolute',
+        right: 8,
+        bottom: 10,
+        width: 32,
+        height: 32,
+        borderRadius: 16,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    inlineSendActive: {
+        backgroundColor: theme.colors.button.primary.background,
+    },
+    inlineSendInactive: {
+        // Use a darker neutral in light theme to avoid blending into input
+        backgroundColor: Platform.select({
+            ios: theme.colors.permissionButton?.inactive?.background ?? theme.colors.surfaceHigh,
+            android: theme.colors.permissionButton?.inactive?.background ?? theme.colors.surfaceHigh,
+            default: theme.colors.permissionButton?.inactive?.background ?? theme.colors.surfaceHigh,
+        }) as any,
+    },
+}));
 
 export default function MachineDetailScreen() {
     const { theme } = useUnistyles();
@@ -23,9 +68,15 @@ export default function MachineDetailScreen() {
     const router = useRouter();
     const sessions = useSessions();
     const machines = useAllMachines();
+    const navigateToSession = useNavigateToSession();
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [isStoppingDaemon, setIsStoppingDaemon] = useState(false);
     const [isRenamingMachine, setIsRenamingMachine] = useState(false);
+    const [customPath, setCustomPath] = useState('');
+    const [isSpawning, setIsSpawning] = useState(false);
+    const inputRef = useRef<MultiTextInputHandle>(null);
+    const [showAllPaths, setShowAllPaths] = useState(false);
+    // Variant D only
 
     const machine = useMemo(() => {
         return machines.find(m => m.id === machineId);
@@ -41,6 +92,12 @@ export default function MachineDetailScreen() {
         }) as Session[];
     }, [sessions, machineId]);
 
+    const previousSessions = useMemo(() => {
+        return [...machineSessions]
+            .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+            .slice(0, 5);
+    }, [machineSessions]);
+
     const recentPaths = useMemo(() => {
         const paths = new Set<string>();
         machineSessions.forEach(session => {
@@ -50,6 +107,11 @@ export default function MachineDetailScreen() {
         });
         return Array.from(paths).sort();
     }, [machineSessions]);
+
+    const pathsToShow = useMemo(() => {
+        if (showAllPaths) return recentPaths;
+        return recentPaths.slice(0, 5);
+    }, [recentPaths, showAllPaths]);
 
     // Determine daemon status from metadata
     const daemonStatus = useMemo(() => {
@@ -64,63 +126,6 @@ export default function MachineDetailScreen() {
         // Use machine online status as proxy for daemon status
         return isMachineOnline(machine) ? 'likely alive' : 'stopped';
     }, [machine]);
-
-    const handleStartSession = async (path: string) => {
-        if (!machineId) return;
-
-        try {
-            console.log(`🚀 Starting session on machine ${machineId} at path: ${path}`);
-            const result = await machineSpawnNewSession(machineId, path);
-            console.log('🎉 daemon result', result);
-
-            if (result.sessionId) {
-                console.log('✅ Session spawned successfully:', result.sessionId);
-
-                // Poll for the session to appear
-                const pollInterval = 100;
-                const maxAttempts = 20;
-                let attempts = 0;
-
-                const pollForSession = () => {
-                    const state = storage.getState();
-                    const newSession = Object.values(state.sessions).find((s: Session) => s.id === result.sessionId);
-
-                    if (newSession) {
-                        console.log('📱 Navigating to session:', result.sessionId);
-                        router.replace(`/session/${result.sessionId}`);
-                        return;
-                    }
-
-                    attempts++;
-                    if (attempts < maxAttempts) {
-                        setTimeout(pollForSession, pollInterval);
-                    } else {
-                        console.log('⏰ Polling timeout - session should appear soon');
-                        Modal.alert('Session started', 'The session was started but may take a moment to appear.');
-                    }
-                };
-
-                pollForSession();
-            } else {
-                console.error('❌ No sessionId in response:', result);
-                throw new Error('Session spawning failed - no session ID returned.');
-            }
-        } catch (error) {
-            console.error('💥 Failed to start session', error);
-
-            let errorMessage = 'Failed to start session. Make sure the daemon is running on the target machine.';
-            if (error instanceof Error) {
-                if (error.message.includes('timeout')) {
-                    errorMessage = 'Session startup timed out. The machine may be slow or the daemon may not be responding.';
-                } else if (error.message.includes('Socket not connected')) {
-                    errorMessage = 'Not connected to server. Check your internet connection.';
-                }
-            }
-
-            Modal.alert('Error', errorMessage);
-            throw error;
-        }
-    };
 
     const handleStopDaemon = async () => {
         // Show confirmation modal using alert with buttons
@@ -143,7 +148,7 @@ export default function MachineDetailScreen() {
                             // Refresh to get updated metadata
                             await sync.refreshMachines();
                         } catch (error) {
-                            Modal.alert('Error', 'Failed to stop daemon. It may not be running.');
+                            Modal.alert(t('common.error'), 'Failed to stop daemon. It may not be running.');
                         } finally {
                             setIsStoppingDaemon(false);
                         }
@@ -152,6 +157,8 @@ export default function MachineDetailScreen() {
             ]
         );
     };
+
+    // inline control below
 
     const handleRefresh = async () => {
         setIsRefreshing(true);
@@ -168,8 +175,8 @@ export default function MachineDetailScreen() {
             {
                 defaultValue: machine.metadata?.displayName || '',
                 placeholder: machine.metadata?.host || 'Enter machine name',
-                cancelText: 'Cancel',
-                confirmText: 'Rename'
+                cancelText: t('common.cancel'),
+                confirmText: t('common.rename')
             }
         );
 
@@ -187,7 +194,7 @@ export default function MachineDetailScreen() {
                     machine.metadataVersion
                 );
                 
-                Modal.alert('Success', 'Machine renamed successfully');
+                Modal.alert(t('common.success'), 'Machine renamed successfully');
             } catch (error) {
                 Modal.alert(
                     'Error',
@@ -198,6 +205,47 @@ export default function MachineDetailScreen() {
             } finally {
                 setIsRenamingMachine(false);
             }
+        }
+    };
+
+    const handleStartSession = async (approvedNewDirectoryCreation: boolean = false): Promise<void> => {
+        if (!machine || !machineId) return;
+        try {
+            const pathToUse = (customPath.trim() || '~');
+            if (!isMachineOnline(machine)) return;
+            setIsSpawning(true);
+            const absolutePath = resolveAbsolutePath(pathToUse, machine?.metadata?.homeDir);
+            const result = await machineSpawnNewSession({
+                machineId: machineId!,
+                directory: absolutePath,
+                approvedNewDirectoryCreation
+            });
+            switch (result.type) {
+                case 'success':
+                    // Dismiss machine picker & machine detail screen
+                    router.back();
+                    router.back();
+                    navigateToSession(result.sessionId);
+                    break;
+                case 'requestToApproveDirectoryCreation': {
+                    const approved = await Modal.confirm('Create Directory?', `The directory '${result.directory}' does not exist. Would you like to create it?`, { cancelText: t('common.cancel'), confirmText: t('common.create') });
+                    if (approved) {
+                        await handleStartSession(true);
+                    }
+                    break;
+                }
+                case 'error':
+                    Modal.alert(t('common.error'), result.errorMessage);
+                    break;
+            }
+        } catch (error) {
+            let errorMessage = 'Failed to start session. Make sure the daemon is running on the target machine.';
+            if (error instanceof Error && !error.message.includes('Failed to spawn session')) {
+                errorMessage = error.message;
+            }
+            Modal.alert(t('common.error'), errorMessage);
+        } finally {
+            setIsSpawning(false);
         }
     };
 
@@ -213,7 +261,7 @@ export default function MachineDetailScreen() {
                     options={{
                         headerShown: true,
                         headerTitle: '',
-                        headerBackTitle: 'Back'
+                        headerBackTitle: t('machine.back')
                     }}
                 />
                 <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
@@ -227,6 +275,8 @@ export default function MachineDetailScreen() {
 
     const metadata = machine.metadata;
     const machineName = metadata?.displayName || metadata?.host || 'unknown machine';
+
+    const spawnButtonDisabled = !customPath.trim() || isSpawning || !isMachineOnline(machine!);
 
     return (
         <>
@@ -258,7 +308,7 @@ export default function MachineDetailScreen() {
                                     fontSize: 12,
                                     color: isMachineOnline(machine) ? '#34C759' : '#999'
                                 }]}>
-                                    {isMachineOnline(machine) ? 'online' : 'offline'}
+                                    {isMachineOnline(machine) ? t('status.online') : t('status.offline')}
                                 </Text>
                             </View>
                         </View>
@@ -279,7 +329,7 @@ export default function MachineDetailScreen() {
                             />
                         </Pressable>
                     ),
-                    headerBackTitle: 'Back'
+                    headerBackTitle: t('machine.back')
                 }}
             />
             <ItemList
@@ -289,22 +339,96 @@ export default function MachineDetailScreen() {
                         onRefresh={handleRefresh}
                     />
                 }
+                keyboardShouldPersistTaps="handled"
             >
-                {/* Launch New Session section with launcher */}
-                <ItemGroup title="Launch New Session in Directory">
-                        <MachineSessionLauncher
-                            machineId={machineId!}
-                            recentPaths={recentPaths}
-                            homeDir={metadata?.homeDir}
-                            isOnline={isMachineOnline(machine)}
-                            onStartSession={handleStartSession}
-                        />
-                </ItemGroup>
+                {/* Launch section */}
+                {machine && (
+                    <>
+                        {!isMachineOnline(machine) && (
+                            <ItemGroup>
+                                <Item
+                                    title={t('machine.offlineUnableToSpawn')}
+                                    subtitle={t('machine.offlineHelp')}
+                                    subtitleLines={0}
+                                    showChevron={false}
+                                />
+                            </ItemGroup>
+                        )}
+                        <ItemGroup title={t('machine.launchNewSessionInDirectory')}>
+                        <View style={{ opacity: isMachineOnline(machine) ? 1 : 0.5 }}>
+                            <View style={styles.pathInputContainer}>
+                                <View style={[styles.pathInput, { paddingVertical: 8 }]}>
+                                    <MultiTextInput
+                                        ref={inputRef}
+                                        value={customPath}
+                                        onChangeText={setCustomPath}
+                                        placeholder={'Enter custom path'}
+                                        maxHeight={76}
+                                        paddingTop={8}
+                                        paddingBottom={8}
+                                        paddingRight={48}
+                                    />
+                                    <Pressable
+                                        onPress={() => handleStartSession()}
+                                        disabled={spawnButtonDisabled}
+                                        style={[
+                                            styles.inlineSendButton,
+                                            spawnButtonDisabled ? styles.inlineSendInactive : styles.inlineSendActive
+                                        ]}
+                                    >
+                                        <Ionicons
+                                            name="play"
+                                            size={16}
+                                            color={spawnButtonDisabled ? theme.colors.textSecondary : theme.colors.button.primary.tint}
+                                            style={{ marginLeft: 1 }}
+                                        />
+                                    </Pressable>
+                                </View>
+                            </View>
+                            <View style={{ paddingTop: 4 }} />
+                            {pathsToShow.map((path, index) => {
+                                const display = formatPathRelativeToHome(path, machine.metadata?.homeDir);
+                                const isSelected = customPath.trim() === display;
+                                const isLast = index === pathsToShow.length - 1;
+                                const hideDivider = isLast && pathsToShow.length <= 5;
+                                return (
+                                    <Item
+                                        key={path}
+                                        title={display}
+                                        leftElement={<Ionicons name="folder-outline" size={18} color={theme.colors.textSecondary} />}
+                                        onPress={isMachineOnline(machine) ? () => {
+                                            setCustomPath(display);
+                                            setTimeout(() => inputRef.current?.focus(), 50);
+                                        } : undefined}
+                                        disabled={!isMachineOnline(machine)}
+                                        selected={isSelected}
+                                        showChevron={false}
+                                        pressableStyle={isSelected ? { backgroundColor: theme.colors.surfaceSelected } : undefined}
+                                        showDivider={!hideDivider}
+                                    />
+                                );
+                            })}
+                            {recentPaths.length > 5 && (
+                                <Item
+                                    title={showAllPaths ? t('machineLauncher.showLess') : t('machineLauncher.showAll', { count: recentPaths.length })}
+                                    onPress={() => setShowAllPaths(!showAllPaths)}
+                                    showChevron={false}
+                                    showDivider={false}
+                                    titleStyle={{
+                                        textAlign: 'center',
+                                        color: (theme as any).dark ? theme.colors.button.primary.tint : theme.colors.button.primary.background
+                                    }}
+                                />
+                            )}
+                        </View>
+                        </ItemGroup>
+                    </>
+                )}
 
                 {/* Daemon */}
-                <ItemGroup title="Daemon">
+                <ItemGroup title={t('machine.daemon')}>
                         <Item
-                            title="Status"
+                            title={t('machine.status')}
                             detail={daemonStatus}
                             detailStyle={{
                                 color: daemonStatus === 'likely alive' ? '#34C759' : '#FF9500'
@@ -312,7 +436,7 @@ export default function MachineDetailScreen() {
                             showChevron={false}
                         />
                         <Item
-                            title="Stop Daemon"
+                            title={t('machine.stopDaemon')}
                             titleStyle={{ 
                                 color: daemonStatus === 'stopped' ? '#999' : '#FF9500' 
                             }}
@@ -334,27 +458,27 @@ export default function MachineDetailScreen() {
                             <>
                                 {machine.daemonState.pid && (
                                     <Item
-                                        title="Last Known PID"
+                                        title={t('machine.lastKnownPid')}
                                         subtitle={String(machine.daemonState.pid)}
                                         subtitleStyle={{ fontFamily: 'Menlo', fontSize: 13 }}
                                     />
                                 )}
                                 {machine.daemonState.httpPort && (
                                     <Item
-                                        title="Last Known HTTP Port"
+                                        title={t('machine.lastKnownHttpPort')}
                                         subtitle={String(machine.daemonState.httpPort)}
                                         subtitleStyle={{ fontFamily: 'Menlo', fontSize: 13 }}
                                     />
                                 )}
                                 {machine.daemonState.startTime && (
                                     <Item
-                                        title="Started At"
+                                        title={t('machine.startedAt')}
                                         subtitle={new Date(machine.daemonState.startTime).toLocaleString()}
                                     />
                                 )}
                                 {machine.daemonState.startedWithCliVersion && (
                                     <Item
-                                        title="CLI Version"
+                                        title={t('machine.cliVersion')}
                                         subtitle={machine.daemonState.startedWithCliVersion}
                                         subtitleStyle={{ fontFamily: 'Menlo', fontSize: 13 }}
                                     />
@@ -362,68 +486,68 @@ export default function MachineDetailScreen() {
                             </>
                         )}
                         <Item
-                            title="Daemon State Version"
+                            title={t('machine.daemonStateVersion')}
                             subtitle={String(machine.daemonStateVersion)}
                         />
                 </ItemGroup>
 
-                {/* Active Sessions */}
-                {machineSessions.length > 0 && (
-                    <ItemGroup title={`Active Sessions (${machineSessions.length})`}>
-                        {machineSessions.slice(0, 5).map(session => (
-                                <Item
-                                    key={session.id}
-                                    title={pastUsedRelativePath(session)}
-                                    subtitle={session.metadata?.name || 'Untitled Session'}
-                                    onPress={() => router.push(`/session/${session.id}`)}
-                                    rightElement={<Ionicons name="chevron-forward" size={20} color="#C7C7CC" />}
-                                />
-                            ))}
+                {/* Previous Sessions (debug view) */}
+                {previousSessions.length > 0 && (
+                    <ItemGroup title={'Previous Sessions (up to 5 most recent)'}>
+                        {previousSessions.map(session => (
+                            <Item
+                                key={session.id}
+                                title={getSessionName(session)}
+                                subtitle={getSessionSubtitle(session)}
+                                onPress={() => navigateToSession(session.id)}
+                                rightElement={<Ionicons name="chevron-forward" size={20} color="#C7C7CC" />}
+                            />
+                        ))}
                     </ItemGroup>
                 )}
 
                 {/* Machine */}
-                <ItemGroup title="Machine">
+                <ItemGroup title={t('machine.machineGroup')}>
                         <Item
-                            title="Host"
+                            title={t('machine.host')}
                             subtitle={metadata?.host || machineId}
                         />
                         <Item
-                            title="Machine ID"
+                            title={t('machine.machineId')}
                             subtitle={machineId}
                             subtitleStyle={{ fontFamily: 'Menlo', fontSize: 12 }}
                         />
                         {metadata?.username && (
                             <Item
-                                title="Username"
+                                title={t('machine.username')}
                                 subtitle={metadata.username}
                             />
                         )}
                         {metadata?.homeDir && (
                             <Item
-                                title="Home Directory"
+                                title={t('machine.homeDirectory')}
                                 subtitle={metadata.homeDir}
                                 subtitleStyle={{ fontFamily: 'Menlo', fontSize: 13 }}
                             />
                         )}
                         {metadata?.platform && (
                             <Item
-                                title="Platform"
+                                title={t('machine.platform')}
                                 subtitle={metadata.platform}
                             />
                         )}
                         {metadata?.arch && (
                             <Item
-                                title="Architecture"
+                                title={t('machine.architecture')}
                                 subtitle={metadata.arch}
                             />
                         )}
                         <Item
-                            title="Last Seen"
-                            subtitle={machine.activeAt ? new Date(machine.activeAt).toLocaleString() : 'Never'}
+                            title={t('machine.lastSeen')}
+                            subtitle={machine.activeAt ? new Date(machine.activeAt).toLocaleString() : t('machine.never')}
                         />
                         <Item
-                            title="Metadata Version"
+                            title={t('machine.metadataVersion')}
                             subtitle={String(machine.metadataVersion)}
                         />
                 </ItemGroup>

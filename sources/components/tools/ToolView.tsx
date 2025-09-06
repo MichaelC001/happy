@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { Text, View, TouchableOpacity, ActivityIndicator, Platform } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, Octicons } from '@expo/vector-icons';
 import { getToolViewComponent } from './views/_all';
 import { Message, ToolCall } from '@/sync/typesMessage';
 import { CodeView } from '../CodeView';
@@ -14,6 +14,7 @@ import { useRouter } from 'expo-router';
 import { PermissionFooter } from './PermissionFooter';
 import { parseToolUseError } from '@/utils/toolErrorParser';
 import { formatMCPTitle } from './views/MCPToolView';
+import { t } from '@/text';
 
 interface ToolViewProps {
     metadata: Metadata | null;
@@ -80,12 +81,28 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
             description = subtitle;
         }
     }
-    if (knownTool && typeof knownTool.minimal === 'boolean') {
-        minimal = knownTool.minimal;
+    if (knownTool && knownTool.minimal !== undefined) {
+        if (typeof knownTool.minimal === 'function') {
+            minimal = knownTool.minimal({ tool, metadata: props.metadata, messages: props.messages });
+        } else {
+            minimal = knownTool.minimal;
+        }
     }
-    if (knownTool && typeof knownTool.icon === 'function') {
+    
+    // Special handling for CodexBash to determine icon based on parsed_cmd
+    if (tool.name === 'CodexBash' && tool.input?.parsed_cmd && Array.isArray(tool.input.parsed_cmd) && tool.input.parsed_cmd.length > 0) {
+        const parsedCmd = tool.input.parsed_cmd[0];
+        if (parsedCmd.type === 'read') {
+            icon = <Octicons name="eye" size={18} color={theme.colors.text} />;
+        } else if (parsedCmd.type === 'write') {
+            icon = <Octicons name="file-diff" size={18} color={theme.colors.text} />;
+        } else {
+            icon = <Octicons name="terminal" size={18} color={theme.colors.text} />;
+        }
+    } else if (knownTool && typeof knownTool.icon === 'function') {
         icon = knownTool.icon(18, theme.colors.text);
     }
+    
     if (knownTool && typeof knownTool.noStatus === 'boolean') {
         noStatus = knownTool.noStatus;
     }
@@ -212,13 +229,13 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                     <View style={styles.content}>
                         {/* Default content when no custom view available */}
                         {tool.input && (
-                            <ToolSectionView title="Input">
+                            <ToolSectionView title={t('toolView.input')}>
                                 <CodeView code={JSON.stringify(tool.input, null, 2)} />
                             </ToolSectionView>
                         )}
 
                         {tool.state === 'completed' && tool.result && (
-                            <ToolSectionView title="Output">
+                            <ToolSectionView title={t('toolView.output')}>
                                 <CodeView
                                     code={typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}
                                 />
@@ -230,7 +247,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
 
             {/* Permission footer - always renders when permission exists to maintain consistent height */}
             {tool.permission && sessionId && (
-                <PermissionFooter permission={tool.permission} sessionId={sessionId} toolName={tool.name} toolInput={tool.input} />
+                <PermissionFooter permission={tool.permission} sessionId={sessionId} toolName={tool.name} toolInput={tool.input} metadata={props.metadata} />
             )}
         </View>
     );

@@ -1,11 +1,11 @@
 import * as React from 'react';
 import { useRoute } from "@react-navigation/native";
 import { useState, useMemo, useCallback } from "react";
-import { View, ActivityIndicator, Platform } from "react-native";
+import { View, ActivityIndicator, Platform, Text } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useNavigation, useRouter } from "expo-router";
 import { getSessionName, useSessionStatus, getSessionAvatarId, formatPathRelativeToHome } from "@/utils/sessionUtils";
-import { useSession, useSessionMessages, useSessionUsage, useSetting, useRealtimeStatus, storage } from '@/sync/storage';
+import { useSession, useSessionMessages, useSessionUsage, useSetting, useRealtimeStatus, storage, useLocalSetting } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { sessionAbort } from '@/sync/ops';
 import { EmptyMessages } from '@/components/EmptyMessages';
@@ -30,6 +30,8 @@ import { gitStatusSync } from '@/sync/gitStatusSync';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { useUnistyles } from 'react-native-unistyles';
 import { ChatList } from '@/components/ChatList';
+import { t } from '@/text';
+import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
 
 
 export default React.memo(() => {
@@ -37,6 +39,7 @@ export default React.memo(() => {
     const sessionId = (route.params! as any).id as string;
     const session = useSession(sessionId);
     const { theme } = useUnistyles();
+
     if (!session) {
         return (
             <View style={{ flexGrow: 1, flexBasis: 0, justifyContent: 'center', alignItems: 'center' }}>
@@ -45,7 +48,7 @@ export default React.memo(() => {
         )
     }
     return (
-        <SessionView sessionId={sessionId} session={session} />
+        <SessionView key={sessionId} sessionId={sessionId} session={session} />
     );
 });
 
@@ -61,6 +64,14 @@ function SessionView({ sessionId, session }: { sessionId: string, session: Sessi
     const [message, setMessage] = useState('');
     const realtimeStatus = useRealtimeStatus();
     const { messages, isLoaded } = useSessionMessages(sessionId);
+    const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
+    
+    // Check if CLI version is outdated and not already acknowledged
+    const cliVersion = session.metadata?.version;
+    const machineId = session.metadata?.machineId;
+    const isCliOutdated = cliVersion && !isVersionSupported(cliVersion, MINIMUM_CLI_VERSION);
+    const isAcknowledged = machineId && acknowledgedCliVersions[machineId] === cliVersion;
+    const shouldShowCliWarning = isCliOutdated && !isAcknowledged;
     // Get permission mode from session object, default to 'default'
     const permissionMode = session.permissionMode || 'default';
     // Get model mode from session object, default to 'default'
@@ -72,14 +83,26 @@ function SessionView({ sessionId, session }: { sessionId: string, session: Sessi
 
     // Use draft hook for auto-saving message drafts
     const { clearDraft } = useDraft(sessionId, message, setMessage);
+    
+    // Handle dismissing CLI version warning
+    const handleDismissCliWarning = useCallback(() => {
+        if (machineId && cliVersion) {
+            storage.getState().applyLocalSettings({
+                acknowledgedCliVersions: {
+                    ...acknowledgedCliVersions,
+                    [machineId]: cliVersion
+                }
+            });
+        }
+    }, [machineId, cliVersion, acknowledgedCliVersions]);
 
     // Function to update permission mode
-    const updatePermissionMode = useCallback((mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan') => {
+    const updatePermissionMode = useCallback((mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'read-only' | 'safe-yolo' | 'yolo') => {
         storage.getState().updateSessionPermissionMode(sessionId, mode);
     }, [sessionId]);
 
     // Function to update model mode
-    const updateModelMode = useCallback((mode: 'default' | 'adaptiveUsage' | 'sonnet' | 'opus') => {
+    const updateModelMode = useCallback((mode: 'default' | 'adaptiveUsage' | 'sonnet' | 'opus' | 'gpt-5-minimal' | 'gpt-5-low' | 'gpt-5-medium' | 'gpt-5-high') => {
         storage.getState().updateSessionModelMode(sessionId, mode);
     }, [sessionId]);
 
@@ -106,7 +129,7 @@ function SessionView({ sessionId, session }: { sessionId: string, session: Sessi
                 tracking?.capture('voice_session_started', { sessionId });
             } catch (error) {
                 console.error('Failed to start realtime session:', error);
-                Modal.alert('Error', 'Failed to start voice session');
+                Modal.alert(t('common.error'), t('errors.voiceSessionFailed'));
                 tracking?.capture('voice_session_error', { error: error instanceof Error ? error.message : 'Unknown error' });
             }
         } else if (realtimeStatus === 'connected') {
@@ -160,7 +183,7 @@ function SessionView({ sessionId, session }: { sessionId: string, session: Sessi
 
     const input = (
         <AgentInput
-            placeholder="Type a message ..."
+            placeholder={t('session.inputPlaceholder')}
             value={message}
             onChangeText={setMessage}
             sessionId={sessionId}
@@ -168,6 +191,7 @@ function SessionView({ sessionId, session }: { sessionId: string, session: Sessi
             onPermissionModeChange={updatePermissionMode}
             modelMode={modelMode}
             onModelModeChange={updateModelMode}
+            metadata={session.metadata}
             connectionStatus={{
                 text: sessionStatus.statusText,
                 color: sessionStatus.statusColor,
@@ -196,6 +220,12 @@ function SessionView({ sessionId, session }: { sessionId: string, session: Sessi
                 cacheCreation: sessionUsage.cacheCreation,
                 cacheRead: sessionUsage.cacheRead,
                 contextSize: sessionUsage.contextSize
+            } : session.latestUsage ? {
+                inputTokens: session.latestUsage.inputTokens,
+                outputTokens: session.latestUsage.outputTokens,
+                cacheCreation: session.latestUsage.cacheCreation,
+                cacheRead: session.latestUsage.cacheRead,
+                contextSize: session.latestUsage.contextSize
             } : undefined}
             alwaysShowContextSize={alwaysShowContextSize}
         />
@@ -242,6 +272,7 @@ function SessionView({ sessionId, session }: { sessionId: string, session: Sessi
                         avatarId={getSessionAvatarId(session)}
                         tintColor={sessionStatus.isConnected ? '#000' : '#8E8E93'}
                         isConnected={sessionStatus.isConnected}
+                        flavor={session.metadata?.flavor}
                     />
                 </View>
             )}
@@ -259,6 +290,39 @@ function SessionView({ sessionId, session }: { sessionId: string, session: Sessi
                 </View>
             )}
 
+            {/* CLI Version Warning Overlay - Subtle centered pill */}
+            {shouldShowCliWarning && !(isLandscape && deviceType === 'phone') && (
+                <Pressable
+                    onPress={handleDismissCliWarning}
+                    style={{
+                        position: 'absolute',
+                        top: safeArea.top + headerHeight + ((!isTablet && realtimeStatus !== 'disconnected') ? 48 : 0) + 8, // Position below header and voice bar if present
+                        alignSelf: 'center',
+                        backgroundColor: '#FFF3CD',
+                        borderRadius: 100, // Fully rounded pill
+                        paddingHorizontal: 14,
+                        paddingVertical: 7,
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        zIndex: 998, // Below voice bar but above content
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 2 },
+                        shadowOpacity: 0.15,
+                        shadowRadius: 4,
+                        elevation: 4,
+                    }}
+                >
+                    <Ionicons name="warning-outline" size={14} color="#FF9500" style={{ marginRight: 6 }} />
+                    <Text style={{ 
+                        fontSize: 12, 
+                        color: '#856404',
+                        fontWeight: '600'
+                    }}>
+                        {t('sessionInfo.cliVersionOutdated')}
+                    </Text>
+                    <Ionicons name="close" size={14} color="#856404" style={{ marginLeft: 8 }} />
+                </Pressable>
+            )}
 
             {/* Main content area - no padding since header is overlay */}
             <View style={{ flexBasis: 0, flexGrow: 1, paddingBottom: safeArea.bottom + ((isRunningOnMac() || Platform.OS === 'web') ? 32 : 0) }}>

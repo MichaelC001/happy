@@ -1,10 +1,11 @@
 import * as React from 'react';
 import { ToolViewProps } from './_all';
-import { Text, View, ActivityIndicator, StyleSheet } from 'react-native';
+import { Text, View, ActivityIndicator, StyleSheet, Platform } from 'react-native';
 import { knownTools } from '../../tools/knownTools';
 import { Ionicons } from '@expo/vector-icons';
 import { ToolCall } from '@/sync/typesMessage';
 import { useUnistyles } from 'react-native-unistyles';
+import { t } from '@/text';
 
 interface FilteredTool {
     tool: ToolCall;
@@ -92,17 +93,7 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
     });
 
     if (filtered.length === 0) {
-        if (tool.state === 'error') {
-            return null;
-        }
-        return (
-            <View style={styles.container}>
-                <View style={styles.loadingItem}>
-                    <ActivityIndicator size="small" color={theme.colors.textSecondary} />
-                    <Text style={styles.loadingText}>Initializing agent...</Text>
-                </View>
-            </View>
-        );
+        return null;
     }
 
     const visibleTools = filtered.slice(filtered.length - 3);
@@ -115,7 +106,7 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
                     <Text style={styles.toolTitle}>{item.title}</Text>
                     <View style={styles.statusContainer}>
                         {item.state === 'running' && (
-                            <ActivityIndicator size="small" color={theme.colors.warning} />
+                            <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={theme.colors.warning} />
                         )}
                         {item.state === 'completed' && (
                             <Ionicons name="checkmark-circle" size={16} color={theme.colors.success} />
@@ -129,7 +120,7 @@ export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages })
             {remainingCount > 0 && (
                 <View style={styles.moreToolsItem}>
                     <Text style={styles.moreToolsText}>
-                        +{remainingCount} more tool{remainingCount > 1 ? 's' : ''}
+                        {t('tools.taskView.moreTools', { count: remainingCount })}
                     </Text>
                 </View>
             )}

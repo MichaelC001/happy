@@ -1,19 +1,16 @@
 import React from 'react';
 import { View, Text, ScrollView, ActivityIndicator, Platform, Pressable } from 'react-native';
+import { ItemGroup } from '@/components/ItemGroup';
+import { Item } from '@/components/Item';
 import { Typography } from '@/constants/Typography';
 import { useSessions, useAllMachines } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
-import type { Session } from '@/sync/storageTypes';
-import { machineSpawnNewSession } from '@/sync/ops';
-import { storage } from '@/sync/storage';
-import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { useRouter } from 'expo-router';
 import { Stack } from 'expo-router';
-import { Modal } from '@/modal';
 import { isMachineOnline } from '@/utils/machineUtils';
-import { MachineSessionLauncher } from '@/components/MachineSessionLauncher';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
+import { t } from '@/text';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -148,6 +145,7 @@ export default function NewSessionScreen() {
     const router = useRouter();
     const sessions = useSessions();
     const machines = useAllMachines();
+    
 
     // Group sessions by machineId and combine with machine status
     const machineGroups = React.useMemo(() => {
@@ -177,7 +175,7 @@ export default function NewSessionScreen() {
             sessions.forEach(item => {
                 if (typeof item === 'string') return; // Skip section headers
 
-                const session = item as Session;
+                const session = item as any;
                 if (session.metadata?.machineId) {
                     const machineId = session.metadata.machineId;
 
@@ -196,70 +194,6 @@ export default function NewSessionScreen() {
         return groups;
     }, [sessions, machines]);
 
-    const handleStartSession = async (machineId: string, path: string) => {
-        try {
-            // Get the machine metadata to access home directory
-            const machine = machines.find(m => m.id === machineId);
-            const homeDir = machine?.metadata?.homeDir;
-            
-            // Resolve ~ paths to absolute paths before sending to daemon
-            const absolutePath = resolveAbsolutePath(path, homeDir);
-            
-            console.log(`🚀 Starting session on machine ${machineId} at path: ${path} (resolved to: ${absolutePath})`);
-            const result = await machineSpawnNewSession(machineId, absolutePath);
-            console.log('🎉 daemon result', result);
-
-            if (result.sessionId) {
-                console.log('✅ Session spawned successfully:', result.sessionId);
-
-                // Poll for the session to appear in our local state
-                const pollInterval = 100;
-                const maxAttempts = 20;
-                let attempts = 0;
-
-                const pollForSession = () => {
-                    const state = storage.getState();
-                    const newSession = Object.values(state.sessions).find((s: Session) => s.id === result.sessionId);
-
-                    if (newSession) {
-                        console.log('📱 Navigating to session:', result.sessionId);
-                        router.replace(`/session/${result.sessionId}`);
-                        return;
-                    }
-
-                    attempts++;
-                    if (attempts < maxAttempts) {
-                        setTimeout(pollForSession, pollInterval);
-                    } else {
-                        console.log('⏰ Polling timeout - session should appear soon');
-                        Modal.alert('Session started', 'The session was started but may take a moment to appear.');
-                        router.back();
-                    }
-                };
-
-                pollForSession();
-            } else {
-                console.error('❌ No sessionId in response:', result);
-                Modal.alert('Error', 'Session spawning failed - no session ID returned.');
-                throw new Error('Session spawning failed - no session ID returned.');
-            }
-        } catch (error) {
-            console.error('💥 Failed to start session', error);
-
-            let errorMessage = 'Failed to start session. Make sure the daemon is running on the target machine.';
-            if (error instanceof Error) {
-                if (error.message.includes('timeout')) {
-                    errorMessage = 'Session startup timed out. The machine may be slow or the daemon may not be responding.';
-                } else if (error.message.includes('Socket not connected')) {
-                    errorMessage = 'Not connected to server. Check your internet connection.';
-                }
-            }
-
-            Modal.alert('Error', errorMessage);
-            throw error; // Re-throw so the component knows it failed
-        }
-    };
-
 
     if (!sessions) {
         return (
@@ -276,20 +210,29 @@ export default function NewSessionScreen() {
         return (b.createdAt || 0) - (a.createdAt || 0);
     });
 
+    // If there is only one machine, go directly to its detail screen
+    // To reduce cognitive load on new users with a single machine
+    if (machines.length === 1) {
+        const singleId = machines[0].id;
+        // Navigate and render nothing (or could show a tiny spinner)
+        setTimeout(() => router.push(`/machine/${singleId}`), 0);
+        return null;
+    }
+
     return (
         <>
             <Stack.Screen
                 options={{
                     headerShown: true,
-                    headerTitle: 'Start New Session',
-                    headerBackTitle: 'Back'
+                    headerTitle: t('newSession.title'),
+                    headerBackTitle: t('common.back')
                 }}
             />
             <View style={styles.container}>
                 {sortedMachines.length === 0 ? (
                     <View style={styles.emptyContainer}>
                         <Text style={styles.emptyText}>
-                            No machines found. Start a Happy session on your computer first.
+                            {t('newSession.noMachinesFound')}
                         </Text>
                     </View>
                 ) : (
@@ -302,85 +245,37 @@ export default function NewSessionScreen() {
                             {sortedMachines.every(([, data]) => !data.isOnline) && (
                                 <View style={styles.offlineWarning}>
                                     <Text style={styles.offlineWarningTitle}>
-                                        All machines appear offline
+                                        {t('newSession.allMachinesOffline')}
                                     </Text>
                                     <View style={{ marginTop: 4 }}>
                                         <Text style={styles.offlineWarningText}>
-                                            • Is your computer online?
-                                        </Text>
-                                        <Text style={styles.offlineWarningText}>
-                                            • Is the Happy daemon running? Check with `happy daemon status`
+                                            {t('machine.offlineHelp')}
                                         </Text>
                                     </View>
                                 </View>
                             )}
-                            {sortedMachines.map(([machineId, data]) => {
-                                const machine = machines.find(m => m.id === machineId);
-                                if (!machine) return null;
-
-                                // Get home directory and display name from machine metadata
-                                const homeDir = machine.metadata?.homeDir || '~';
-                                const displayName = machine.metadata?.displayName || data.machineHost;
-                                const hostName = machine.metadata?.host || machineId;
-
-                                return (
-                                    <View key={machineId} style={styles.machineCard}>
-                                        <View style={styles.machineHeader}>
-                                            <View style={styles.machineHeaderTop}>
-                                                <View style={styles.machineInfo}>
-                                                    <View style={styles.machineIcon}>
-                                                        <Ionicons
-                                                            name="desktop-outline"
-                                                            size={24}
-                                                            color={data.isOnline ? theme.colors.status.connected : theme.colors.status.disconnected}
-                                                        />
-                                                    </View>
-                                                    <View style={styles.machineTextContainer}>
-                                                        <Text style={styles.machineName}>
-                                                            {displayName}
-                                                        </Text>
-                                                        {displayName !== hostName && (
-                                                            <Text style={styles.machineHost}>
-                                                                {hostName}
-                                                            </Text>
-                                                        )}
-                                                    </View>
-                                                </View>
-                                                <View style={styles.statusContainer}>
-                                                    <View style={[
-                                                        styles.statusDot,
-                                                        { backgroundColor: data.isOnline ? theme.colors.status.connected : theme.colors.status.disconnected }
-                                                    ]} />
-                                                    <Text style={[
-                                                        styles.statusText,
-                                                        { color: data.isOnline ? theme.colors.status.connected : theme.colors.status.disconnected }
-                                                    ]}>
-                                                        {data.isOnline ? 'online' : 'offline'}
-                                                    </Text>
-                                                </View>
-                                            </View>
-                                            <Pressable
-                                                onPress={() => router.push(`/machine/${machineId}`)}
-                                                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                                                style={styles.detailsButton}
-                                            >
-                                                <Text style={styles.detailsButtonText}>
-                                                    View machine details →
-                                                </Text>
-                                            </Pressable>
-                                        </View>
-                                        <MachineSessionLauncher
-                                            machineId={machineId}
-                                            recentPaths={Array.from(data.pathsWithTimestamps.entries())
-                                                .sort((a, b) => b[1] - a[1]) // Sort by timestamp (most recent first)
-                                                .map(([path]) => path)} // Extract just the paths
-                                            homeDir={homeDir}
-                                            isOnline={data.isOnline}
-                                            onStartSession={(path) => handleStartSession(machineId, path)}
+                            <ItemGroup title="Machines">
+                                {sortedMachines.map(([machineId, data], index) => {
+                                    const machine = machines.find(m => m.id === machineId);
+                                    if (!machine) return null;
+                                    const displayName = machine.metadata?.displayName || data.machineHost;
+                                    const hostName = machine.metadata?.host || machineId;
+                                    const offline = !data.isOnline;
+                                    return (
+                                        <Item
+                                            key={machineId}
+                                            title={displayName}
+                                            subtitle={displayName !== hostName ? hostName : undefined}
+                                            leftElement={<Ionicons name="desktop-outline" size={24} color={offline ? theme.colors.textSecondary : theme.colors.text} />}
+                                            detail={offline ? 'offline' : 'online'}
+                                            detailStyle={{ color: offline ? theme.colors.status.disconnected : theme.colors.status.connected }}
+                                            titleStyle={{ color: offline ? theme.colors.textSecondary : theme.colors.text }}
+                                            subtitleStyle={{ color: theme.colors.textSecondary }}
+                                            onPress={() => router.push(`/machine/${machineId}`)}
                                         />
-                                    </View>
-                                );
-                            })}
+                                    );
+                                })}
+                            </ItemGroup>
                         </View>
                     </ScrollView>
                 )}

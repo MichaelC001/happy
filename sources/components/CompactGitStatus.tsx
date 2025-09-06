@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text } from 'react-native';
-import { useSessionGitStatus } from '@/sync/storage';
+import { useSessionGitStatus, useSessionProjectGitStatus } from '@/sync/storage';
 import { GitStatus } from '@/sync/storageTypes';
 import { StyleSheet } from 'react-native-unistyles';
 import { Ionicons } from '@expo/vector-icons';
@@ -42,7 +42,10 @@ interface CompactGitStatusProps {
 
 export function CompactGitStatus({ sessionId }: CompactGitStatusProps) {
     const styles = stylesheet;
-    const gitStatus = useSessionGitStatus(sessionId);
+    // Use project git status first, fallback to session git status for backward compatibility
+    const projectGitStatus = useSessionProjectGitStatus(sessionId);
+    const sessionGitStatus = useSessionGitStatus(sessionId);
+    const gitStatus = projectGitStatus || sessionGitStatus;
 
     // Don't render if no git status or no meaningful changes
     if (!gitStatus || !hasMeaningfulChanges(gitStatus)) {

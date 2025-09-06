@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, ActivityIndicator, StyleSheet, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { sessionAllow, sessionDeny } from '@/sync/ops';
 import { useUnistyles } from 'react-native-unistyles';
 import { storage } from '@/sync/storage';
+import { t } from '@/text';
 
 interface PermissionFooterProps {
     permission: {
@@ -12,17 +13,22 @@ interface PermissionFooterProps {
         reason?: string;
         mode?: string;
         allowedTools?: string[];
+        decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
     };
     sessionId: string;
     toolName: string;
     toolInput?: any;
+    metadata?: any;
 }
 
-export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, sessionId, toolName, toolInput }) => {
+export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, sessionId, toolName, toolInput, metadata }) => {
     const { theme } = useUnistyles();
-    const [loadingButton, setLoadingButton] = useState<'allow' | 'deny' | null>(null);
+    const [loadingButton, setLoadingButton] = useState<'allow' | 'deny' | 'abort' | null>(null);
     const [loadingAllEdits, setLoadingAllEdits] = useState(false);
     const [loadingForSession, setLoadingForSession] = useState(false);
+    
+    // Check if this is a Codex session - check both metadata.flavor and tool name prefix
+    const isCodex = metadata?.flavor === 'codex' || toolName.startsWith('Codex');
 
     const handleApprove = async () => {
         if (permission.status !== 'pending' || loadingButton !== null || loadingAllEdits || loadingForSession) return;
@@ -84,6 +90,46 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
             setLoadingButton(null);
         }
     };
+    
+    // Codex-specific handlers
+    const handleCodexApprove = async () => {
+        if (permission.status !== 'pending' || loadingButton !== null || loadingForSession) return;
+        
+        setLoadingButton('allow');
+        try {
+            await sessionAllow(sessionId, permission.id, undefined, undefined, 'approved');
+        } catch (error) {
+            console.error('Failed to approve permission:', error);
+        } finally {
+            setLoadingButton(null);
+        }
+    };
+    
+    const handleCodexApproveForSession = async () => {
+        if (permission.status !== 'pending' || loadingButton !== null || loadingForSession) return;
+        
+        setLoadingForSession(true);
+        try {
+            await sessionAllow(sessionId, permission.id, undefined, undefined, 'approved_for_session');
+        } catch (error) {
+            console.error('Failed to approve for session:', error);
+        } finally {
+            setLoadingForSession(false);
+        }
+    };
+    
+    const handleCodexAbort = async () => {
+        if (permission.status !== 'pending' || loadingButton !== null || loadingForSession) return;
+        
+        setLoadingButton('abort');
+        try {
+            await sessionDeny(sessionId, permission.id, undefined, undefined, 'abort');
+        } catch (error) {
+            console.error('Failed to abort permission:', error);
+        } finally {
+            setLoadingButton(null);
+        }
+    };
 
     const isApproved = permission.status === 'approved';
     const isDenied = permission.status === 'denied';
@@ -105,49 +151,51 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
         return false;
     };
 
-    // Detect which button was used based on mode
+    // Detect which button was used based on mode (for Claude) or decision (for Codex)
     const isApprovedViaAllow = isApproved && permission.mode !== 'acceptEdits' && !isToolAllowed(toolName, toolInput, permission.allowedTools);
     const isApprovedViaAllEdits = isApproved && permission.mode === 'acceptEdits';
     const isApprovedForSession = isApproved && isToolAllowed(toolName, toolInput, permission.allowedTools);
+    
+    // Codex-specific status detection with fallback
+    const isCodexApproved = isCodex && isApproved && (permission.decision === 'approved' || !permission.decision);
+    const isCodexApprovedForSession = isCodex && isApproved && permission.decision === 'approved_for_session';
+    const isCodexAborted = isCodex && isDenied && permission.decision === 'abort';
 
     const styles = StyleSheet.create({
         container: {
-            minHeight: 60,
             paddingHorizontal: 12,
-            paddingVertical: 10,
+            paddingVertical: 8,
             justifyContent: 'center',
         },
         buttonContainer: {
-            flexDirection: 'row',
-            gap: 10,
+            flexDirection: 'column',
+            gap: 4,
+            alignItems: 'flex-start',
         },
         button: {
-            flex: 1,
-            paddingHorizontal: 20,
-            paddingVertical: 12,
-            borderRadius: 8,
-            backgroundColor: theme.colors.permissionButton.inactive.background,
-            alignItems: 'center',
+            paddingHorizontal: 12,
+            paddingVertical: 8,
+            borderRadius: 1,
+            backgroundColor: 'transparent',
+            alignItems: 'flex-start',
             justifyContent: 'center',
-            height: 44,
-            borderWidth: 1,
-            borderColor: theme.colors.permissionButton.inactive.border,
+            minHeight: 32,
+            borderLeftWidth: 3,
+            borderLeftColor: 'transparent',
+            alignSelf: 'stretch',
         },
         buttonAllow: {
-            backgroundColor: theme.colors.permissionButton.allow.background,
-            borderColor: theme.colors.permissionButton.allow.background,
+            backgroundColor: 'transparent',
         },
         buttonDeny: {
-            backgroundColor: theme.colors.permissionButton.deny.background,
-            borderColor: theme.colors.permissionButton.deny.background,
+            backgroundColor: 'transparent',
         },
         buttonAllowAll: {
-            backgroundColor: theme.colors.permissionButton.allowAll.background,
-            borderColor: theme.colors.permissionButton.allowAll.background,
+            backgroundColor: 'transparent',
         },
         buttonSelected: {
-            backgroundColor: theme.colors.permissionButton.selected.background,
-            borderColor: theme.colors.permissionButton.selected.border,
+            backgroundColor: 'transparent',
+            borderLeftColor: theme.colors.text,
         },
         buttonInactive: {
             opacity: 0.3,
@@ -156,34 +204,38 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
             flexDirection: 'row',
             alignItems: 'center',
             gap: 4,
+            minHeight: 20,
         },
         icon: {
             marginRight: 2,
         },
         buttonText: {
-            fontSize: 15,
-            fontWeight: '500',
-            color: theme.colors.permissionButton.inactive.text,
+            fontSize: 14,
+            fontWeight: '400',
+            color: theme.colors.textSecondary,
         },
         buttonTextAllow: {
-            color: theme.colors.permissionButton.allow.text,
+            color: theme.colors.permissionButton.allow.background,
+            fontWeight: '500',
         },
         buttonTextDeny: {
-            color: theme.colors.permissionButton.deny.text,
+            color: theme.colors.permissionButton.deny.background,
+            fontWeight: '500',
         },
         buttonTextAllowAll: {
-            color: theme.colors.permissionButton.allowAll.text,
+            color: theme.colors.permissionButton.allowAll.background,
+            fontWeight: '500',
         },
         buttonTextSelected: {
-            color: theme.colors.permissionButton.selected.text,
-            fontWeight: '600',
+            color: theme.colors.text,
+            fontWeight: '500',
         },
         buttonForSession: {
-            backgroundColor: theme.colors.permissionButton.allowAll.background,
-            borderColor: theme.colors.permissionButton.allowAll.background,
+            backgroundColor: 'transparent',
         },
         buttonTextForSession: {
-            color: theme.colors.permissionButton.allowAll.text,
+            color: theme.colors.permissionButton.allowAll.background,
+            fontWeight: '500',
         },
         loadingIndicatorAllow: {
             color: theme.colors.permissionButton.allow.background,
@@ -205,6 +257,103 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
         },
     });
 
+    // Render Codex buttons if this is a Codex session
+    if (isCodex) {
+        return (
+            <View style={styles.container}>
+                <View style={styles.buttonContainer}>
+                    {/* Codex: Yes button */}
+                    <TouchableOpacity
+                        style={[
+                            styles.button,
+                            isPending && styles.buttonAllow,
+                            isCodexApproved && styles.buttonSelected,
+                            (isCodexAborted || isCodexApprovedForSession) && styles.buttonInactive
+                        ]}
+                        onPress={handleCodexApprove}
+                        disabled={!isPending || loadingButton !== null || loadingForSession}
+                        activeOpacity={isPending ? 0.7 : 1}
+                    >
+                        {loadingButton === 'allow' && isPending ? (
+                            <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
+                                <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={styles.loadingIndicatorAllow.color} />
+                            </View>
+                        ) : (
+                            <View style={styles.buttonContent}>
+                                <Text style={[
+                                    styles.buttonText,
+                                    isPending && styles.buttonTextAllow,
+                                    isCodexApproved && styles.buttonTextSelected
+                                ]} numberOfLines={1} ellipsizeMode="tail">
+                                    {t('common.yes')}
+                                </Text>
+                            </View>
+                        )}
+                    </TouchableOpacity>
+
+                    {/* Codex: Yes, and don't ask for a session button */}
+                    <TouchableOpacity
+                        style={[
+                            styles.button,
+                            isPending && styles.buttonForSession,
+                            isCodexApprovedForSession && styles.buttonSelected,
+                            (isCodexAborted || isCodexApproved) && styles.buttonInactive
+                        ]}
+                        onPress={handleCodexApproveForSession}
+                        disabled={!isPending || loadingButton !== null || loadingForSession}
+                        activeOpacity={isPending ? 0.7 : 1}
+                    >
+                        {loadingForSession && isPending ? (
+                            <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
+                                <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={styles.loadingIndicatorForSession.color} />
+                            </View>
+                        ) : (
+                            <View style={styles.buttonContent}>
+                                <Text style={[
+                                    styles.buttonText,
+                                    isPending && styles.buttonTextForSession,
+                                    isCodexApprovedForSession && styles.buttonTextSelected
+                                ]} numberOfLines={1} ellipsizeMode="tail">
+                                    {t('codex.permissions.yesForSession')}
+                                </Text>
+                            </View>
+                        )}
+                    </TouchableOpacity>
+
+                    {/* Codex: Stop, and explain what to do button */}
+                    <TouchableOpacity
+                        style={[
+                            styles.button,
+                            isPending && styles.buttonDeny,
+                            isCodexAborted && styles.buttonSelected,
+                            (isCodexApproved || isCodexApprovedForSession) && styles.buttonInactive
+                        ]}
+                        onPress={handleCodexAbort}
+                        disabled={!isPending || loadingButton !== null || loadingForSession}
+                        activeOpacity={isPending ? 0.7 : 1}
+                    >
+                        {loadingButton === 'abort' && isPending ? (
+                            <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
+                                <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={styles.loadingIndicatorDeny.color} />
+                            </View>
+                        ) : (
+                            <View style={styles.buttonContent}>
+                                <Text style={[
+                                    styles.buttonText,
+                                    isPending && styles.buttonTextDeny,
+                                    isCodexAborted && styles.buttonTextSelected
+                                ]} numberOfLines={1} ellipsizeMode="tail">
+                                    {t('codex.permissions.stopAndExplain')}
+                                </Text>
+                            </View>
+                        )}
+                    </TouchableOpacity>
+                </View>
+            </View>
+        );
+    }
+
+    // Render Claude buttons (existing behavior)
     return (
         <View style={styles.container}>
             <View style={styles.buttonContainer}>
@@ -220,18 +369,17 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
                     activeOpacity={isPending ? 0.7 : 1}
                 >
                     {loadingButton === 'allow' && isPending ? (
-                        <ActivityIndicator size="small" color={styles.loadingIndicatorAllow.color} />
+                        <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
+                            <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={styles.loadingIndicatorAllow.color} />
+                        </View>
                     ) : (
                         <View style={styles.buttonContent}>
-                            {isApprovedViaAllow && (
-                                <Ionicons name="checkmark" size={16} color={styles.iconApproved.color} style={styles.icon} />
-                            )}
                             <Text style={[
                                 styles.buttonText,
                                 isPending && styles.buttonTextAllow,
                                 isApprovedViaAllow && styles.buttonTextSelected
-                            ]}>
-                                Allow
+                            ]} numberOfLines={1} ellipsizeMode="tail">
+                                {t('common.yes')}
                             </Text>
                         </View>
                     )}
@@ -251,18 +399,17 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
                         activeOpacity={isPending ? 0.7 : 1}
                     >
                         {loadingAllEdits && isPending ? (
-                            <ActivityIndicator size="small" color={styles.loadingIndicatorAllowAll.color} />
+                            <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
+                                <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={styles.loadingIndicatorAllowAll.color} />
+                            </View>
                         ) : (
                             <View style={styles.buttonContent}>
-                                {isApprovedViaAllEdits && (
-                                    <Ionicons name="checkmark" size={16} color={styles.iconApproved.color} style={styles.icon} />
-                                )}
                                 <Text style={[
                                     styles.buttonText,
                                     isPending && styles.buttonTextAllowAll,
                                     isApprovedViaAllEdits && styles.buttonTextSelected
-                                ]}>
-                                    All edits
+                                ]} numberOfLines={1} ellipsizeMode="tail">
+                                    {t('claude.permissions.yesAllowAllEdits')}
                                 </Text>
                             </View>
                         )}
@@ -283,18 +430,17 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
                         activeOpacity={isPending ? 0.7 : 1}
                     >
                         {loadingForSession && isPending ? (
-                            <ActivityIndicator size="small" color={styles.loadingIndicatorForSession.color} />
+                            <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
+                                <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={styles.loadingIndicatorForSession.color} />
+                            </View>
                         ) : (
                             <View style={styles.buttonContent}>
-                                {isApprovedForSession && (
-                                    <Ionicons name="checkmark" size={16} color={styles.iconApproved.color} style={styles.icon} />
-                                )}
                                 <Text style={[
                                     styles.buttonText,
                                     isPending && styles.buttonTextForSession,
                                     isApprovedForSession && styles.buttonTextSelected
-                                ]}>
-                                    For session
+                                ]} numberOfLines={1} ellipsizeMode="tail">
+                                    {t('claude.permissions.yesForTool')}
                                 </Text>
                             </View>
                         )}
@@ -313,18 +459,17 @@ export const PermissionFooter: React.FC<PermissionFooterProps> = ({ permission, 
                     activeOpacity={isPending ? 0.7 : 1}
                 >
                     {loadingButton === 'deny' && isPending ? (
-                        <ActivityIndicator size="small" color={styles.loadingIndicatorDeny.color} />
+                        <View style={[styles.buttonContent, { width: 40, height: 20, justifyContent: 'center' }]}>
+                            <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={styles.loadingIndicatorDeny.color} />
+                        </View>
                     ) : (
                         <View style={styles.buttonContent}>
-                            {isDenied && (
-                                <Ionicons name="close" size={16} color={styles.iconDenied.color} style={styles.icon} />
-                            )}
                             <Text style={[
                                 styles.buttonText,
                                 isPending && styles.buttonTextDeny,
                                 isDenied && styles.buttonTextSelected
-                            ]}>
-                                Deny
+                            ]} numberOfLines={1} ellipsizeMode="tail">
+                                {t('claude.permissions.noTellClaude')}
                             </Text>
                         </View>
                     )}

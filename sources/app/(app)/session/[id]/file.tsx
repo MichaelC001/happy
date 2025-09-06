@@ -8,7 +8,9 @@ import { Typography } from '@/constants/Typography';
 import { sessionReadFile, sessionBash } from '@/sync/ops';
 import { storage } from '@/sync/storage';
 import { Modal } from '@/modal';
-import { useUnistyles } from 'react-native-unistyles';
+import { useUnistyles, StyleSheet } from 'react-native-unistyles';
+import { layout } from '@/components/layout';
+import { t } from '@/text';
 
 interface FileContent {
     content: string;
@@ -18,6 +20,7 @@ interface FileContent {
 
 // Diff display component
 const DiffDisplay: React.FC<{ diffContent: string }> = ({ diffContent }) => {
+    const { theme } = useUnistyles();
     const lines = diffContent.split('\n');
     
     return (
@@ -28,18 +31,18 @@ const DiffDisplay: React.FC<{ diffContent: string }> = ({ diffContent }) => {
                 let backgroundColor = 'transparent';
                 
                 if (line.startsWith('+') && !line.startsWith('+++')) {
-                    lineStyle = { ...baseStyle, color: '#059669' }; // Green for additions
-                    backgroundColor = '#f0fdf4'; // Light green background
+                    lineStyle = { ...baseStyle, color: theme.colors.diff.addedText };
+                    backgroundColor = theme.colors.diff.addedBg;
                 } else if (line.startsWith('-') && !line.startsWith('---')) {
-                    lineStyle = { ...baseStyle, color: '#dc2626' }; // Red for deletions
-                    backgroundColor = '#fef2f2'; // Light red background
+                    lineStyle = { ...baseStyle, color: theme.colors.diff.removedText };
+                    backgroundColor = theme.colors.diff.removedBg;
                 } else if (line.startsWith('@@')) {
-                    lineStyle = { ...baseStyle, color: '#0891b2', fontWeight: '600' }; // Cyan for hunk headers
-                    backgroundColor = '#f0f9ff'; // Light blue background
+                    lineStyle = { ...baseStyle, color: theme.colors.diff.hunkHeaderText, fontWeight: '600' };
+                    backgroundColor = theme.colors.diff.hunkHeaderBg;
                 } else if (line.startsWith('+++') || line.startsWith('---')) {
-                    lineStyle = { ...baseStyle, color: '#374151', fontWeight: '600' }; // Dark gray for file headers
+                    lineStyle = { ...baseStyle, color: theme.colors.text, fontWeight: '600' };
                 } else {
-                    lineStyle = { ...baseStyle, color: '#374151' }; // Normal text
+                    lineStyle = { ...baseStyle, color: theme.colors.diff.contextText };
                 }
                 
                 return (
@@ -51,7 +54,7 @@ const DiffDisplay: React.FC<{ diffContent: string }> = ({ diffContent }) => {
                             paddingVertical: 1,
                             borderLeftWidth: line.startsWith('+') && !line.startsWith('+++') ? 3 : 
                                            line.startsWith('-') && !line.startsWith('---') ? 3 : 0,
-                            borderLeftColor: line.startsWith('+') && !line.startsWith('+++') ? '#059669' : '#dc2626'
+                            borderLeftColor: line.startsWith('+') && !line.startsWith('+++') ? theme.colors.diff.addedBorder : theme.colors.diff.removedBorder
                         }}
                     >
                         <Text style={lineStyle}>
@@ -189,7 +192,10 @@ export default function FileScreen() {
                 if (sessionPath && sessionId) {
                     try {
                         const diffResponse = await sessionBash(sessionId, {
-                            command: `git diff "${filePath}"`,
+                            // If someone is using a custom diff tool like
+                            // difftastic, the parser would break. So instead
+                            // force git to use the built in diff tool.
+                            command: `git diff --no-ext-diff "${filePath}"`,
                             cwd: sessionPath,
                             timeout: 5000
                         });
@@ -260,7 +266,7 @@ export default function FileScreen() {
     // Show error modal if there's an error
     React.useEffect(() => {
         if (error) {
-            Modal.alert('Error', error);
+            Modal.alert(t('common.error'), error);
         }
     }, [error]);
 
@@ -280,7 +286,7 @@ export default function FileScreen() {
         return (
             <View style={{ 
                 flex: 1, 
-                backgroundColor: 'white',
+                backgroundColor: theme.colors.surface,
                 justifyContent: 'center', 
                 alignItems: 'center' 
             }}>
@@ -288,10 +294,10 @@ export default function FileScreen() {
                 <Text style={{ 
                     marginTop: 16, 
                     fontSize: 16, 
-                    color: '#666',
+                    color: theme.colors.textSecondary,
                     ...Typography.default() 
                 }}>
-                    Loading {fileName}...
+                    {t('files.loadingFile', { fileName })}
                 </Text>
             </View>
         );
@@ -301,7 +307,7 @@ export default function FileScreen() {
         return (
             <View style={{ 
                 flex: 1, 
-                backgroundColor: 'white',
+                backgroundColor: theme.colors.surface,
                 justifyContent: 'center', 
                 alignItems: 'center',
                 padding: 20
@@ -309,15 +315,15 @@ export default function FileScreen() {
                 <Text style={{ 
                     fontSize: 18, 
                     fontWeight: 'bold',
-                    color: '#FF3B30',
+                    color: theme.colors.textDestructive,
                     marginBottom: 8,
                     ...Typography.default('semiBold')
                 }}>
-                    Error
+                    {t('common.error')}
                 </Text>
                 <Text style={{ 
                     fontSize: 16, 
-                    color: '#666',
+                    color: theme.colors.textSecondary,
                     textAlign: 'center',
                     ...Typography.default() 
                 }}>
@@ -331,7 +337,7 @@ export default function FileScreen() {
         return (
             <View style={{ 
                 flex: 1, 
-                backgroundColor: 'white',
+                backgroundColor: theme.colors.surface,
                 justifyContent: 'center', 
                 alignItems: 'center',
                 padding: 20
@@ -339,19 +345,19 @@ export default function FileScreen() {
                 <Text style={{ 
                     fontSize: 18, 
                     fontWeight: 'bold',
-                    color: '#666',
+                    color: theme.colors.textSecondary,
                     marginBottom: 8,
                     ...Typography.default('semiBold')
                 }}>
-                    Binary File
+                    {t('files.binaryFile')}
                 </Text>
                 <Text style={{ 
                     fontSize: 16, 
-                    color: '#666',
+                    color: theme.colors.textSecondary,
                     textAlign: 'center',
                     ...Typography.default() 
                 }}>
-                    Cannot display binary file content
+                    {t('files.cannotDisplayBinary')}
                 </Text>
                 <Text style={{ 
                     fontSize: 14, 
@@ -367,18 +373,18 @@ export default function FileScreen() {
     }
 
     return (
-        <View style={{ flex: 1, backgroundColor: 'white' }}>
+        <View style={[styles.container, { backgroundColor: theme.colors.surface }]}>
             
             {/* File path header */}
             <View style={{
                 padding: 16,
                 borderBottomWidth: Platform.select({ ios: 0.33, default: 1 }),
-                borderBottomColor: Platform.select({ ios: '#C6C6C8', default: '#E0E0E0' }),
-                backgroundColor: '#F8F8F8'
+                borderBottomColor: theme.colors.divider,
+                backgroundColor: theme.colors.surfaceHigh
             }}>
                 <Text style={{
                     fontSize: 14,
-                    color: '#666',
+                    color: theme.colors.textSecondary,
                     ...Typography.mono()
                 }}>
                     {filePath}
@@ -392,8 +398,8 @@ export default function FileScreen() {
                     paddingHorizontal: 16,
                     paddingVertical: 12,
                     borderBottomWidth: Platform.select({ ios: 0.33, default: 1 }),
-                    borderBottomColor: Platform.select({ ios: '#C6C6C8', default: '#E0E0E0' }),
-                    backgroundColor: 'white'
+                    borderBottomColor: theme.colors.divider,
+                    backgroundColor: theme.colors.surface
                 }}>
                     <Pressable
                         onPress={() => setDisplayMode('diff')}
@@ -401,17 +407,17 @@ export default function FileScreen() {
                             paddingHorizontal: 16,
                             paddingVertical: 8,
                             borderRadius: 8,
-                            backgroundColor: displayMode === 'diff' ? '#007AFF' : '#F2F2F7',
+                            backgroundColor: displayMode === 'diff' ? theme.colors.textLink : theme.colors.input.background,
                             marginRight: 8
                         }}
                     >
                         <Text style={{
                             fontSize: 14,
                             fontWeight: '600',
-                            color: displayMode === 'diff' ? 'white' : '#666',
+                            color: displayMode === 'diff' ? 'white' : theme.colors.textSecondary,
                             ...Typography.default()
                         }}>
-                            Diff
+                            {t('files.diff')}
                         </Text>
                     </Pressable>
                     
@@ -421,16 +427,16 @@ export default function FileScreen() {
                             paddingHorizontal: 16,
                             paddingVertical: 8,
                             borderRadius: 8,
-                            backgroundColor: displayMode === 'file' ? '#007AFF' : '#F2F2F7'
+                            backgroundColor: displayMode === 'file' ? theme.colors.textLink : theme.colors.input.background
                         }}
                     >
                         <Text style={{
                             fontSize: 14,
                             fontWeight: '600',
-                            color: displayMode === 'file' ? 'white' : '#666',
+                            color: displayMode === 'file' ? 'white' : theme.colors.textSecondary,
                             ...Typography.default()
                         }}>
-                            File
+                            {t('files.file')}
                         </Text>
                     </Pressable>
                 </View>
@@ -452,23 +458,32 @@ export default function FileScreen() {
                 ) : displayMode === 'file' && fileContent && !fileContent.content ? (
                     <Text style={{
                         fontSize: 16,
-                        color: '#666',
+                        color: theme.colors.textSecondary,
                         fontStyle: 'italic',
                         ...Typography.default()
                     }}>
-                        File is empty
+                        {t('files.fileEmpty')}
                     </Text>
                 ) : !diffContent && !fileContent?.content ? (
                     <Text style={{
                         fontSize: 16,
-                        color: '#666',
+                        color: theme.colors.textSecondary,
                         fontStyle: 'italic',
                         ...Typography.default()
                     }}>
-                        No changes to display
+                        {t('files.noChanges')}
                     </Text>
                 ) : null}
             </ScrollView>
         </View>
     );
 }
+
+const styles = StyleSheet.create((theme) => ({
+    container: {
+        flex: 1,
+        maxWidth: layout.maxWidth,
+        alignSelf: 'center',
+        width: '100%',
+    }
+}));

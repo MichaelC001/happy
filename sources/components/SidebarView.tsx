@@ -15,6 +15,7 @@ import { useRealtimeStatus } from '@/sync/storage';
 import { Image } from 'expo-image';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { UpdateBanner } from './UpdateBanner';
+import { t } from '@/text';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -107,7 +108,6 @@ export const SidebarView = React.memo(() => {
     const router = useRouter();
     const headerHeight = useHeaderHeight();
     const socketStatus = useSocketStatus();
-    const isExperimental = useSetting('experiments');
     const realtimeStatus = useRealtimeStatus();
 
     // Get connection status styling (matching sessionUtils.ts pattern)
@@ -118,28 +118,28 @@ export const SidebarView = React.memo(() => {
                 return {
                     color: styles.statusConnected.color,
                     isPulsing: false,
-                    text: 'connected',
+                    text: t('status.connected'),
                     textColor: styles.statusConnected.color
                 };
             case 'connecting':
                 return {
                     color: styles.statusConnecting.color,
                     isPulsing: true,
-                    text: 'connecting',
+                    text: t('status.connecting'),
                     textColor: styles.statusConnecting.color
                 };
             case 'disconnected':
                 return {
                     color: styles.statusDisconnected.color,
                     isPulsing: false,
-                    text: 'disconnected',
+                    text: t('status.disconnected'),
                     textColor: styles.statusDisconnected.color
                 };
             case 'error':
                 return {
                     color: styles.statusError.color,
                     isPulsing: false,
-                    text: 'error',
+                    text: t('status.error'),
                     textColor: styles.statusError.color
                 };
             default:
@@ -168,7 +168,7 @@ export const SidebarView = React.memo(() => {
                         />
                     </View>
                     <View style={styles.titleContainer}>
-                        <Text style={styles.titleText}>Sessions</Text>
+                        <Text style={styles.titleText}>{t('sidebar.sessionsTitle')}</Text>
                         {getConnectionStatus().text && (
                             <View style={styles.statusContainer}>
                                 <StatusDot
@@ -220,9 +220,7 @@ export const SidebarView = React.memo(() => {
                     )}
                 </View>
             </View>
-            {isExperimental && (
-                <FAB onPress={handleNewSession} />
-            )}
+            <FAB onPress={handleNewSession} />
         </>
     )
 });

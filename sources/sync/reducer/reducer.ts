@@ -137,6 +137,7 @@ type StoredPermission = {
     reason?: string;
     mode?: string;
     allowedTools?: string[];
+    decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
 };
 
 export type ReducerState = {
@@ -249,6 +250,38 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             state.messageIds.set(msg.id, msg.id);
             hasReadyEvent = true;
             continue;
+        }
+
+        // Handle context reset events - reset state and let the message be shown
+        if (msg.role === 'event' && msg.content.type === 'message' && msg.content.message === 'Context was reset') {
+            // Reset todos to empty array and reset usage to zero
+            state.latestTodos = {
+                todos: [],
+                timestamp: msg.createdAt  // Use message timestamp, not current time
+            };
+            state.latestUsage = {
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheCreation: 0,
+                cacheRead: 0,
+                contextSize: 0,
+                timestamp: msg.createdAt  // Use message timestamp to avoid blocking older usage data
+            };
+            // Don't continue - let the event be processed normally to create a message
+        }
+
+        // Handle compaction completed events - reset context but keep todos
+        if (msg.role === 'event' && msg.content.type === 'message' && msg.content.message === 'Compaction completed') {
+            // Reset usage/context to zero but keep todos unchanged
+            state.latestUsage = {
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheCreation: 0,
+                cacheRead: 0,
+                contextSize: 0,
+                timestamp: msg.createdAt  // Use message timestamp to avoid blocking older usage data
+            };
+            // Don't continue - let the event be processed normally to create a message
         }
 
         // Try to parse message as event
@@ -396,9 +429,15 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             continue;
                         }
 
-                        // Skip if already has the same status
-                        if (message.tool.permission?.status === completed.status &&
-                            message.tool.permission?.reason === completed.reason) {
+                        // Check if we need to update ANY field
+                        const needsUpdate = 
+                            message.tool.permission?.status !== completed.status ||
+                            message.tool.permission?.reason !== completed.reason ||
+                            message.tool.permission?.mode !== completed.mode ||
+                            message.tool.permission?.allowedTools !== completed.allowedTools ||
+                            message.tool.permission?.decision !== completed.decision;
+
+                        if (!needsUpdate) {
                             continue;
                         }
 
@@ -410,18 +449,20 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 id: permId,
                                 status: completed.status,
                                 mode: completed.mode || undefined,
-                                allowedTools: completed.allowedTools || undefined
+                                allowedTools: completed.allowedTools || undefined,
+                                decision: completed.decision || undefined,
+                                reason: completed.reason || undefined
                             };
                             hasChanged = true;
-                        } else if (message.tool.permission.status !== completed.status) {
+                        } else {
+                            // Update all fields
                             message.tool.permission.status = completed.status;
                             message.tool.permission.mode = completed.mode || undefined;
                             message.tool.permission.allowedTools = completed.allowedTools || undefined;
-                            hasChanged = true;
-                        }
-
-                        if (completed.reason && message.tool.permission?.reason !== completed.reason) {
-                            message.tool.permission!.reason = completed.reason;
+                            message.tool.permission.decision = completed.decision || undefined;
+                            if (completed.reason) {
+                                message.tool.permission.reason = completed.reason;
+                            }
                             hasChanged = true;
                         }
 
@@ -452,7 +493,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             status: completed.status,
                             reason: completed.reason || undefined,
                             mode: completed.mode || undefined,
-                            allowedTools: completed.allowedTools || undefined
+                            allowedTools: completed.allowedTools || undefined,
+                            decision: completed.decision || undefined
                         });
 
                         if (hasChanged) {
@@ -500,7 +542,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             status: completed.status,
                             reason: completed.reason || undefined,
                             mode: completed.mode || undefined,
-                            allowedTools: completed.allowedTools || undefined
+                            allowedTools: completed.allowedTools || undefined,
+                            decision: completed.decision || undefined
                         }
                     };
 
@@ -525,7 +568,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         status: completed.status,
                         reason: completed.reason || undefined,
                         mode: completed.mode || undefined,
-                        allowedTools: completed.allowedTools || undefined
+                        allowedTools: completed.allowedTools || undefined,
+                        decision: completed.decision || undefined
                     });
 
                     changed.add(mid);
@@ -672,7 +716,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             toolCall.permission = {
                                 id: c.id,
                                 status: permission.status,
-                                reason: permission.reason
+                                reason: permission.reason,
+                                mode: permission.mode,
+                                allowedTools: permission.allowedTools,
+                                decision: permission.decision
                             };
 
                             // Update state based on permission status
@@ -746,13 +793,29 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
                     // Update permission data if provided by backend
                     if (c.permissions) {
-                        message.tool.permission = {
-                            id: c.tool_use_id,
-                            status: c.permissions.result === 'approved' ? 'approved' : 'denied',
-                            date: c.permissions.date,
-                            mode: c.permissions.mode,
-                            allowedTools: c.permissions.allowedTools
-                        };
+                        // Merge with existing permission to preserve decision field from agentState
+                        if (message.tool.permission) {
+                            // Preserve existing decision if not provided in tool result
+                            const existingDecision = message.tool.permission.decision;
+                            message.tool.permission = {
+                                ...message.tool.permission,
+                                id: c.tool_use_id,
+                                status: c.permissions.result === 'approved' ? 'approved' : 'denied',
+                                date: c.permissions.date,
+                                mode: c.permissions.mode,
+                                allowedTools: c.permissions.allowedTools,
+                                decision: c.permissions.decision || existingDecision
+                            };
+                        } else {
+                            message.tool.permission = {
+                                id: c.tool_use_id,
+                                status: c.permissions.result === 'approved' ? 'approved' : 'denied',
+                                date: c.permissions.date,
+                                mode: c.permissions.mode,
+                                allowedTools: c.permissions.allowedTools,
+                                decision: c.permissions.decision
+                            };
+                        }
                     }
 
                     changed.add(messageId);
@@ -871,13 +934,28 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             
                             // Update permission data if provided by backend
                             if (c.permissions) {
-                                sidechainMessage.tool.permission = {
-                                    id: c.tool_use_id,
-                                    status: c.permissions.result === 'approved' ? 'approved' : 'denied',
-                                    date: c.permissions.date,
-                                    mode: c.permissions.mode,
-                                    allowedTools: c.permissions.allowedTools
-                                };
+                                // Merge with existing permission to preserve decision field from agentState
+                                if (sidechainMessage.tool.permission) {
+                                    const existingDecision = sidechainMessage.tool.permission.decision;
+                                    sidechainMessage.tool.permission = {
+                                        ...sidechainMessage.tool.permission,
+                                        id: c.tool_use_id,
+                                        status: c.permissions.result === 'approved' ? 'approved' : 'denied',
+                                        date: c.permissions.date,
+                                        mode: c.permissions.mode,
+                                        allowedTools: c.permissions.allowedTools,
+                                        decision: c.permissions.decision || existingDecision
+                                    };
+                                } else {
+                                    sidechainMessage.tool.permission = {
+                                        id: c.tool_use_id,
+                                        status: c.permissions.result === 'approved' ? 'approved' : 'denied',
+                                        date: c.permissions.date,
+                                        mode: c.permissions.mode,
+                                        allowedTools: c.permissions.allowedTools,
+                                        decision: c.permissions.decision
+                                    };
+                                }
                             }
                         }
                     }
@@ -893,13 +971,28 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             
                             // Update permission data if provided by backend
                             if (c.permissions) {
-                                permissionMessage.tool.permission = {
-                                    id: c.tool_use_id,
-                                    status: c.permissions.result === 'approved' ? 'approved' : 'denied',
-                                    date: c.permissions.date,
-                                    mode: c.permissions.mode,
-                                    allowedTools: c.permissions.allowedTools
-                                };
+                                // Merge with existing permission to preserve decision field from agentState
+                                if (permissionMessage.tool.permission) {
+                                    const existingDecision = permissionMessage.tool.permission.decision;
+                                    permissionMessage.tool.permission = {
+                                        ...permissionMessage.tool.permission,
+                                        id: c.tool_use_id,
+                                        status: c.permissions.result === 'approved' ? 'approved' : 'denied',
+                                        date: c.permissions.date,
+                                        mode: c.permissions.mode,
+                                        allowedTools: c.permissions.allowedTools,
+                                        decision: c.permissions.decision || existingDecision
+                                    };
+                                } else {
+                                    permissionMessage.tool.permission = {
+                                        id: c.tool_use_id,
+                                        status: c.permissions.result === 'approved' ? 'approved' : 'denied',
+                                        date: c.permissions.date,
+                                        mode: c.permissions.mode,
+                                        allowedTools: c.permissions.allowedTools,
+                                        decision: c.permissions.decision
+                                    };
+                                }
                             }
                             
                             changed.add(permissionMessageId);

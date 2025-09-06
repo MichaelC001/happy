@@ -14,9 +14,12 @@ export const SettingsSchema = z.object({
     experiments: z.boolean().describe('Whether to enable experimental features'),
     alwaysShowContextSize: z.boolean().describe('Always show context size in agent input'),
     avatarStyle: z.string().describe('Avatar display style'),
+    showFlavorIcons: z.boolean().describe('Whether to show AI provider icons in avatars'),
+    compactSessionView: z.boolean().describe('Whether to use compact view for active sessions'),
     reviewPromptAnswered: z.boolean().describe('Whether the review prompt has been answered'),
     reviewPromptLikedApp: z.boolean().nullish().describe('Whether user liked the app when asked'),
     voiceAssistantLanguage: z.string().nullable().describe('Preferred language for voice assistant (null for auto-detect)'),
+    preferredLanguage: z.string().nullable().describe('Preferred UI language (null for auto-detect from device locale)'),
 });
 
 //
@@ -47,10 +50,13 @@ export const settingsDefaults: Settings = {
     analyticsOptOut: false,
     experiments: false,
     alwaysShowContextSize: false,
-    avatarStyle: 'gradient',
+    avatarStyle: 'brutalist',
+    showFlavorIcons: false,
+    compactSessionView: false,
     reviewPromptAnswered: false,
     reviewPromptLikedApp: null,
     voiceAssistantLanguage: null,
+    preferredLanguage: null,
 };
 Object.freeze(settingsDefaults);
 

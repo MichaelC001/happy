@@ -52,9 +52,9 @@ export const lightTheme = {
             },
         },
         fab: {
-            background: '#FFFFFF',
-            backgroundPressed: 'rgb(240,240,240)',
-            icon: '#000000',
+            background: '#000000',
+            backgroundPressed: '#1a1a1a',
+            icon: '#FFFFFF',
         },
         radio: {
             active: '#007AFF',
@@ -110,6 +110,9 @@ export const lightTheme = {
             acceptEdits: '#007AFF',
             bypass: '#FF9500',
             plan: '#34C759',
+            readOnly: '#8B8B8D',
+            safeYolo: '#FF6B35',
+            yolo: '#DC143C',
         },
 
         // Permission button colors
@@ -256,9 +259,9 @@ export const darkTheme = {
             sectionTitle: Platform.select({ ios: '#8E8E93', default: '#CAC4D0' }),
         },
         fab: {
-            background: Platform.select({ ios: '#1C1C1E', default: '#1e1e1e' }),
-            backgroundPressed: Platform.select({ ios: '#2C2C2E', default: '#2e2e2e' }),
-            icon: '#FFFFFF',
+            background: '#FFFFFF',
+            backgroundPressed: '#f0f0f0',
+            icon: '#000000',
         },
         radio: {
             active: '#0A84FF',
@@ -314,6 +317,9 @@ export const darkTheme = {
             acceptEdits: '#0A84FF',
             bypass: '#FF9F0A',
             plan: '#32D74B',
+            readOnly: '#98989D',
+            safeYolo: '#FF7A4C',
+            yolo: '#FF453A',
         },
 
         // Permission button colors

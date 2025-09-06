@@ -1,13 +1,15 @@
 import React from 'react';
 import { View, Pressable, FlatList, Platform } from 'react-native';
 import { Text } from '@/components/StyledText';
-import { usePathname, useRouter } from 'expo-router';
+import { usePathname } from 'expo-router';
 import { SessionListViewItem, useSessionListViewData } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { ActiveSessionsGroup } from './ActiveSessionsGroup';
+import { ActiveSessionsGroupCompact } from './ActiveSessionsGroupCompact';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useSetting } from '@/sync/storage';
 import { Typography } from '@/constants/Typography';
 import { Session } from '@/sync/storageTypes';
 import { StatusDot } from './StatusDot';
@@ -16,6 +18,8 @@ import { useIsTablet } from '@/utils/responsive';
 import { requestReview } from '@/utils/requestReview';
 import { UpdateBanner } from './UpdateBanner';
 import { layout } from './layout';
+import { useNavigateToSession } from '@/hooks/useNavigateToSession';
+import { t } from '@/text';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -30,46 +34,17 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         maxWidth: layout.maxWidth,
     },
     headerSection: {
-        backgroundColor: theme.colors.surface,
-        paddingHorizontal: 16,
-        paddingTop: 12,
+        backgroundColor: theme.colors.groupped.background,
+        paddingHorizontal: 24,
+        paddingTop: 20,
+        paddingBottom: 8,
     },
     headerText: {
-        fontSize: 13,
+        fontSize: 14,
         fontWeight: '600',
-        color: theme.colors.textSecondary,
-        letterSpacing: 0.3,
-        textTransform: 'uppercase',
-        ...Typography.default('semiBold'),
-    },
-    archivedContainer: {
-        backgroundColor: theme.colors.groupped.background,
-        paddingTop: 8,
-    },
-    archivedSectionHeader: {
-        paddingTop: Platform.select({ ios: 20, default: 16 }),
-        paddingBottom: Platform.select({ ios: 6, default: 8 }),
-        paddingHorizontal: Platform.select({ ios: 32, default: 24 }),
-    },
-    archivedSectionHeaderText: {
-        ...Typography.default('regular'),
         color: theme.colors.groupped.sectionTitle,
-        fontSize: Platform.select({ ios: 13, default: 14 }),
-        lineHeight: Platform.select({ ios: 18, default: 20 }),
-        letterSpacing: Platform.select({ ios: -0.08, default: 0.1 }),
-        fontWeight: Platform.select({ ios: 'normal', default: '500' }),
-    },
-    archivedSessionsCard: {
-        backgroundColor: theme.colors.surface,
-        marginBottom: 12,
-        marginHorizontal: Platform.select({ ios: 16, default: 12 }),
-        borderRadius: Platform.select({ ios: 10, default: 16 }),
-        overflow: 'hidden',
-        shadowColor: theme.colors.shadow.color,
-        shadowOffset: { width: 0, height: 0.33 },
-        shadowOpacity: theme.colors.shadow.opacity,
-        shadowRadius: 0,
-        elevation: 1,
+        letterSpacing: 0.1,
+        ...Typography.default('semiBold'),
     },
     projectGroup: {
         paddingHorizontal: 16,
@@ -94,6 +69,21 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         alignItems: 'center',
         paddingHorizontal: 16,
         backgroundColor: theme.colors.surface,
+        marginHorizontal: 16,
+        marginBottom: 1,
+    },
+    sessionItemFirst: {
+        borderTopLeftRadius: 12,
+        borderTopRightRadius: 12,
+    },
+    sessionItemLast: {
+        borderBottomLeftRadius: 12,
+        borderBottomRightRadius: 12,
+        marginBottom: 12,
+    },
+    sessionItemSingle: {
+        borderRadius: 12,
+        marginBottom: 12,
     },
     sessionItemSelected: {
         backgroundColor: theme.colors.surfaceSelected,
@@ -143,10 +133,6 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         lineHeight: 16,
         ...Typography.default(),
     },
-    separator: {
-        height: StyleSheet.hairlineWidth,
-        backgroundColor: theme.colors.divider,
-    },
     avatarContainer: {
         position: 'relative',
         width: 48,
@@ -172,6 +158,8 @@ export function SessionsList() {
     const data = useSessionListViewData();
     const pathname = usePathname();
     const isTablet = useIsTablet();
+    const navigateToSession = useNavigateToSession();
+    const compactSessionView = useSetting('compactSessionView');
     const selectable = isTablet;
     const dataWithSelected = selectable ? React.useMemo(() => {
         return data?.map(item => ({
@@ -203,7 +191,7 @@ export function SessionsList() {
         }
     }, []);
 
-    const renderItem = React.useCallback(({ item }: { item: SessionListViewItem & { selected?: boolean } }) => {
+    const renderItem = React.useCallback(({ item, index }: { item: SessionListViewItem & { selected?: boolean }, index: number }) => {
         switch (item.type) {
             case 'header':
                 return (
@@ -221,8 +209,10 @@ export function SessionsList() {
                     const parts = pathname.split('/');
                     selectedId = parts[2]; // parts[0] is empty, parts[1] is 'session', parts[2] is the ID
                 }
+
+                const ActiveComponent = compactSessionView ? ActiveSessionsGroupCompact : ActiveSessionsGroup;
                 return (
-                    <ActiveSessionsGroup
+                    <ActiveComponent
                         sessions={item.sessions}
                         selectedSessionId={selectedId}
                     />
@@ -241,110 +231,28 @@ export function SessionsList() {
                 );
 
             case 'session':
+                // Determine card styling based on position within date group
+                const prevItem = index > 0 && dataWithSelected ? dataWithSelected[index - 1] : null;
+                const nextItem = index < (dataWithSelected?.length || 0) - 1 && dataWithSelected ? dataWithSelected[index + 1] : null;
+
+                const isFirst = prevItem?.type === 'header';
+                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions';
+                const isSingle = isFirst && isLast;
+
                 return (
-                    <SessionItem session={item.session} selected={item.selected} />
+                    <SessionItem
+                        session={item.session}
+                        selected={item.selected}
+                        isFirst={isFirst}
+                        isLast={isLast}
+                        isSingle={isSingle}
+                    />
                 );
         }
-    }, [pathname]);
+    }, [pathname, dataWithSelected, compactSessionView]);
 
-    // ItemSeparatorComponent for FlashList
-    const ItemSeparatorComponent = React.useCallback(({ leadingItem, trailingItem }: any) => {
-        // Don't render separator if either item is a header
-        if (leadingItem?.type === 'header' || trailingItem?.type === 'header' || leadingItem?.type === 'active-sessions' || trailingItem?.type === 'active-sessions') {
-            return null;
-        }
 
-        // Use standard indentation for separators
-        const marginLeft = 88;
-
-        return <View style={styles.separator} />;
-    }, []);
-
-    // Group archived sessions in a card
-    const renderContent = React.useMemo(() => {
-        if (!dataWithSelected) return [];
-
-        const result: React.ReactElement[] = [];
-        let archivedItems: (SessionListViewItem & { selected?: boolean })[] = [];
-        let isCollectingArchived = false;
-
-        dataWithSelected.forEach((item, index) => {
-            if (item.type === 'header' && item.title === 'Previous Sessions') {
-                // Skip rendering the header, just start collecting archived items
-                isCollectingArchived = true;
-            } else if (item.type === 'header' || item.type === 'active-sessions') {
-                // Render non-archived items directly
-                if (item.type === 'active-sessions') {
-                    let selectedId: string | undefined;
-                    if (isTablet && pathname.startsWith('/session/')) {
-                        const parts = pathname.split('/');
-                        selectedId = parts[2];
-                    }
-                    result.push(
-                        <ActiveSessionsGroup
-                            key="active-sessions"
-                            sessions={item.sessions}
-                            selectedSessionId={selectedId}
-                        />
-                    );
-                } else {
-                    result.push(
-                        <View key={`header-${item.title}-${index}`} style={styles.headerSection}>
-                            <Text style={styles.headerText}>
-                                {item.title}
-                            </Text>
-                        </View>
-                    );
-                }
-                isCollectingArchived = false;
-            } else if (isCollectingArchived) {
-                // Collect archived items
-                archivedItems.push(item);
-            }
-        });
-
-        // Render archived items in a card
-        if (archivedItems.length > 0) {
-            result.push(
-                <View key="archived-container" style={styles.archivedContainer}>
-                    {/* Section header for Archived Sessions */}
-                    <View style={styles.archivedSectionHeader}>
-                        <Text style={styles.archivedSectionHeaderText}>
-                            Archived Sessions
-                        </Text>
-                    </View>
-
-                    {/* Card with rounded corners containing archived sessions */}
-                    <View style={styles.archivedSessionsCard}>
-                        {archivedItems.map((item, index) => {
-                            const showSeparator = index < archivedItems.length - 1 &&
-                                !(item.type === 'project-group' && archivedItems[index + 1]?.type === 'session');
-
-                            return (
-                                <React.Fragment key={keyExtractor(item, index)}>
-                                    {item.type === 'project-group' ? (
-                                        <View style={styles.projectGroup}>
-                                            <Text style={styles.projectGroupTitle}>
-                                                {item.displayPath}
-                                            </Text>
-                                            <Text style={styles.projectGroupSubtitle}>
-                                                {item.machine.metadata?.displayName || item.machine.metadata?.host || item.machine.id}
-                                            </Text>
-                                        </View>
-                                    ) : item.type === 'session' ? (
-                                        <SessionItem session={item.session} selected={item.selected} />
-                                    ) : null}
-                                    {showSeparator && <View style={styles.separator} />}
-                                </React.Fragment>
-                            );
-                        })}
-                    </View>
-                </View>
-            );
-        }
-
-        return result;
-    }, [dataWithSelected, isTablet, pathname, keyExtractor]);
+    // Remove this section as we'll use FlatList for all items now
 
 
     const HeaderComponent = React.useCallback(() => {
@@ -355,14 +263,16 @@ export function SessionsList() {
         );
     }, []);
 
+    // Footer removed - all sessions now shown inline
+
     return (
         <View style={styles.container}>
             <View style={styles.contentContainer}>
                 <FlatList
-                    data={renderContent}
-                    renderItem={({ item }) => item}
-                    keyExtractor={(_, index) => `item-${index}`}
-                    contentContainerStyle={{ paddingBottom: safeArea.bottom + 16, maxWidth: layout.maxWidth }}
+                    data={dataWithSelected}
+                    renderItem={renderItem}
+                    keyExtractor={keyExtractor}
+                    contentContainerStyle={{ paddingBottom: safeArea.bottom + 128, maxWidth: layout.maxWidth }}
                     ListHeaderComponent={HeaderComponent}
                 />
             </View>
@@ -371,12 +281,19 @@ export function SessionsList() {
 }
 
 // Sub-component that handles session message logic
-const SessionItem = React.memo(({ session, selected }: { session: Session; selected?: boolean }) => {
+const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }: {
+    session: Session;
+    selected?: boolean;
+    isFirst?: boolean;
+    isLast?: boolean;
+    isSingle?: boolean;
+}) => {
     const styles = stylesheet;
     const sessionStatus = useSessionStatus(session);
     const sessionName = getSessionName(session);
     const sessionSubtitle = getSessionSubtitle(session);
-    const router = useRouter();
+    const navigateToSession = useNavigateToSession();
+    const isTablet = useIsTablet();
 
     const avatarId = React.useMemo(() => {
         return getSessionAvatarId(session);
@@ -386,14 +303,24 @@ const SessionItem = React.memo(({ session, selected }: { session: Session; selec
         <Pressable
             style={[
                 styles.sessionItem,
-                selected && styles.sessionItemSelected
+                selected && styles.sessionItemSelected,
+                isSingle ? styles.sessionItemSingle :
+                    isFirst ? styles.sessionItemFirst :
+                        isLast ? styles.sessionItemLast : {}
             ]}
+            onPressIn={() => {
+                if (isTablet) {
+                    navigateToSession(session.id);
+                }
+            }}
             onPress={() => {
-                router.push(`/session/${session.id}`);
+                if (!isTablet) {
+                    navigateToSession(session.id);
+                }
             }}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={avatarId} size={48} monochrome={!sessionStatus.isConnected} />
+                <Avatar id={avatarId} size={48} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
                 {session.draft && (
                     <View style={styles.draftIconContainer}>
                         <Ionicons
