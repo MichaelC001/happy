@@ -14,8 +14,8 @@ export default {
     expo: {
         name,
         slug: "happy",
-        version: "1.4.1",
-        runtimeVersion: "16",
+        version: "1.5.0",
+        runtimeVersion: "17",
         orientation: "default",
         icon: "./sources/assets/images/icon.png",
         scheme: "happy",
@@ -36,7 +36,7 @@ export default {
                 NSLocalNetworkUsageDescription: "Allow $(PRODUCT_NAME) to find and connect to local devices on your network.",
                 NSBonjourServices: ["_http._tcp", "_https._tcp"]
             },
-            associatedDomains: ["applinks:app.happy.engineering"]
+            associatedDomains: variant === 'production' ? ["applinks:app.happy.engineering"] : []
         },
         android: {
             adaptiveIcon: {
@@ -55,7 +55,7 @@ export default {
             edgeToEdgeEnabled: true,
             package: bundleId,
             googleServicesFile: "./google-services.json",
-            intentFilters: [
+            intentFilters: variant === 'production' ? [
                 {
                     "action": "VIEW",
                     "autoVerify": true,
@@ -68,7 +68,7 @@ export default {
                     ],
                     "category": ["BROWSABLE", "DEFAULT"]
                 }
-            ]
+            ] : []
         },
         web: {
             bundler: "metro",
