@@ -31,6 +31,7 @@ export const en = {
         logout: 'Logout',
         yes: 'Yes',
         no: 'No',
+        discard: 'Discard',
         version: 'Version',
         copied: 'Copied',
         scanning: 'Scanning...',
@@ -683,6 +684,34 @@ export const en = {
         textCopied: 'Text copied to clipboard',
         failedToCopy: 'Failed to copy text to clipboard',
         noTextToCopy: 'No text available to copy',
+    },
+
+    artifacts: {
+        // Artifacts feature
+        title: 'Artifacts',
+        countSingular: '1 artifact',
+        countPlural: ({ count }: { count: number }) => `${count} artifacts`,
+        empty: 'No artifacts yet',
+        emptyDescription: 'Create your first artifact to get started',
+        new: 'New Artifact',
+        edit: 'Edit Artifact',
+        delete: 'Delete',
+        updateError: 'Failed to update artifact. Please try again.',
+        notFound: 'Artifact not found',
+        discardChanges: 'Discard changes?',
+        discardChangesDescription: 'You have unsaved changes. Are you sure you want to discard them?',
+        deleteConfirm: 'Delete artifact?',
+        deleteConfirmDescription: 'This action cannot be undone',
+        titleLabel: 'TITLE',
+        titlePlaceholder: 'Enter a title for your artifact',
+        bodyLabel: 'CONTENT',
+        bodyPlaceholder: 'Write your content here...',
+        emptyFieldsError: 'Please enter a title or content',
+        createError: 'Failed to create artifact. Please try again.',
+        save: 'Save',
+        saving: 'Saving...',
+        loading: 'Loading artifacts...',
+        error: 'Failed to load artifact',
     }
 } as const;
 

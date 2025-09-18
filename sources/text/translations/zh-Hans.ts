@@ -5,6 +5,8 @@
  * - Functions with typed object parameters for dynamic text
  */
 
+import { TranslationStructure } from "../_default";
+
 /**
  * Chinese plural helper function
  * @param options - Object containing count, singular, and plural forms
@@ -14,7 +16,7 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
     return count === 1 ? singular : plural;
 }
 
-export const zhHans = {
+export const zhHans: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: '取消',
@@ -31,6 +33,7 @@ export const zhHans = {
         logout: '登出',
         yes: '是',
         no: '否',
+        discard: '放弃',
         version: '版本',
         copied: '已复制',
         scanning: '扫描中...',
@@ -683,5 +686,32 @@ export const zhHans = {
         textCopied: '文本已复制到剪贴板',
         failedToCopy: '复制文本到剪贴板失败',
         noTextToCopy: '没有可复制的文本',
+    },
+
+    artifacts: {
+        title: '工件',
+        countSingular: '1 个工件',
+        countPlural: ({ count }: { count: number }) => `${count} 个工件`,
+        empty: '暂无工件',
+        emptyDescription: '创建您的第一个工件来保存和组织内容',
+        new: '新建工件',
+        edit: '编辑工件',
+        delete: '删除',
+        updateError: '更新工件失败。请重试。',
+        notFound: '未找到工件',
+        discardChanges: '放弃更改？',
+        discardChangesDescription: '您有未保存的更改。确定要放弃它们吗？',
+        deleteConfirm: '删除工件？',
+        deleteConfirmDescription: '此工件将被永久删除。',
+        titlePlaceholder: '工件标题',
+        bodyPlaceholder: '在此输入内容...',
+        save: '保存',
+        saving: '保存中...',
+        loading: '加载中...',
+        error: '加载工件失败',
+        titleLabel: '标题',
+        bodyLabel: '内容',
+        emptyFieldsError: '请输入标题或内容',
+        createError: '创建工件失败。请重试。',
     }
 } as const;

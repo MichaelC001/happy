@@ -17,6 +17,7 @@ import { sync } from "./sync";
 import { getCurrentRealtimeSessionId, getVoiceSession } from '@/realtime/RealtimeSession';
 import { isMutableTool } from "@/components/tools/knownTools";
 import { projectManager } from "./projectManager";
+import { DecryptedArtifact } from "./artifactTypes";
 
 /**
  * Centralized session online state resolver
@@ -69,6 +70,7 @@ interface StorageState {
     sessionMessages: Record<string, SessionMessages>;
     sessionGitStatus: Record<string, GitStatus | null>;
     machines: Record<string, Machine>;
+    artifacts: Record<string, DecryptedArtifact>;  // New artifacts storage
     realtimeStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
     socketStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
     socketLastConnectedAt: number | null;
@@ -95,6 +97,11 @@ interface StorageState {
     updateSessionDraft: (sessionId: string, draft: string | null) => void;
     updateSessionPermissionMode: (sessionId: string, mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'read-only' | 'safe-yolo' | 'yolo') => void;
     updateSessionModelMode: (sessionId: string, mode: 'default' | 'adaptiveUsage' | 'sonnet' | 'opus' | 'gpt-5-minimal' | 'gpt-5-low' | 'gpt-5-medium' | 'gpt-5-high') => void;
+    // Artifact methods
+    applyArtifacts: (artifacts: DecryptedArtifact[]) => void;
+    addArtifact: (artifact: DecryptedArtifact) => void;
+    updateArtifact: (artifact: DecryptedArtifact) => void;
+    deleteArtifact: (artifactId: string) => void;
     // Project management methods
     getProjects: () => import('./projectManager').Project[];
     getProject: (projectId: string) => import('./projectManager').Project | null;
@@ -217,6 +224,7 @@ export const storage = create<StorageState>()((set, get) => {
         profile,
         sessions: {},
         machines: {},
+        artifacts: {},  // Initialize artifacts
         sessionsData: null,  // Legacy - to be removed
         sessionListViewData: null,
         sessionMessages: {},
@@ -784,6 +792,50 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionListViewData
             };
         }),
+        // Artifact methods
+        applyArtifacts: (artifacts: DecryptedArtifact[]) => set((state) => {
+            console.log(`🗂️ Storage.applyArtifacts: Applying ${artifacts.length} artifacts`);
+            const mergedArtifacts = { ...state.artifacts };
+            artifacts.forEach(artifact => {
+                mergedArtifacts[artifact.id] = artifact;
+            });
+            console.log(`🗂️ Storage.applyArtifacts: Total artifacts after merge: ${Object.keys(mergedArtifacts).length}`);
+            
+            return {
+                ...state,
+                artifacts: mergedArtifacts
+            };
+        }),
+        addArtifact: (artifact: DecryptedArtifact) => set((state) => {
+            const updatedArtifacts = {
+                ...state.artifacts,
+                [artifact.id]: artifact
+            };
+            
+            return {
+                ...state,
+                artifacts: updatedArtifacts
+            };
+        }),
+        updateArtifact: (artifact: DecryptedArtifact) => set((state) => {
+            const updatedArtifacts = {
+                ...state.artifacts,
+                [artifact.id]: artifact
+            };
+            
+            return {
+                ...state,
+                artifacts: updatedArtifacts
+            };
+        }),
+        deleteArtifact: (artifactId: string) => set((state) => {
+            const { [artifactId]: _, ...remainingArtifacts } = state.artifacts;
+            
+            return {
+                ...state,
+                artifacts: remainingArtifacts
+            };
+        }),
     }
 });
 
@@ -898,6 +950,22 @@ export function useSessionProjectGitStatus(sessionId: string | null) {
 
 export function useLocalSetting<K extends keyof LocalSettings>(name: K): LocalSettings[K] {
     return storage(useShallow((state) => state.localSettings[name]));
+}
+
+// Artifact hooks
+export function useArtifacts(): DecryptedArtifact[] {
+    return storage(useShallow((state) => {
+        if (!state.isDataReady) return [];
+        return Object.values(state.artifacts).sort((a, b) => b.updatedAt - a.updatedAt);
+    }));
+}
+
+export function useArtifact(artifactId: string): DecryptedArtifact | null {
+    return storage(useShallow((state) => state.artifacts[artifactId] ?? null));
+}
+
+export function useArtifactsCount(): number {
+    return storage(useShallow((state) => Object.keys(state.artifacts).length));
 }
 
 export function useEntitlement(id: KnownEntitlements): boolean {
