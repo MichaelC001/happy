@@ -44,6 +44,15 @@ export const pt: TranslationStructure = {
         retry: 'Tentar novamente',
     },
 
+    profile: {
+        userProfile: 'Perfil do usuário',
+        details: 'Detalhes',
+        firstName: 'Nome',
+        lastName: 'Sobrenome',
+        username: 'Nome de usuário',
+        status: 'Status',
+    },
+
     status: {
         connected: 'conectado',
         connecting: 'conectando',
@@ -136,6 +145,8 @@ export const pt: TranslationStructure = {
         showLineNumbersInDiffsDescription: 'Exibir números de linha nos diffs de código',
         showLineNumbersInToolViews: 'Mostrar números de linha nas visualizações de ferramentas',
         showLineNumbersInToolViewsDescription: 'Exibir números de linha nos diffs das visualizações de ferramentas',
+        wrapLinesInDiffs: 'Quebrar linhas nos diffs',
+        wrapLinesInDiffsDescription: 'Quebrar linhas longas ao invés de rolagem horizontal nas visualizações de diffs',
         alwaysShowContextSize: 'Sempre mostrar tamanho do contexto',
         alwaysShowContextSizeDescription: 'Exibir uso do contexto mesmo quando não estiver próximo do limite',
         avatarStyle: 'Estilo do avatar',
@@ -165,6 +176,8 @@ export const pt: TranslationStructure = {
         commandPaletteDisabled: 'Acesso rápido a comandos desativado',
         markdownCopyV2: 'Markdown Copy v2',
         markdownCopyV2Subtitle: 'Pressione e segure para abrir modal de cópia',
+        hideInactiveSessions: 'Ocultar sessões inativas',
+        hideInactiveSessionsSubtitle: 'Mostre apenas os chats ativos na sua lista',
     },
 
     errors: {
@@ -187,6 +200,8 @@ export const pt: TranslationStructure = {
         tokenExchangeFailed: 'Falha ao trocar código de autorização',
         oauthAuthorizationDenied: 'A autorização foi negada',
         webViewLoadFailed: 'Falha ao carregar a página de autenticação',
+        failedToLoadProfile: 'Falha ao carregar o perfil do usuário',
+        userNotFound: 'Usuário não encontrado',
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>
@@ -201,6 +216,12 @@ export const pt: TranslationStructure = {
             `Falha ao desconectar ${service}`,
         connectServiceFailed: ({ service }: { service: string }) =>
             `Falha ao conectar ${service}. Por favor, tente novamente.`,
+        failedToLoadFriends: 'Falha ao carregar lista de amigos',
+        failedToAcceptRequest: 'Falha ao aceitar solicitação de amizade',
+        failedToRejectRequest: 'Falha ao rejeitar solicitação de amizade',
+        failedToRemoveFriend: 'Falha ao remover amigo',
+        searchFailed: 'A busca falhou. Por favor, tente novamente.',
+        failedToSendRequest: 'Falha ao enviar solicitação de amizade',
     },
 
     newSession: {
@@ -209,8 +230,6 @@ export const pt: TranslationStructure = {
         noMachinesFound: 'Nenhuma máquina encontrada. Inicie uma sessão Happy no seu computador primeiro.',
         allMachinesOffline: 'Todas as máquinas estão offline',
         machineDetails: 'Ver detalhes da máquina →',
-        noMachineSelected: 'Nenhuma máquina selecionada',
-        noPathSelected: 'Nenhum caminho selecionado',
         directoryDoesNotExist: 'Diretório não encontrado',
         createDirectoryConfirm: ({ directory }: { directory: string }) => `O diretório ${directory} não existe. Deseja criá-lo?`,
         sessionStarted: 'Sessão iniciada',
@@ -220,7 +239,21 @@ export const pt: TranslationStructure = {
         sessionTimeout: 'Tempo limite de inicialização da sessão esgotado. A máquina pode estar lenta ou o daemon pode não estar respondendo.',
         notConnectedToServer: 'Não conectado ao servidor. Verifique sua conexão com a internet.',
         startingSession: 'Iniciando sessão...',
-        startNewSessionInFolder: 'Nova sessão aqui'
+        startNewSessionInFolder: 'Nova sessão aqui',
+        noMachineSelected: 'Por favor, selecione uma máquina para iniciar a sessão',
+        noPathSelected: 'Por favor, selecione um diretório para iniciar a sessão',
+        sessionType: {
+            title: 'Tipo de sessão',
+            simple: 'Simples',
+            worktree: 'Worktree',
+            comingSoon: 'Em breve',
+        },
+        worktree: {
+            creating: ({ name }: { name: string }) => `Criando worktree '${name}'...`,
+            notGitRepo: 'Worktrees requerem um repositório git',
+            failed: ({ error }: { error: string }) => `Falha ao criar worktree: ${error}`,
+            success: 'Worktree criado com sucesso',
+        }
     },
 
     sessionHistory: {
@@ -600,6 +633,7 @@ export const pt: TranslationStructure = {
         linkNewDevice: 'Vincular novo dispositivo', 
         restoreWithSecretKey: 'Restaurar com chave secreta',
         whatsNew: 'Novidades',
+        friends: 'Amigos',
     },
 
     welcome: {
@@ -711,6 +745,56 @@ export const pt: TranslationStructure = {
         bodyLabel: 'CONTEÚDO',
         emptyFieldsError: 'Por favor, insira um título ou conteúdo',
         createError: 'Falha ao criar artefato. Por favor, tente novamente.',
+    },
+
+    friends: {
+        // Friends feature
+        title: 'Amigos',
+        searchTitle: 'Buscar amigos',
+        pendingRequests: 'Solicitações de amizade',
+        myFriends: 'Meus amigos',
+        noFriendsYet: 'Você ainda não tem amigos',
+        findFriends: 'Buscar amigos',
+        remove: 'Remover',
+        pendingRequest: 'Pendente',
+        sentOn: ({ date }: { date: string }) => `Enviado em ${date}`,
+        accept: 'Aceitar',
+        reject: 'Rejeitar',
+        addFriend: 'Adicionar amigo',
+        alreadyFriends: 'Já são amigos',
+        requestPending: 'Solicitação pendente',
+        searchInstructions: 'Digite um nome de usuário para buscar amigos',
+        searchPlaceholder: 'Digite o nome de usuário...',
+        searching: 'Buscando...',
+        userNotFound: 'Usuário não encontrado',
+        noUserFound: 'Nenhum usuário encontrado com esse nome',
+        checkUsername: 'Por favor, verifique o nome de usuário e tente novamente',
+        howToFind: 'Como encontrar amigos',
+        findInstructions: 'Procure amigos pelo nome de usuário. Tanto você quanto seu amigo precisam ter o GitHub conectado para enviar solicitações de amizade.',
+        requestSent: 'Solicitação de amizade enviada!',
+        requestAccepted: 'Solicitação de amizade aceita!',
+        requestRejected: 'Solicitação de amizade rejeitada',
+        friendRemoved: 'Amigo removido',
+        confirmRemove: 'Remover amigo',
+        confirmRemoveMessage: 'Tem certeza de que deseja remover este amigo?',
+        cannotAddYourself: 'Você não pode enviar uma solicitação de amizade para si mesmo',
+        bothMustHaveGithub: 'Ambos os usuários devem ter o GitHub conectado para serem amigos',
+        status: {
+            none: 'Não conectado',
+            requested: 'Solicitação enviada',
+            pending: 'Solicitação pendente',
+            friend: 'Amigos',
+            rejected: 'Rejeitada',
+        },
+        acceptRequest: 'Aceitar solicitação',
+        removeFriend: 'Remover dos amigos',
+        removeFriendConfirm: ({ name }: { name: string }) => `Tem certeza de que deseja remover ${name} dos seus amigos?`,
+        requestSentDescription: ({ name }: { name: string }) => `Sua solicitação de amizade foi enviada para ${name}`,
+        requestFriendship: 'Solicitar amizade',
+        cancelRequest: 'Cancelar solicitação de amizade',
+        cancelRequestConfirm: ({ name }: { name: string }) => `Cancelar sua solicitação de amizade para ${name}?`,
+        denyRequest: 'Recusar solicitação',
+        nowFriendsWith: ({ name }: { name: string }) => `Agora você é amigo de ${name}`,
     }
 } as const;
 

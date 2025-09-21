@@ -44,6 +44,15 @@ export const en = {
         retry: 'Retry',
     },
 
+    profile: {
+        userProfile: 'User Profile',
+        details: 'Details',
+        firstName: 'First Name',
+        lastName: 'Last Name',
+        username: 'Username',
+        status: 'Status',
+    },
+
     status: {
         connected: 'connected',
         connecting: 'connecting',
@@ -136,6 +145,8 @@ export const en = {
         showLineNumbersInDiffsDescription: 'Display line numbers in code diffs',
         showLineNumbersInToolViews: 'Show Line Numbers in Tool Views',
         showLineNumbersInToolViewsDescription: 'Display line numbers in tool view diffs',
+        wrapLinesInDiffs: 'Wrap Lines in Diffs',
+        wrapLinesInDiffsDescription: 'Wrap long lines instead of horizontal scrolling in diff views',
         alwaysShowContextSize: 'Always Show Context Size',
         alwaysShowContextSizeDescription: 'Display context usage even when not near limit',
         avatarStyle: 'Avatar Style',
@@ -165,6 +176,8 @@ export const en = {
         commandPaletteDisabled: 'Quick command access disabled',
         markdownCopyV2: 'Markdown Copy v2',
         markdownCopyV2Subtitle: 'Long press opens copy modal',
+        hideInactiveSessions: 'Hide inactive sessions',
+        hideInactiveSessionsSubtitle: 'Show only active chats in your list',
     },
 
     errors: {
@@ -187,6 +200,8 @@ export const en = {
         tokenExchangeFailed: 'Failed to exchange authorization code',
         oauthAuthorizationDenied: 'Authorization was denied',
         webViewLoadFailed: 'Failed to load authentication page',
+        failedToLoadProfile: 'Failed to load user profile',
+        userNotFound: 'User not found',
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>
@@ -201,6 +216,12 @@ export const en = {
             `Failed to disconnect ${service}`,
         connectServiceFailed: ({ service }: { service: string }) =>
             `Failed to connect ${service}. Please try again.`,
+        failedToLoadFriends: 'Failed to load friends list',
+        failedToAcceptRequest: 'Failed to accept friend request',
+        failedToRejectRequest: 'Failed to reject friend request',
+        failedToRemoveFriend: 'Failed to remove friend',
+        searchFailed: 'Search failed. Please try again.',
+        failedToSendRequest: 'Failed to send friend request',
     },
 
     newSession: {
@@ -220,7 +241,19 @@ export const en = {
         sessionTimeout: 'Session startup timed out. The machine may be slow or the daemon may not be responding.',
         notConnectedToServer: 'Not connected to server. Check your internet connection.',
         noMachineSelected: 'Please select a machine to start the session',
-        noPathSelected: 'Please select a directory to start the session in'
+        noPathSelected: 'Please select a directory to start the session in',
+        sessionType: {
+            title: 'Session Type',
+            simple: 'Simple',
+            worktree: 'Worktree',
+            comingSoon: 'Coming soon',
+        },
+        worktree: {
+            creating: ({ name }: { name: string }) => `Creating worktree '${name}'...`,
+            notGitRepo: 'Worktrees require a git repository',
+            failed: ({ error }: { error: string }) => `Failed to create worktree: ${error}`,
+            success: 'Worktree created successfully',
+        }
     },
 
     sessionHistory: {
@@ -600,6 +633,7 @@ export const en = {
         linkNewDevice: 'Link New Device', 
         restoreWithSecretKey: 'Restore with Secret Key',
         whatsNew: "What's New",
+        friends: 'Friends',
     },
 
     welcome: {
@@ -712,6 +746,56 @@ export const en = {
         saving: 'Saving...',
         loading: 'Loading artifacts...',
         error: 'Failed to load artifact',
+    },
+
+    friends: {
+        // Friends feature
+        title: 'Friends',
+        searchTitle: 'Find Friends',
+        pendingRequests: 'Friend Requests',
+        myFriends: 'My Friends',
+        noFriendsYet: "You don't have any friends yet",
+        findFriends: 'Find Friends',
+        remove: 'Remove',
+        pendingRequest: 'Pending',
+        sentOn: ({ date }: { date: string }) => `Sent on ${date}`,
+        accept: 'Accept',
+        reject: 'Reject',
+        addFriend: 'Add Friend',
+        alreadyFriends: 'Already Friends',
+        requestPending: 'Request Pending',
+        searchInstructions: 'Enter a username to search for friends',
+        searchPlaceholder: 'Enter username...',
+        searching: 'Searching...',
+        userNotFound: 'User not found',
+        noUserFound: 'No user found with that username',
+        checkUsername: 'Please check the username and try again',
+        howToFind: 'How to Find Friends',
+        findInstructions: 'Search for friends by their username. Both you and your friend need to have GitHub connected to send friend requests.',
+        requestSent: 'Friend request sent!',
+        requestAccepted: 'Friend request accepted!',
+        requestRejected: 'Friend request rejected',
+        friendRemoved: 'Friend removed',
+        confirmRemove: 'Remove Friend',
+        confirmRemoveMessage: 'Are you sure you want to remove this friend?',
+        cannotAddYourself: 'You cannot send a friend request to yourself',
+        bothMustHaveGithub: 'Both users must have GitHub connected to become friends',
+        status: {
+            none: 'Not connected',
+            requested: 'Request sent',
+            pending: 'Request pending',
+            friend: 'Friends',
+            rejected: 'Rejected',
+        },
+        acceptRequest: 'Accept Request',
+        removeFriend: 'Remove Friend',
+        removeFriendConfirm: ({ name }: { name: string }) => `Are you sure you want to remove ${name} as a friend?`,
+        requestSentDescription: ({ name }: { name: string }) => `Your friend request has been sent to ${name}`,
+        requestFriendship: 'Request friendship',
+        cancelRequest: 'Cancel friendship request',
+        cancelRequestConfirm: ({ name }: { name: string }) => `Cancel your friendship request to ${name}?`,
+        denyRequest: 'Deny friendship',
+        nowFriendsWith: ({ name }: { name: string }) => `You are now friends with ${name}`,
     }
 } as const;
 
