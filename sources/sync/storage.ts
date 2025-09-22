@@ -8,6 +8,7 @@ import { isMachineOnline } from '@/utils/machineUtils';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
+import { TodoState } from "../-zen/model/ops";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
 import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes } from "./persistence";
@@ -19,6 +20,7 @@ import { getCurrentRealtimeSessionId, getVoiceSession } from '@/realtime/Realtim
 import { isMutableTool } from "@/components/tools/knownTools";
 import { projectManager } from "./projectManager";
 import { DecryptedArtifact } from "./artifactTypes";
+import { FeedItem } from "./feedTypes";
 
 /**
  * Centralized session online state resolver
@@ -73,12 +75,21 @@ interface StorageState {
     machines: Record<string, Machine>;
     artifacts: Record<string, DecryptedArtifact>;  // New artifacts storage
     friends: Record<string, UserProfile>;  // All relationships (friends, pending, requested, etc.)
+    users: Record<string, UserProfile | null>;  // Global user cache, null = 404/failed fetch
+    feedItems: FeedItem[];  // Simple list of feed items
+    feedHead: string | null;  // Newest cursor
+    feedTail: string | null;  // Oldest cursor
+    feedHasMore: boolean;
+    feedLoaded: boolean;  // True after initial feed fetch
+    friendsLoaded: boolean;  // True after initial friends fetch
     realtimeStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
     socketStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
     socketLastConnectedAt: number | null;
     socketLastDisconnectedAt: number | null;
     isDataReady: boolean;
     nativeUpdateStatus: { available: boolean; updateUrl?: string } | null;
+    todoState: TodoState | null;
+    todosLoaded: boolean;
     applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => void;
     applyMachines: (machines: Machine[], replace?: boolean) => void;
     applyLoaded: () => void;
@@ -90,6 +101,7 @@ interface StorageState {
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
     applyPurchases: (customerInfo: CustomerInfo) => void;
     applyProfile: (profile: Profile) => void;
+    applyTodos: (todoState: TodoState) => void;
     applyGitStatus: (sessionId: string, status: GitStatus | null) => void;
     applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => void;
     isMutableToolCall: (sessionId: string, callId: string) => boolean;
@@ -98,12 +110,13 @@ interface StorageState {
     getActiveSessions: () => Session[];
     updateSessionDraft: (sessionId: string, draft: string | null) => void;
     updateSessionPermissionMode: (sessionId: string, mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'read-only' | 'safe-yolo' | 'yolo') => void;
-    updateSessionModelMode: (sessionId: string, mode: 'default' | 'adaptiveUsage' | 'sonnet' | 'opus' | 'gpt-5-minimal' | 'gpt-5-low' | 'gpt-5-medium' | 'gpt-5-high') => void;
+    updateSessionModelMode: (sessionId: string, mode: 'default' | 'adaptiveUsage' | 'sonnet' | 'opus' | 'gpt-5-minimal' | 'gpt-5-low' | 'gpt-5-medium' | 'gpt-5-high' | 'gpt-5-codex-low' | 'gpt-5-codex-medium' | 'gpt-5-codex-high') => void;
     // Artifact methods
     applyArtifacts: (artifacts: DecryptedArtifact[]) => void;
     addArtifact: (artifact: DecryptedArtifact) => void;
     updateArtifact: (artifact: DecryptedArtifact) => void;
     deleteArtifact: (artifactId: string) => void;
+    deleteSession: (sessionId: string) => void;
     // Project management methods
     getProjects: () => import('./projectManager').Project[];
     getProject: (projectId: string) => import('./projectManager').Project | null;
@@ -118,6 +131,13 @@ interface StorageState {
     applyRelationshipUpdate: (event: RelationshipUpdatedEvent) => void;
     getFriend: (userId: string) => UserProfile | undefined;
     getAcceptedFriends: () => UserProfile[];
+    // User cache methods
+    applyUsers: (users: Record<string, UserProfile | null>) => void;
+    getUser: (userId: string) => UserProfile | null | undefined;
+    assumeUsers: (userIds: string[]) => Promise<void>;
+    // Feed methods
+    applyFeedItems: (items: FeedItem[]) => void;
+    clearFeed: () => void;
 }
 
 // Helper function to build unified list view data from sessions and machines
@@ -233,6 +253,15 @@ export const storage = create<StorageState>()((set, get) => {
         machines: {},
         artifacts: {},  // Initialize artifacts
         friends: {},  // Initialize relationships cache
+        users: {},  // Initialize global user cache
+        feedItems: [],  // Initialize feed items list
+        feedHead: null,
+        feedTail: null,
+        feedHasMore: false,
+        feedLoaded: false,  // Initialize as false
+        friendsLoaded: false,  // Initialize as false
+        todoState: null,  // Initialize todo state
+        todosLoaded: false,  // Initialize todos loaded state
         sessionsData: null,  // Legacy - to be removed
         sessionListViewData: null,
         sessionMessages: {},
@@ -630,6 +659,13 @@ export const storage = create<StorageState>()((set, get) => {
                 profile
             };
         }),
+        applyTodos: (todoState: TodoState) => set((state) => {
+            return {
+                ...state,
+                todoState,
+                todosLoaded: true
+            };
+        }),
         applyGitStatus: (sessionId: string, status: GitStatus | null) => set((state) => {
             // Update project git status as well
             projectManager.updateSessionProjectGitStatus(sessionId, status);
@@ -739,7 +775,7 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: updatedSessions
             };
         }),
-        updateSessionModelMode: (sessionId: string, mode: 'default' | 'adaptiveUsage' | 'sonnet' | 'opus' | 'gpt-5-minimal' | 'gpt-5-low' | 'gpt-5-medium' | 'gpt-5-high') => set((state) => {
+        updateSessionModelMode: (sessionId: string, mode: 'default' | 'adaptiveUsage' | 'sonnet' | 'opus' | 'gpt-5-minimal' | 'gpt-5-low' | 'gpt-5-medium' | 'gpt-5-high' | 'gpt-5-codex-low' | 'gpt-5-codex-medium' | 'gpt-5-codex-high') => set((state) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
@@ -844,6 +880,36 @@ export const storage = create<StorageState>()((set, get) => {
                 artifacts: remainingArtifacts
             };
         }),
+        deleteSession: (sessionId: string) => set((state) => {
+            // Remove session from sessions
+            const { [sessionId]: deletedSession, ...remainingSessions } = state.sessions;
+            
+            // Remove session messages if they exist
+            const { [sessionId]: deletedMessages, ...remainingSessionMessages } = state.sessionMessages;
+            
+            // Remove session git status if it exists
+            const { [sessionId]: deletedGitStatus, ...remainingGitStatus } = state.sessionGitStatus;
+            
+            // Clear drafts and permission modes from persistent storage
+            const drafts = loadSessionDrafts();
+            delete drafts[sessionId];
+            saveSessionDrafts(drafts);
+            
+            const modes = loadSessionPermissionModes();
+            delete modes[sessionId];
+            saveSessionPermissionModes(modes);
+            
+            // Rebuild sessionListViewData without the deleted session
+            const sessionListViewData = buildSessionListViewData(remainingSessions);
+            
+            return {
+                ...state,
+                sessions: remainingSessions,
+                sessionMessages: remainingSessionMessages,
+                sessionGitStatus: remainingGitStatus,
+                sessionListViewData
+            };
+        }),
         // Friend management methods
         applyFriends: (friends: UserProfile[]) => set((state) => {
             const mergedFriends = { ...state.friends };
@@ -852,7 +918,8 @@ export const storage = create<StorageState>()((set, get) => {
             });
             return {
                 ...state,
-                friends: mergedFriends
+                friends: mergedFriends,
+                friendsLoaded: true  // Mark as loaded after first fetch
             };
         }),
         applyRelationshipUpdate: (event: RelationshipUpdatedEvent) => set((state) => {
@@ -886,6 +953,80 @@ export const storage = create<StorageState>()((set, get) => {
             const friends = get().friends;
             return Object.values(friends).filter(friend => friend.status === 'friend');
         },
+        // User cache methods
+        applyUsers: (users: Record<string, UserProfile | null>) => set((state) => ({
+            ...state,
+            users: { ...state.users, ...users }
+        })),
+        getUser: (userId: string) => {
+            return get().users[userId];  // Returns UserProfile | null | undefined
+        },
+        assumeUsers: async (userIds: string[]) => {
+            // This will be implemented in sync.ts as it needs access to credentials
+            // Just a placeholder here for the interface
+            const { sync } = await import('./sync');
+            return sync.assumeUsers(userIds);
+        },
+        // Feed methods
+        applyFeedItems: (items: FeedItem[]) => set((state) => {
+            if (items.length === 0) return state;
+            
+            // Create a map of existing items for quick lookup
+            const existingMap = new Map<string, FeedItem>();
+            state.feedItems.forEach(item => {
+                existingMap.set(item.id, item);
+            });
+            
+            // Process new items
+            const updatedItems = [...state.feedItems];
+            let head = state.feedHead;
+            let tail = state.feedTail;
+            
+            items.forEach(newItem => {
+                // Remove items with same repeatKey if it exists
+                if (newItem.repeatKey) {
+                    const indexToRemove = updatedItems.findIndex(item => 
+                        item.repeatKey === newItem.repeatKey
+                    );
+                    if (indexToRemove !== -1) {
+                        updatedItems.splice(indexToRemove, 1);
+                    }
+                }
+                
+                // Add new item if it doesn't exist
+                if (!existingMap.has(newItem.id)) {
+                    updatedItems.push(newItem);
+                }
+                
+                // Update head/tail cursors
+                if (!head || newItem.counter > parseInt(head.substring(2), 10)) {
+                    head = newItem.cursor;
+                }
+                if (!tail || newItem.counter < parseInt(tail.substring(2), 10)) {
+                    tail = newItem.cursor;
+                }
+            });
+            
+            // Sort by counter (desc - newest first)
+            updatedItems.sort((a, b) => b.counter - a.counter);
+            
+            return {
+                ...state,
+                feedItems: updatedItems,
+                feedHead: head,
+                feedTail: tail,
+                feedLoaded: true  // Mark as loaded after first fetch
+            };
+        }),
+        clearFeed: () => set((state) => ({
+            ...state,
+            feedItems: [],
+            feedHead: null,
+            feedTail: null,
+            feedHasMore: false,
+            feedLoaded: false,  // Reset loading flag
+            friendsLoaded: false  // Reset loading flag
+        })),
     }
 });
 
@@ -1086,6 +1227,25 @@ export function useAcceptedFriends() {
         return Object.values(state.friends).filter(friend => friend.status === 'friend');
     }));
 }
+
+export function useFeedItems() {
+    return storage(useShallow((state) => state.feedItems));
+}
+export function useFeedLoaded() {
+    return storage((state) => state.feedLoaded);
+}
+export function useFriendsLoaded() {
+    return storage((state) => state.friendsLoaded);
+}
+
+export function useFriend(userId: string | undefined) {
+    return storage(useShallow((state) => userId ? state.friends[userId] : undefined));
+}
+
+export function useUser(userId: string | undefined) {
+    return storage(useShallow((state) => userId ? state.users[userId] : undefined));
+}
+
 export function useRequestedFriends() {
     return storage(useShallow((state) => {
         // Filter friends to get sent requests (where status is 'requested')

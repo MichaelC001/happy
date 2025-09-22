@@ -26,6 +26,20 @@ function plural({ count, one, few, many }: { count: number; one: string; few: st
  * Must match the exact structure of the English translations
  */
 export const ru: TranslationStructure = {
+    tabs: {
+        // Tab navigation labels
+        inbox: 'Входящие',
+        sessions: 'Терминалы',
+        settings: 'Настройки',
+    },
+
+    inbox: {
+        // Inbox screen
+        emptyTitle: 'Входящие пусты',
+        emptyDescription: 'Подключитесь к друзьям, чтобы начать делиться сессиями',
+        updates: 'Обновления',
+    },
+
     common: {
         // Simple string constants
         cancel: 'Отмена',
@@ -69,6 +83,7 @@ export const ru: TranslationStructure = {
         github: 'GitHub',
         machines: 'Машины',
         features: 'Функции',
+        social: 'Социальное',
         account: 'Аккаунт',
         accountSubtitle: 'Управление учётной записью',
         appearance: 'Внешний вид',
@@ -95,6 +110,8 @@ export const ru: TranslationStructure = {
         connectGithubAccount: 'Подключить аккаунт GitHub',
         claudeAuthSuccess: 'Успешно подключено к Claude',
         exchangingTokens: 'Обмен токенов...',
+        usage: 'Использование',
+        usageSubtitle: 'Просмотр использования API и затрат',
 
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Аккаунт ${service} подключен`,
@@ -185,6 +202,8 @@ export const ru: TranslationStructure = {
         webViewLoadFailed: 'Не удалось загрузить страницу аутентификации',
         failedToLoadProfile: 'Не удалось загрузить профиль пользователя',
         userNotFound: 'Пользователь не найден',
+        sessionDeleted: 'Сессия была удалена',
+        sessionDeletedDescription: 'Эта сессия была окончательно удалена',
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>
@@ -311,6 +330,12 @@ export const ru: TranslationStructure = {
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>
             `Установлена версия ${currentVersion}. Обновите до ${requiredVersion} или новее`,
         updateCliInstructions: 'Пожалуйста, выполните npm install -g happy-coder@latest',
+        deleteSession: 'Удалить сессию',
+        deleteSessionSubtitle: 'Удалить эту сессию навсегда',
+        deleteSessionConfirm: 'Удалить сессию навсегда?',
+        deleteSessionWarning: 'Это действие нельзя отменить. Все сообщения и данные, связанные с этой сессией, будут удалены навсегда.',
+        failedToDeleteSession: 'Не удалось удалить сессию',
+        sessionDeleted: 'Сессия успешно удалена',
     },
 
     components: {
@@ -394,6 +419,9 @@ export const ru: TranslationStructure = {
         },
         codexModel: {
             title: 'МОДЕЛЬ CODEX',
+            gpt5CodexLow: 'gpt-5-codex low',
+            gpt5CodexMedium: 'gpt-5-codex medium',
+            gpt5CodexHigh: 'gpt-5-codex high',
             gpt5Minimal: 'GPT-5 Минимальная',
             gpt5Low: 'GPT-5 Низкая',
             gpt5Medium: 'GPT-5 Средняя',
@@ -417,7 +445,7 @@ export const ru: TranslationStructure = {
     },
 
     sidebar: {
-        sessionsTitle: 'Сессии',
+        sessionsTitle: 'Happy',
     },
 
     toolView: {
@@ -773,6 +801,7 @@ export const ru: TranslationStructure = {
     friends: {
         // Friends feature
         title: 'Друзья',
+        manageFriends: 'Управляйте своими друзьями и связями',
         searchTitle: 'Найти друзей',
         pendingRequests: 'Запросы в друзья',
         myFriends: 'Мои друзья',
@@ -818,6 +847,28 @@ export const ru: TranslationStructure = {
         cancelRequestConfirm: ({ name }: { name: string }) => `Отменить ваш запрос в друзья к ${name}?`,
         denyRequest: 'Отклонить запрос',
         nowFriendsWith: ({ name }: { name: string }) => `Теперь вы друзья с ${name}`,
+    },
+
+    usage: {
+        // Usage panel strings
+        today: 'Сегодня',
+        last7Days: 'Последние 7 дней',
+        last30Days: 'Последние 30 дней',
+        totalTokens: 'Всего токенов',
+        totalCost: 'Общая стоимость',
+        tokens: 'Токены',
+        cost: 'Стоимость',
+        usageOverTime: 'Использование во времени',
+        byModel: 'По модели',
+        noData: 'Данные об использовании недоступны',
+    },
+
+    feed: {
+        // Feed notifications for friend requests and acceptances
+        friendRequestFrom: ({ name }: { name: string }) => `${name} отправил вам запрос в друзья`,
+        friendRequestGeneric: 'Новый запрос в друзья',
+        friendAccepted: ({ name }: { name: string }) => `Вы теперь друзья с ${name}`,
+        friendAcceptedGeneric: 'Запрос в друзья принят',
     }
 } as const;
 

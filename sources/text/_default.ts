@@ -15,6 +15,20 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
 }
 
 export const en = {
+    tabs: {
+        // Tab navigation labels
+        inbox: 'Inbox',
+        sessions: 'Terminals',
+        settings: 'Settings',
+    },
+
+    inbox: {
+        // Inbox screen
+        emptyTitle: 'Empty Inbox',
+        emptyDescription: 'Connect with friends to start sharing sessions',
+        updates: 'Updates',
+    },
+
     common: {
         // Simple string constants
         cancel: 'Cancel',
@@ -86,6 +100,7 @@ export const en = {
         github: 'GitHub',
         machines: 'Machines',
         features: 'Features',
+        social: 'Social',
         account: 'Account',
         accountSubtitle: 'Manage your account details',
         appearance: 'Appearance',
@@ -112,6 +127,8 @@ export const en = {
         connectGithubAccount: 'Connect your GitHub account',
         claudeAuthSuccess: 'Successfully connected to Claude',
         exchangingTokens: 'Exchanging tokens...',
+        usage: 'Usage',
+        usageSubtitle: 'View your API usage and costs',
 
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `${service} account connected`,
@@ -202,6 +219,8 @@ export const en = {
         webViewLoadFailed: 'Failed to load authentication page',
         failedToLoadProfile: 'Failed to load user profile',
         userNotFound: 'User not found',
+        sessionDeleted: 'Session has been deleted',
+        sessionDeletedDescription: 'This session has been permanently removed',
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>
@@ -336,6 +355,12 @@ export const en = {
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>
             `Version ${currentVersion} installed. Update to ${requiredVersion} or later`,
         updateCliInstructions: 'Please run npm install -g happy-coder@latest',
+        deleteSession: 'Delete Session',
+        deleteSessionSubtitle: 'Permanently remove this session',
+        deleteSessionConfirm: 'Delete Session Permanently?',
+        deleteSessionWarning: 'This action cannot be undone. All messages and data associated with this session will be permanently deleted.',
+        failedToDeleteSession: 'Failed to delete session',
+        sessionDeleted: 'Session deleted successfully',
         
     },
 
@@ -384,6 +409,9 @@ export const en = {
         },
         codexModel: {
             title: 'CODEX MODEL',
+            gpt5CodexLow: 'gpt-5-codex low',
+            gpt5CodexMedium: 'gpt-5-codex medium',
+            gpt5CodexHigh: 'gpt-5-codex high',
             gpt5Minimal: 'GPT-5 Minimal',
             gpt5Low: 'GPT-5 Low',
             gpt5Medium: 'GPT-5 Medium',
@@ -407,7 +435,7 @@ export const en = {
     },
 
     sidebar: {
-        sessionsTitle: 'Sessions',
+        sessionsTitle: 'Happy',
     },
 
     toolView: {
@@ -751,6 +779,7 @@ export const en = {
     friends: {
         // Friends feature
         title: 'Friends',
+        manageFriends: 'Manage your friends and connections',
         searchTitle: 'Find Friends',
         pendingRequests: 'Friend Requests',
         myFriends: 'My Friends',
@@ -796,6 +825,28 @@ export const en = {
         cancelRequestConfirm: ({ name }: { name: string }) => `Cancel your friendship request to ${name}?`,
         denyRequest: 'Deny friendship',
         nowFriendsWith: ({ name }: { name: string }) => `You are now friends with ${name}`,
+    },
+
+    usage: {
+        // Usage panel strings
+        today: 'Today',
+        last7Days: 'Last 7 days',
+        last30Days: 'Last 30 days',
+        totalTokens: 'Total Tokens',
+        totalCost: 'Total Cost',
+        tokens: 'Tokens',
+        cost: 'Cost',
+        usageOverTime: 'Usage over time',
+        byModel: 'By Model',
+        noData: 'No usage data available',
+    },
+
+    feed: {
+        // Feed notifications for friend requests and acceptances
+        friendRequestFrom: ({ name }: { name: string }) => `${name} sent you a friend request`,
+        friendRequestGeneric: 'New friend request',
+        friendAccepted: ({ name }: { name: string }) => `You are now friends with ${name}`,
+        friendAcceptedGeneric: 'Friend request accepted',
     }
 } as const;
 

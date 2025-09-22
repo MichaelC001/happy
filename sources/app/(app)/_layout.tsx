@@ -46,6 +46,14 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="inbox/index"
+                options={{
+                    headerShown: false,
+                    headerTitle: t('tabs.inbox'),
+                    headerBackTitle: t('common.home')
+                }}
+            />
+            <Stack.Screen
                 name="settings/index"
                 options={{
                     headerShown: true,
@@ -307,6 +315,29 @@ export default function RootLayout() {
                 name="new/index"
                 options={{
                     headerTitle: t('newSession.title'),
+                    headerBackTitle: t('common.back'),
+                    presentation: 'modal',
+                }}
+            />
+            <Stack.Screen
+                name="zen/index"
+                options={{
+                    headerShown: false
+                }}
+            />
+            <Stack.Screen
+                name="zen/new"
+                options={{
+                    presentation: 'modal',
+                    headerTitle: 'New Task',
+                    headerBackTitle: t('common.cancel'),
+                }}
+            />
+            <Stack.Screen
+                name="zen/view"
+                options={{
+                    presentation: 'modal',
+                    headerTitle: 'Task Details',
                     headerBackTitle: t('common.back'),
                 }}
             />

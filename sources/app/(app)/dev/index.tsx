@@ -35,7 +35,7 @@ export default function DevScreen() {
                 },
                 {
                     text: 'Save',
-                    onPress: (newUrl) => {
+                    onPress: (newUrl?: string) => {
                         if (newUrl && newUrl !== currentUrl) {
                             const validation = validateServerUrl(newUrl);
                             if (validation.valid) {
@@ -257,6 +257,12 @@ export default function DevScreen() {
                     subtitle="Test QR code generation with different parameters"
                     icon={<Ionicons name="qr-code-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/qr-test')}
+                />
+                <Item
+                    title="Todo Demo"
+                    subtitle="Wunderlist-style todo list with inline editing and reordering"
+                    icon={<Ionicons name="checkbox-outline" size={28} color="#34C759" />}
+                    onPress={() => router.push('/dev/todo-demo')}
                 />
             </ItemGroup>
 

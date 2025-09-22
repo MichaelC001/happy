@@ -26,6 +26,7 @@ import { getServerUrl } from './serverConfig';
 import { config } from '@/config';
 import { log } from '@/log';
 import { gitStatusSync } from './gitStatusSync';
+import { projectManager } from './projectManager';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
@@ -33,7 +34,11 @@ import { systemPrompt } from './prompt/systemPrompt';
 import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
 import { DecryptedArtifact, Artifact, ArtifactCreateRequest, ArtifactUpdateRequest } from './artifactTypes';
 import { ArtifactEncryption } from './encryption/artifactEncryption';
-import { getFriendsList } from './apiFriends';
+import { getFriendsList, getUserProfile } from './apiFriends';
+import { fetchFeed } from './apiFeed';
+import { FeedItem } from './feedTypes';
+import { UserProfile } from './friendTypes';
+import { initializeTodoSync } from '../-zen/model/ops';
 
 class Sync {
 
@@ -57,6 +62,8 @@ class Sync {
     private artifactsSync: InvalidateSync;
     private friendsSync: InvalidateSync;
     private friendRequestsSync: InvalidateSync;
+    private feedSync: InvalidateSync;
+    private todosSync: InvalidateSync;
     private activityAccumulator: ActivityUpdateAccumulator;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
     revenueCatInitialized = false;
@@ -75,6 +82,8 @@ class Sync {
         this.artifactsSync = new InvalidateSync(this.fetchArtifactsList);
         this.friendsSync = new InvalidateSync(this.fetchFriends);
         this.friendRequestsSync = new InvalidateSync(this.fetchFriendRequests);
+        this.feedSync = new InvalidateSync(this.fetchFeed);
+        this.todosSync = new InvalidateSync(this.fetchTodos);
 
         const registerPushToken = async () => {
             if (__DEV__) {
@@ -99,6 +108,8 @@ class Sync {
                 this.artifactsSync.invalidate();
                 this.friendsSync.invalidate();
                 this.friendRequestsSync.invalidate();
+                this.feedSync.invalidate();
+                this.todosSync.invalidate();
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
             }
@@ -158,7 +169,9 @@ class Sync {
         this.friendsSync.invalidate();
         this.friendRequestsSync.invalidate();
         this.artifactsSync.invalidate();
-        log.log('🔄 #init: All syncs invalidated, including artifacts');
+        this.feedSync.invalidate();
+        this.todosSync.invalidate();
+        log.log('🔄 #init: All syncs invalidated, including artifacts and todos');
 
         // Wait for both sessions and machines to load, then mark as ready
         Promise.all([
@@ -191,7 +204,7 @@ class Sync {
     }
 
 
-    async sendMessage(sessionId: string, text: string) {
+    async sendMessage(sessionId: string, text: string, displayText?: string) {
 
         // Get encryption
         const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -271,7 +284,8 @@ class Sync {
                 permissionMode: permissionMode || 'default',
                 model,
                 fallbackModel,
-                appendSystemPrompt: systemPrompt
+                appendSystemPrompt: systemPrompt,
+                ...(displayText && { displayText }) // Add displayText if provided
             }
         };
         const encryptedRawRecord = await encryption.encryptRawRecord(content);
@@ -421,6 +435,40 @@ class Sync {
             trackPaywallError(errorMessage);
             return { success: false, error: errorMessage };
         }
+    }
+
+    async assumeUsers(userIds: string[]): Promise<void> {
+        if (!this.credentials || userIds.length === 0) return;
+        
+        const state = storage.getState();
+        // Filter out users we already have in cache (including null for 404s)
+        const missingIds = userIds.filter(id => !(id in state.users));
+        
+        if (missingIds.length === 0) return;
+        
+        log.log(`👤 Fetching ${missingIds.length} missing users...`);
+        
+        // Fetch missing users in parallel
+        const results = await Promise.all(
+            missingIds.map(async (id) => {
+                try {
+                    const profile = await getUserProfile(this.credentials!, id);
+                    return { id, profile };  // profile is null if 404
+                } catch (error) {
+                    console.error(`Failed to fetch user ${id}:`, error);
+                    return { id, profile: null };  // Treat errors as 404
+                }
+            })
+        );
+        
+        // Convert to Record<string, UserProfile | null>
+        const usersMap: Record<string, UserProfile | null> = {};
+        results.forEach(({ id, profile }) => {
+            usersMap[id] = profile;
+        });
+        
+        storage.getState().applyUsers(usersMap);
+        log.log(`👤 Applied ${results.length} users to cache (${results.filter(r => r.profile).length} found, ${results.filter(r => !r.profile).length} not found)`);
     }
 
     //
@@ -929,6 +977,171 @@ class Sync {
         log.log('👥 fetchFriendRequests called - now handled by fetchFriends');
     }
 
+    private fetchTodos = async () => {
+        if (!this.credentials) return;
+
+        try {
+            log.log('📝 Fetching todos...');
+            await initializeTodoSync(this.credentials);
+            log.log('📝 Todos loaded');
+        } catch (error) {
+            log.log('📝 Failed to fetch todos:');
+        }
+    }
+
+    private applyTodoSocketUpdates = async (changes: any[]) => {
+        if (!this.credentials || !this.encryption) return;
+
+        const currentState = storage.getState();
+        const todoState = currentState.todoState;
+        if (!todoState) {
+            // No todo state yet, just refetch
+            this.todosSync.invalidate();
+            return;
+        }
+
+        const { todos, undoneOrder, doneOrder, versions } = todoState;
+        let updatedTodos = { ...todos };
+        let updatedVersions = { ...versions };
+        let indexUpdated = false;
+        let newUndoneOrder = undoneOrder;
+        let newDoneOrder = doneOrder;
+
+        // Process each change
+        for (const change of changes) {
+            try {
+                const key = change.key;
+                const version = change.version;
+
+                // Update version tracking
+                updatedVersions[key] = version;
+
+                if (change.value === null) {
+                    // Item was deleted
+                    if (key.startsWith('todo.') && key !== 'todo.index') {
+                        const todoId = key.substring(5); // Remove 'todo.' prefix
+                        delete updatedTodos[todoId];
+                        newUndoneOrder = newUndoneOrder.filter(id => id !== todoId);
+                        newDoneOrder = newDoneOrder.filter(id => id !== todoId);
+                    }
+                } else {
+                    // Item was added or updated
+                    const decrypted = await this.encryption.decryptRaw(change.value);
+
+                    if (key === 'todo.index') {
+                        // Update the index
+                        const index = decrypted as any;
+                        newUndoneOrder = index.undoneOrder || [];
+                        newDoneOrder = index.completedOrder || []; // Map completedOrder to doneOrder
+                        indexUpdated = true;
+                    } else if (key.startsWith('todo.')) {
+                        // Update a todo item
+                        const todoId = key.substring(5);
+                        if (todoId && todoId !== 'index') {
+                            updatedTodos[todoId] = decrypted as any;
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error(`Failed to process todo change for key ${change.key}:`, error);
+            }
+        }
+
+        // Apply the updated state
+        storage.getState().applyTodos({
+            todos: updatedTodos,
+            undoneOrder: newUndoneOrder,
+            doneOrder: newDoneOrder,
+            versions: updatedVersions
+        });
+
+        log.log('📝 Applied todo socket updates successfully');
+    }
+
+    private fetchFeed = async () => {
+        if (!this.credentials) return;
+
+        try {
+            log.log('📰 Fetching feed...');
+            const state = storage.getState();
+            const existingItems = state.feedItems;
+            const head = state.feedHead;
+            
+            // Load feed items - if we have a head, load newer items
+            let allItems: FeedItem[] = [];
+            let hasMore = true;
+            let cursor = head ? { after: head } : undefined;
+            let loadedCount = 0;
+            const maxItems = 500;
+            
+            // Keep loading until we reach known items or hit max limit
+            while (hasMore && loadedCount < maxItems) {
+                const response = await fetchFeed(this.credentials, {
+                    limit: 100,
+                    ...cursor
+                });
+                
+                // Check if we reached known items
+                const foundKnown = response.items.some(item => 
+                    existingItems.some(existing => existing.id === item.id)
+                );
+                
+                allItems.push(...response.items);
+                loadedCount += response.items.length;
+                hasMore = response.hasMore && !foundKnown;
+                
+                // Update cursor for next page
+                if (response.items.length > 0) {
+                    const lastItem = response.items[response.items.length - 1];
+                    cursor = { after: lastItem.cursor };
+                }
+            }
+            
+            // If this is initial load (no head), also load older items
+            if (!head && allItems.length < 100) {
+                const response = await fetchFeed(this.credentials, {
+                    limit: 100
+                });
+                allItems.push(...response.items);
+            }
+            
+            // Collect user IDs from friend-related feed items
+            const userIds = new Set<string>();
+            allItems.forEach(item => {
+                if (item.body && (item.body.kind === 'friend_request' || item.body.kind === 'friend_accepted')) {
+                    userIds.add(item.body.uid);
+                }
+            });
+            
+            // Fetch missing users
+            if (userIds.size > 0) {
+                await this.assumeUsers(Array.from(userIds));
+            }
+            
+            // Filter out items where user is not found (404)
+            const users = storage.getState().users;
+            const compatibleItems = allItems.filter(item => {
+                // Keep text items
+                if (item.body.kind === 'text') return true;
+                
+                // For friend-related items, check if user exists and is not null (404)
+                if (item.body.kind === 'friend_request' || item.body.kind === 'friend_accepted') {
+                    const userProfile = users[item.body.uid];
+                    // Keep item only if user exists and is not null
+                    return userProfile !== null && userProfile !== undefined;
+                }
+                
+                return true;
+            });
+            
+            // Apply only compatible items to storage
+            storage.getState().applyFeedItems(compatibleItems);
+            log.log(`📰 fetchFeed completed - loaded ${compatibleItems.length} compatible items (${allItems.length - compatibleItems.length} filtered)`);
+        } catch (error) {
+            console.error('Failed to fetch feed:', error);
+        }
+    }
+
     private syncSettings = async () => {
         if (!this.credentials) return;
 
@@ -1291,6 +1504,7 @@ class Sync {
             this.artifactsSync.invalidate();
             this.friendsSync.invalidate();
             this.friendRequestsSync.invalidate();
+            this.feedSync.invalidate();
             const sessionsData = storage.getState().sessionsData;
             if (sessionsData) {
                 for (const item of sessionsData) {
@@ -1366,6 +1580,23 @@ class Sync {
         } else if (updateData.body.t === 'new-session') {
             log.log('🆕 New session update received');
             this.sessionsSync.invalidate();
+        } else if (updateData.body.t === 'delete-session') {
+            log.log('🗑️ Delete session update received');
+            const sessionId = updateData.body.sid;
+            
+            // Remove session from storage
+            storage.getState().deleteSession(sessionId);
+            
+            // Remove encryption keys from memory
+            this.encryption.removeSessionEncryption(sessionId);
+            
+            // Remove from project manager
+            projectManager.removeSession(sessionId);
+            
+            // Clear any cached git status
+            gitStatusSync.clearForSession(sessionId);
+            
+            log.log(`🗑️ Session ${sessionId} deleted from local storage`);
         } else if (updateData.body.t === 'update-session') {
             const session = storage.getState().sessions[updateData.body.id];
             if (session) {
@@ -1496,6 +1727,7 @@ class Sync {
             // Invalidate friends data to refresh with latest changes
             this.friendsSync.invalidate();
             this.friendRequestsSync.invalidate();
+            this.feedSync.invalidate();
         } else if (updateData.body.t === 'new-artifact') {
             log.log('📦 Received new-artifact update');
             const artifactUpdate = updateData.body;
@@ -1607,8 +1839,59 @@ class Sync {
             
             // Remove encryption key from memory
             this.artifactDataKeys.delete(artifactId);
+        } else if (updateData.body.t === 'new-feed-post') {
+            log.log('📰 Received new-feed-post update');
+            const feedUpdate = updateData.body;
             
-            log.log(`📦 Deleted artifact ${artifactId} from storage`);
+            // Convert to FeedItem with counter from cursor
+            const feedItem: FeedItem = {
+                id: feedUpdate.id,
+                body: feedUpdate.body,
+                cursor: feedUpdate.cursor,
+                createdAt: feedUpdate.createdAt,
+                repeatKey: feedUpdate.repeatKey,
+                counter: parseInt(feedUpdate.cursor.substring(2), 10)
+            };
+            
+            // Check if we need to fetch user for friend-related items
+            if (feedItem.body && (feedItem.body.kind === 'friend_request' || feedItem.body.kind === 'friend_accepted')) {
+                await this.assumeUsers([feedItem.body.uid]);
+                
+                // Check if user fetch failed (404) - don't store item if user not found
+                const users = storage.getState().users;
+                const userProfile = users[feedItem.body.uid];
+                if (userProfile === null || userProfile === undefined) {
+                    // User was not found or 404, don't store this item
+                    log.log(`📰 Skipping feed item ${feedItem.id} - user ${feedItem.body.uid} not found`);
+                    return;
+                }
+            }
+            
+            // Apply to storage (will handle repeatKey replacement)
+            storage.getState().applyFeedItems([feedItem]);
+        } else if (updateData.body.t === 'kv-batch-update') {
+            log.log('📝 Received kv-batch-update');
+            const kvUpdate = updateData.body;
+
+            // Process KV changes for todos
+            if (kvUpdate.changes && Array.isArray(kvUpdate.changes)) {
+                const todoChanges = kvUpdate.changes.filter(change =>
+                    change.key && change.key.startsWith('todo.')
+                );
+
+                if (todoChanges.length > 0) {
+                    log.log(`📝 Processing ${todoChanges.length} todo KV changes from socket`);
+
+                    // Apply the changes directly to avoid unnecessary refetch
+                    try {
+                        await this.applyTodoSocketUpdates(todoChanges);
+                    } catch (error) {
+                        console.error('Failed to apply todo socket updates:', error);
+                        // Fallback to refetch on error
+                        this.todosSync.invalidate();
+                    }
+                }
+            }
         }
     }
 

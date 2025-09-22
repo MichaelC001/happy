@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { GitHubProfileSchema, ImageRefSchema } from './profile';
 import { RelationshipStatusSchema, UserProfileSchema } from './friendTypes';
+import { FeedBodySchema } from './feedTypes';
 
 //
 // Encrypted message
@@ -34,6 +35,11 @@ export const ApiUpdateNewSessionSchema = z.object({
     id: z.string(), // Session ID
     createdAt: z.number(),
     updatedAt: z.number(),
+});
+
+export const ApiDeleteSessionSchema = z.object({
+    t: z.literal('delete-session'),
+    sid: z.string(), // Session ID
 });
 
 export const ApiUpdateSessionStateSchema = z.object({
@@ -121,20 +127,44 @@ export const ApiRelationshipUpdatedSchema = z.object({
     timestamp: z.number()
 });
 
+// Feed update schema
+export const ApiNewFeedPostSchema = z.object({
+    t: z.literal('new-feed-post'),
+    id: z.string(),
+    body: FeedBodySchema,
+    cursor: z.string(),
+    createdAt: z.number(),
+    repeatKey: z.string().nullable()
+});
+
+// KV batch update schema for real-time KV updates
+export const ApiKvBatchUpdateSchema = z.object({
+    t: z.literal('kv-batch-update'),
+    changes: z.array(z.object({
+        key: z.string(),
+        value: z.string().nullable(),
+        version: z.number()
+    }))
+});
+
 export const ApiUpdateSchema = z.discriminatedUnion('t', [
     ApiUpdateNewMessageSchema,
     ApiUpdateNewSessionSchema,
+    ApiDeleteSessionSchema,
     ApiUpdateSessionStateSchema,
     ApiUpdateAccountSchema,
     ApiUpdateMachineStateSchema,
     ApiNewArtifactSchema,
     ApiUpdateArtifactSchema,
     ApiDeleteArtifactSchema,
-    ApiRelationshipUpdatedSchema
+    ApiRelationshipUpdatedSchema,
+    ApiNewFeedPostSchema,
+    ApiKvBatchUpdateSchema
 ]);
 
 export type ApiUpdateNewMessage = z.infer<typeof ApiUpdateNewMessageSchema>;
 export type ApiRelationshipUpdated = z.infer<typeof ApiRelationshipUpdatedSchema>;
+export type ApiKvBatchUpdate = z.infer<typeof ApiKvBatchUpdateSchema>;
 export type ApiUpdate = z.infer<typeof ApiUpdateSchema>;
 
 //

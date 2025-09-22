@@ -15,6 +15,20 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
  * Must match the exact structure of the English translations
  */
 export const ca: TranslationStructure = {
+    tabs: {
+        // Tab navigation labels
+        inbox: 'Safata',
+        sessions: 'Terminals',
+        settings: 'Configuració',
+    },
+
+    inbox: {
+        // Inbox screen
+        emptyTitle: 'Safata buida',
+        emptyDescription: 'Connecta\'t amb amics per començar a compartir sessions',
+        updates: 'Actualitzacions',
+    },
+
     common: {
         // Simple string constants
         cancel: 'Cancel·la',
@@ -86,6 +100,7 @@ export const ca: TranslationStructure = {
         github: 'GitHub',
         machines: 'Màquines',
         features: 'Funcions',
+        social: 'Social',
         account: 'Compte',
         accountSubtitle: 'Gestiona els detalls del teu compte',
         appearance: 'Aparença',
@@ -112,6 +127,8 @@ export const ca: TranslationStructure = {
         connectGithubAccount: 'Connecta el teu compte de GitHub',
         claudeAuthSuccess: 'Connexió amb Claude realitzada amb èxit',
         exchangingTokens: 'Intercanviant tokens...',
+        usage: 'Ús',
+        usageSubtitle: "Veure l'ús de l'API i costos",
 
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Compte de ${service} connectat`,
@@ -202,6 +219,8 @@ export const ca: TranslationStructure = {
         webViewLoadFailed: 'Ha fallat la càrrega de la pàgina d\'autenticació',
         failedToLoadProfile: 'No s\'ha pogut carregar el perfil d\'usuari',
         userNotFound: 'Usuari no trobat',
+        sessionDeleted: 'La sessió s\'ha eliminat',
+        sessionDeletedDescription: 'Aquesta sessió s\'ha eliminat permanentment',
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>
@@ -336,6 +355,12 @@ export const ca: TranslationStructure = {
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>
             `Versió ${currentVersion} instal·lada. Actualitzeu a ${requiredVersion} o posterior`,
         updateCliInstructions: 'Si us plau executeu npm install -g happy-coder@latest',
+        deleteSession: 'Elimina la sessió',
+        deleteSessionSubtitle: 'Elimina permanentment aquesta sessió',
+        deleteSessionConfirm: 'Eliminar la sessió permanentment?',
+        deleteSessionWarning: 'Aquesta acció no es pot desfer. Tots els missatges i dades associats amb aquesta sessió s\'eliminaran permanentment.',
+        failedToDeleteSession: 'Error en eliminar la sessió',
+        sessionDeleted: 'Sessió eliminada amb èxit',
         
     },
 
@@ -384,6 +409,9 @@ export const ca: TranslationStructure = {
         },
         codexModel: {
             title: 'MODEL CODEX',
+            gpt5CodexLow: 'gpt-5-codex low',
+            gpt5CodexMedium: 'gpt-5-codex medium',
+            gpt5CodexHigh: 'gpt-5-codex high',
             gpt5Minimal: 'GPT-5 Mínim',
             gpt5Low: 'GPT-5 Baix',
             gpt5Medium: 'GPT-5 Mitjà',
@@ -407,7 +435,7 @@ export const ca: TranslationStructure = {
     },
 
     sidebar: {
-        sessionsTitle: 'Sessions',
+        sessionsTitle: 'Happy',
     },
 
     toolView: {
@@ -750,6 +778,7 @@ export const ca: TranslationStructure = {
     friends: {
         // Friends feature
         title: 'Amics',
+        manageFriends: 'Gestiona els teus amics i connexions',
         searchTitle: 'Buscar amics',
         pendingRequests: 'Sol·licituds d\'amistat',
         myFriends: 'Els meus amics',
@@ -795,6 +824,28 @@ export const ca: TranslationStructure = {
         cancelRequestConfirm: ({ name }: { name: string }) => `Cancel·lar la teva sol·licitud d\'amistat a ${name}?`,
         denyRequest: 'Rebutjar sol·licitud',
         nowFriendsWith: ({ name }: { name: string }) => `Ara ets amic de ${name}`,
+    },
+
+    usage: {
+        // Usage panel strings
+        today: 'Avui',
+        last7Days: 'Últims 7 dies',
+        last30Days: 'Últims 30 dies',
+        totalTokens: 'Tokens totals',
+        totalCost: 'Cost total',
+        tokens: 'Tokens',
+        cost: 'Cost',
+        usageOverTime: 'Ús al llarg del temps',
+        byModel: 'Per model',
+        noData: "No hi ha dades d'ús disponibles",
+    },
+
+    feed: {
+        // Feed notifications for friend requests and acceptances
+        friendRequestFrom: ({ name }: { name: string }) => `${name} t'ha enviat una sol·licitud d'amistat`,
+        friendRequestGeneric: 'Nova sol·licitud d\'amistat',
+        friendAccepted: ({ name }: { name: string }) => `Ara ets amic de ${name}`,
+        friendAcceptedGeneric: 'Sol·licitud d\'amistat acceptada',
     }
 } as const;
 

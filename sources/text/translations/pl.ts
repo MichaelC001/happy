@@ -26,6 +26,20 @@ function plural({ count, one, few, many }: { count: number; one: string; few: st
  * Must match the exact structure of the English translations
  */
 export const pl: TranslationStructure = {
+    tabs: {
+        // Tab navigation labels
+        inbox: 'Skrzynka',
+        sessions: 'Terminale',
+        settings: 'Ustawienia',
+    },
+
+    inbox: {
+        // Inbox screen
+        emptyTitle: 'Pusta skrzynka',
+        emptyDescription: 'Połącz się z przyjaciółmi, aby zacząć udostępniać sesje',
+        updates: 'Aktualizacje',
+    },
+
     common: {
         // Simple string constants
         cancel: 'Anuluj',
@@ -97,6 +111,7 @@ export const pl: TranslationStructure = {
         github: 'GitHub',
         machines: 'Maszyny',
         features: 'Funkcje',
+        social: 'Społeczność',
         account: 'Konto',
         accountSubtitle: 'Zarządzaj szczegółami konta',
         appearance: 'Wygląd',
@@ -123,6 +138,8 @@ export const pl: TranslationStructure = {
         connectGithubAccount: 'Połącz konto GitHub',
         claudeAuthSuccess: 'Pomyślnie połączono z Claude',
         exchangingTokens: 'Wymiana tokenów...',
+        usage: 'Użycie',
+        usageSubtitle: 'Zobacz użycie API i koszty',
 
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Konto ${service} połączone`,
@@ -213,6 +230,8 @@ export const pl: TranslationStructure = {
         webViewLoadFailed: 'Nie udało się załadować strony uwierzytelniania',
         failedToLoadProfile: 'Nie udało się załadować profilu użytkownika',
         userNotFound: 'Użytkownik nie został znaleziony',
+        sessionDeleted: 'Sesja została usunięta',
+        sessionDeletedDescription: 'Ta sesja została trwale usunięta',
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>
@@ -347,6 +366,12 @@ export const pl: TranslationStructure = {
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>
             `Zainstalowana wersja ${currentVersion}. Zaktualizuj do ${requiredVersion} lub nowszej`,
         updateCliInstructions: 'Proszę uruchomić npm install -g happy-coder@latest',
+        deleteSession: 'Usuń sesję',
+        deleteSessionSubtitle: 'Trwale usuń tę sesję',
+        deleteSessionConfirm: 'Usunąć sesję na stałe?',
+        deleteSessionWarning: 'Ta operacja jest nieodwracalna. Wszystkie wiadomości i dane powiązane z tą sesją zostaną trwale usunięte.',
+        failedToDeleteSession: 'Nie udało się usunąć sesji',
+        sessionDeleted: 'Sesja została pomyślnie usunięta',
     },
 
     components: {
@@ -394,6 +419,9 @@ export const pl: TranslationStructure = {
         },
         codexModel: {
             title: 'MODEL CODEX',
+            gpt5CodexLow: 'gpt-5-codex low',
+            gpt5CodexMedium: 'gpt-5-codex medium',
+            gpt5CodexHigh: 'gpt-5-codex high',
             gpt5Minimal: 'GPT-5 Minimalny',
             gpt5Low: 'GPT-5 Niski',
             gpt5Medium: 'GPT-5 Średni',
@@ -417,7 +445,7 @@ export const pl: TranslationStructure = {
     },
 
     sidebar: {
-        sessionsTitle: 'Sesje',
+        sessionsTitle: 'Happy',
     },
 
     toolView: {
@@ -774,6 +802,7 @@ export const pl: TranslationStructure = {
     friends: {
         // Friends feature
         title: 'Przyjaciele',
+        manageFriends: 'Zarządzaj swoimi przyjaciółmi i połączeniami',
         searchTitle: 'Znajdź przyjaciół',
         pendingRequests: 'Zaproszenia do znajomych',
         myFriends: 'Moi przyjaciele',
@@ -819,6 +848,28 @@ export const pl: TranslationStructure = {
         cancelRequestConfirm: ({ name }: { name: string }) => `Anulować zaproszenie do znajomych wysłane do ${name}?`,
         denyRequest: 'Odrzuć zaproszenie',
         nowFriendsWith: ({ name }: { name: string }) => `Teraz jesteś w gronie znajomych z ${name}`,
+    },
+
+    usage: {
+        // Usage panel strings
+        today: 'Dzisiaj',
+        last7Days: 'Ostatnie 7 dni',
+        last30Days: 'Ostatnie 30 dni',
+        totalTokens: 'Łącznie tokenów',
+        totalCost: 'Całkowity koszt',
+        tokens: 'Tokeny',
+        cost: 'Koszt',
+        usageOverTime: 'Użycie w czasie',
+        byModel: 'Według modelu',
+        noData: 'Brak danych o użyciu',
+    },
+
+    feed: {
+        // Feed notifications for friend requests and acceptances
+        friendRequestFrom: ({ name }: { name: string }) => `${name} wysłał Ci zaproszenie do znajomych`,
+        friendRequestGeneric: 'Nowe zaproszenie do znajomych',
+        friendAccepted: ({ name }: { name: string }) => `Jesteś teraz znajomym z ${name}`,
+        friendAcceptedGeneric: 'Zaproszenie do znajomych zaakceptowane',
     }
 } as const;
 

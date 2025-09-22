@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { Header } from './navigation/Header';
 import { useSocketStatus } from '@/sync/storage';
-import { Pressable, Text, View } from 'react-native';
+import { Platform, Pressable, Text, View } from 'react-native';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
 import { Ionicons } from '@expo/vector-icons';
@@ -13,18 +13,25 @@ import { t } from '@/text';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     headerButton: {
-        marginRight: 8,
-        width: 24,
-        height: 24,
+        // marginHorizontal: 4,
+        width: 32,
+        height: 32,
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     iconButton: {
         color: theme.colors.header.tint,
     },
     logoContainer: {
-        marginLeft: 8,
+        // marginHorizontal: 4,
+        width: 32,
+        height: 32,
+        alignItems: 'center',
+        justifyContent: 'center',
         tintColor: theme.colors.header.tint,
     },
     titleContainer: {
+        flex: 1,
         alignItems: 'center',
     },
     titleText: {
@@ -68,11 +75,17 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
     statusDefault: {
         color: theme.colors.status.default,
     },
+    centeredTitle: {
+        textAlign: Platform.OS === 'ios' ? 'center' : 'left',
+        alignSelf: Platform.OS === 'ios' ? 'center' : 'flex-start',
+        flex: 1,
+    },
 }));
 
 
 export const HomeHeader = React.memo(() => {
     const { theme } = useUnistyles();
+
     return (
         <View style={{ backgroundColor: theme.colors.groupped.background }}>
             <Header
@@ -106,27 +119,13 @@ function HeaderRight() {
     const styles = stylesheet;
     const { theme } = useUnistyles();
 
-    // return (
-    //     <Pressable
-    //         onPress={() => router.push('/settings')}
-    //         hitSlop={15}
-    //         style={styles.headerButton}
-    //     >
-    //         <Ionicons name="settings-outline" size={24} color={theme.colors.header.tint} />
-    //     </Pressable>
-    // );
     return (
         <Pressable
-            onPress={() => router.push('/settings')}
+            onPress={() => router.push('/new')}
             hitSlop={15}
             style={styles.headerButton}
         >
-            <Image
-                source={require('@/assets/images/brutalist/Brutalism 9.png')}
-                contentFit="contain"
-                style={[{ width: 32, height: 32, marginRight: 12, marginTop: -2 }]}
-                tintColor={theme.colors.header.tint}
-            />
+            <Ionicons name="add-outline" size={28} color={theme.colors.header.tint} />
         </Pressable>
     );
 }
@@ -152,12 +151,14 @@ function HeaderLeft() {
     const styles = stylesheet;
     const { theme } = useUnistyles();
     return (
-        <Image
-            source={require('@/assets/images/logo-black.png')}
-            contentFit="contain"
-            style={[{ width: 24, height: 24 }, styles.logoContainer]}
-            tintColor={theme.colors.header.tint}
-        />
+        <View style={styles.logoContainer}>
+            <Image
+                source={require('@/assets/images/logo-black.png')}
+                contentFit="contain"
+                style={[{ width: 24, height: 24 }]}
+                tintColor={theme.colors.header.tint}
+            />
+        </View>
     );
 }
 

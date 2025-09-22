@@ -5,7 +5,7 @@ import { EncryptionCache } from "./encryptionCache";
 import { SessionEncryption } from "./sessionEncryption";
 import { MachineEncryption } from "./machineEncryption";
 import { encodeBase64, decodeBase64 } from "@/encryption/base64";
-import sodium from "react-native-libsodium";
+import sodium from '@/encryption/libsodium.lib';
 import { decryptBox, encryptBox } from "@/encryption/libsodium";
 import { randomUUID } from 'expo-crypto';
 
@@ -89,6 +89,15 @@ export class Encryption {
      */
     getSessionEncryption(sessionId: string): SessionEncryption | null {
         return this.sessionEncryptions.get(sessionId) || null;
+    }
+
+    /**
+     * Remove session encryption from memory when session is deleted
+     */
+    removeSessionEncryption(sessionId: string): void {
+        this.sessionEncryptions.delete(sessionId);
+        // Also clear any cached data for this session
+        this.cache.clearSessionCache(sessionId);
     }
 
     //
