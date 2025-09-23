@@ -10,6 +10,10 @@ import { storage } from '@/sync/storage';
 import { toggleTodo, updateTodoTitle, deleteTodo } from '@/-zen/model/ops';
 import { useAuth } from '@/auth/AuthContext';
 import { useShallow } from 'zustand/react/shallow';
+import { clarifyPrompt } from '@/-zen/model/prompts';
+import { storeTempData, type NewSessionData } from '@/utils/tempDataStore';
+import { toCamelCase } from '@/utils/stringUtils';
+import { removeTaskLinks, getSessionsForTask } from '@/-zen/model/taskSessionLink';
 
 export const ZenView = React.memo(() => {
     const router = useRouter();
@@ -36,6 +40,11 @@ export const ZenView = React.memo(() => {
     const [isEditing, setIsEditing] = React.useState(false);
     const [editedText, setEditedText] = React.useState(todo?.title || '');
 
+    // Get linked sessions for this task
+    const linkedSessions = React.useMemo(() => {
+        return getSessionsForTask(todoId);
+    }, [todoId]);
+
     // Update local state when todo changes
     React.useEffect(() => {
         if (todo) {
@@ -48,6 +57,7 @@ export const ZenView = React.memo(() => {
         const handleKeyPress = (event: KeyboardEvent) => {
             // Navigate to new todo when any key is pressed (except when editing)
             if (!isEditing && event.key && event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+                router.dismissAll();
                 router.push('/zen/new');
             }
         };
@@ -78,9 +88,60 @@ export const ZenView = React.memo(() => {
 
     const handleDelete = async () => {
         if (auth?.credentials) {
+            // Remove any linked sessions
+            removeTaskLinks(todoId);
             await deleteTodo(auth.credentials, todoId);
             router.back();
         }
+    };
+
+    const handleClarifyWithAI = () => {
+        // Generate the task file name from the task title
+        const taskFileName = toCamelCase(editedText) || 'untitledTask';
+        const taskFile = `.dev/tasks/${taskFileName}.md`;
+
+        // Format the prompt using the full clarifyPrompt template
+        const promptText = clarifyPrompt
+            .replace('{{taskFile}}', taskFile)
+            .replace('{{task}}', editedText);
+
+        // Create a display title for the prompt
+        const promptDisplayTitle = `Clarify: ${editedText}`;
+
+        // Store the prompt data in temporary store
+        const sessionData: NewSessionData = {
+            prompt: promptText,
+            agentType: 'claude', // Default to Claude for clarification tasks
+            taskId: todoId,
+            taskTitle: editedText
+        };
+        const dataId = storeTempData(sessionData);
+
+        // Navigate to new session screen with the data ID
+        router.push({
+            pathname: '/new',
+            params: { dataId }
+        });
+    };
+
+    const handleWorkOnTask = () => {
+        // Create a simple prompt to work on the task
+        const promptText = `Work on this task: ${editedText}`;
+
+        // Store the prompt data in temporary store
+        const sessionData: NewSessionData = {
+            prompt: promptText,
+            agentType: 'claude', // Default to Claude
+            taskId: todoId,
+            taskTitle: editedText
+        };
+        const dataId = storeTempData(sessionData);
+
+        // Navigate to new session screen with the data ID
+        router.push({
+            pathname: '/new',
+            params: { dataId }
+        });
     };
 
     return (
@@ -152,6 +213,22 @@ export const ZenView = React.memo(() => {
                     {/* Actions */}
                     <View style={styles.actions}>
                         <Pressable
+                            onPress={handleWorkOnTask}
+                            style={[styles.actionButton, { backgroundColor: theme.colors.button.primary.background }]}
+                        >
+                            <Ionicons name="hammer-outline" size={20} color="#FFFFFF" />
+                            <Text style={styles.actionButtonText}>Work on task</Text>
+                        </Pressable>
+
+                        <Pressable
+                            onPress={handleClarifyWithAI}
+                            style={[styles.actionButton, { backgroundColor: theme.colors.surfaceHighest }]}
+                        >
+                            <Ionicons name="sparkles" size={20} color={theme.colors.text} />
+                            <Text style={[styles.actionButtonText, { color: theme.colors.text }]}>Clarify</Text>
+                        </Pressable>
+
+                        <Pressable
                             onPress={handleDelete}
                             style={[styles.actionButton, { backgroundColor: theme.colors.textDestructive }]}
                         >
@@ -159,6 +236,28 @@ export const ZenView = React.memo(() => {
                             <Text style={styles.actionButtonText}>Delete</Text>
                         </Pressable>
                     </View>
+
+                    {/* Linked Sessions */}
+                    {linkedSessions.length > 0 && (
+                        <View style={styles.linkedSessionsSection}>
+                            <Text style={[styles.sectionTitle, { color: theme.colors.text }]}>
+                                Linked Sessions
+                            </Text>
+                            {linkedSessions.map((link, index) => (
+                                <Pressable
+                                    key={link.sessionId}
+                                    onPress={() => { router.dismissAll(); router.push(`/session/${link.sessionId}`); }}
+                                    style={[styles.linkedSession, { backgroundColor: theme.colors.surfaceHighest }]}
+                                >
+                                    <Ionicons name="chatbubble-outline" size={16} color={theme.colors.textSecondary} />
+                                    <Text style={[styles.linkedSessionText, { color: theme.colors.text }]}>
+                                        {link.title}
+                                    </Text>
+                                    <Ionicons name="chevron-forward" size={16} color={theme.colors.textSecondary} />
+                                </Pressable>
+                            ))}
+                        </View>
+                    )}
 
                     {/* Helper Text */}
                     <View style={styles.helperSection}>
@@ -212,6 +311,7 @@ const styles = StyleSheet.create((theme) => ({
     },
     actions: {
         flexDirection: 'row',
+        flexWrap: 'wrap',
         gap: 12,
         marginTop: 24,
     },
@@ -236,6 +336,32 @@ const styles = StyleSheet.create((theme) => ({
         borderTopColor: theme.colors.divider,
     },
     helperText: {
+        fontSize: 14,
+        ...Typography.default(),
+    },
+    linkedSessionsSection: {
+        marginTop: 24,
+        paddingTop: 16,
+        borderTopWidth: 1,
+        borderTopColor: theme.colors.divider,
+    },
+    sectionTitle: {
+        fontSize: 14,
+        fontWeight: '600',
+        marginBottom: 12,
+        ...Typography.default('semiBold'),
+    },
+    linkedSession: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        borderRadius: 8,
+        marginBottom: 8,
+        gap: 8,
+    },
+    linkedSessionText: {
+        flex: 1,
         fontSize: 14,
         ...Typography.default(),
     },
