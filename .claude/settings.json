@@ -1,8 +1,11 @@
 {
     "permissions": {
-      "allow": [
-        "Bash(npx tsx sources/scripts/parseChangelog.ts)"
-      ],
-      "deny": []
+        "allow": [
+            "Bash(pnpm typecheck)",
+            "Bash(yarn typecheck)",
+            "Bash(git fetch*)",
+            "Bash(npm view *)",
+            "Bash(pnpm lint)"
+        ]
     }
-  }
+}
