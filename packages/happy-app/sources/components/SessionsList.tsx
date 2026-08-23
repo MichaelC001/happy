@@ -1,19 +1,18 @@
 import React from 'react';
 import { View, Pressable, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform } from 'react-native';
 import { Text } from '@/components/StyledText';
-import { usePathname } from 'expo-router';
-import { SessionListViewItem, SessionRowData } from '@/sync/storage';
-import { filterProjectGroup, sessionMatchesQuery } from '@/sync/projectGroups';
+import { usePathname, useRouter } from 'expo-router';
+import { SessionListViewItem, SessionRowData, useAllMachines, useSettingMutable } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { type SessionState, formatLastSeen, vibingMessages } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { ActiveSessionsGroupCompact } from './ActiveSessionsGroupCompact';
 import { ProjectGroup } from './ProjectGroup';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListViewData';
+import { useHasArchivedSessions, useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListViewData';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useIsTablet } from '@/utils/responsive';
 import { requestReview } from '@/utils/requestReview';
 import { UpdateBanner } from './UpdateBanner';
@@ -24,6 +23,16 @@ import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
 import { t } from '@/text';
 import { SessionShortcutHintBadge } from './ShortcutHints';
 import { ProviderIcon } from './ProviderIcon';
+import { buildSessionProjectDisplayGroups } from '@/utils/sessionDisplayOrder';
+
+type SessionListDisplayItem = SessionListViewItem | {
+    type: 'machine-header';
+    machineId: string | null;
+    machineName: string;
+} | {
+    type: 'archive-toggle';
+    hidden: boolean;
+};
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -43,12 +52,52 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingTop: 20,
         paddingBottom: 8,
     },
+    archiveToggle: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        paddingHorizontal: 24,
+        paddingTop: 20,
+        paddingBottom: 12,
+    },
+    archiveTogglePressed: {
+        opacity: 0.5,
+    },
+    archiveToggleLine: {
+        flex: 1,
+        height: StyleSheet.hairlineWidth,
+        backgroundColor: theme.colors.divider,
+    },
+    archiveToggleText: {
+        fontSize: 14,
+        color: theme.colors.textSecondary,
+        ...Typography.default('regular'),
+    },
     headerText: {
         fontSize: 14,
         fontWeight: '600',
         color: theme.colors.groupped.sectionTitle,
         letterSpacing: 0.1,
         ...Typography.default('semiBold'),
+    },
+    machineHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: Platform.select({ ios: 32, default: 24 }),
+        paddingTop: 8,
+        paddingBottom: 0,
+    },
+    machineHeaderLine: {
+        flex: 1,
+        height: StyleSheet.hairlineWidth,
+        backgroundColor: theme.colors.divider,
+    },
+    machineHeaderText: {
+        maxWidth: '60%',
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        marginRight: 4,
+        ...Typography.default('regular'),
     },
     projectGroup: {
         paddingHorizontal: 16,
@@ -188,20 +237,60 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
 }));
 
+const MachineHeader = React.memo(({ machineId, machineName }: {
+    machineId: string | null;
+    machineName: string;
+}) => {
+    const styles = stylesheet;
+    const { theme } = useUnistyles();
+    const router = useRouter();
+
+    const handlePress = React.useCallback(() => {
+        if (machineId) {
+            router.navigate(`/machine/${machineId}` as any);
+        }
+    }, [machineId, router]);
+
+    return (
+        <Pressable
+            onPress={handlePress}
+            disabled={!machineId}
+            accessibilityRole={machineId ? 'button' : undefined}
+            style={styles.machineHeader}
+            hitSlop={{ top: 8, bottom: 8 }}
+        >
+            <View style={styles.machineHeaderLine} />
+            <Ionicons
+                name="desktop-outline"
+                size={11}
+                color={theme.colors.textSecondary}
+                style={{ marginHorizontal: 6 }}
+            />
+            <Text style={styles.machineHeaderText} numberOfLines={1}>
+                {machineName}
+            </Text>
+            <View style={styles.machineHeaderLine} />
+        </Pressable>
+    );
+});
+
 export function SessionsList({
     topContentInset = 0,
     bottomContentInset = 128,
     onScroll,
-    searchQuery = '',
 }: {
     topContentInset?: number;
     bottomContentInset?: number;
     onScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
-    searchQuery?: string;
 } = {}) {
     const styles = stylesheet;
     const safeArea = useSafeAreaInsets();
     const sourceData = useVisibleSessionListViewData();
+    const hasArchivedSessions = useHasArchivedSessions();
+    // Stored under its original `hideInactiveSessions` key — synced settings
+    // have no rename migration — but it hides archived sessions only.
+    const [hideArchivedSessions, setHideArchivedSessions] = useSettingMutable('hideInactiveSessions');
+    const machines = useAllMachines();
     const pathname = usePathname();
     const isTablet = useIsTablet();
     // Selection is derived once from pathname so the data array stays stable
@@ -221,68 +310,44 @@ export function SessionsList({
         }
     }, [sourceData && sourceData.length > 0]);
 
-    const data = React.useMemo(() => {
-        const normalizedQuery = searchQuery.trim().toLocaleLowerCase();
-        if (!sourceData || !normalizedQuery) {
-            return sourceData;
+    const data = React.useMemo<SessionListDisplayItem[] | null>(() => {
+        if (!sourceData) return sourceData;
+
+        // The archive is a flat, date-grouped tail rather than extra rows
+        // inside the project cards, so the toggle is the divider that opens
+        // it and always sits directly above those rows.
+        const archivedRows = sourceData.filter((item) => (
+            item.type === 'header' || item.type === 'session'
+        ));
+        const groupedRows = sourceData.filter((item) => (
+            item.type !== 'header' && item.type !== 'session'
+        ));
+        const archiveToggle: SessionListDisplayItem[] = hasArchivedSessions
+            ? [{ type: 'archive-toggle', hidden: hideArchivedSessions }]
+            : [];
+
+        const machineGroups = buildSessionProjectDisplayGroups(
+            groupedRows,
+            machines,
+            t('status.unknown'),
+        );
+        if (machineGroups.length === 0) {
+            return [...groupedRows, ...archiveToggle, ...archivedRows];
         }
 
-        const matches = (session: SessionRowData) => sessionMatchesQuery(session, normalizedQuery);
-
-        // Projects nest their sessions inside worktrees, so they need a pass of
-        // their own: the index walk below only ever sees flat `session` items.
-        const keptProjects = new Map<number, SessionListViewItem>();
-        const keptProjectSources = new Set<'rig' | 'happy'>();
-        sourceData.forEach((item, index) => {
-            if (item.type !== 'project') return;
-            const project = filterProjectGroup(item.project, normalizedQuery);
-            if (project) {
-                keptProjects.set(index, { ...item, project });
-                keptProjectSources.add(item.source);
-            }
-        });
-
-        const keepIndices = new Set<number>();
-        let currentHeaderIndex: number | null = null;
-        let currentProjectIndex: number | null = null;
-
-        sourceData.forEach((item, index) => {
-            if (item.type === 'header') {
-                currentHeaderIndex = index;
-                currentProjectIndex = null;
-                return;
-            }
-            if (item.type === 'project-group') {
-                currentProjectIndex = index;
-                return;
-            }
-            if (item.type === 'session' && matches(item.session)) {
-                keepIndices.add(index);
-                if (currentHeaderIndex !== null) keepIndices.add(currentHeaderIndex);
-                if (currentProjectIndex !== null) keepIndices.add(currentProjectIndex);
-            }
-        });
-
-        const result: SessionListViewItem[] = [];
-        sourceData.forEach((item, index) => {
-            if (item.type === 'active-sessions') {
-                const sessions = item.sessions.filter(matches);
-                if (sessions.length > 0) result.push({ ...item, sessions });
-                return;
-            }
-            if (item.type === 'projects-header') {
-                if (keptProjectSources.has(item.source)) result.push(item);
-                return;
-            }
-            if (item.type === 'project') {
-                const kept = keptProjects.get(index);
-                if (kept) result.push(kept);
-                return;
-            }
-            if (keepIndices.has(index)) result.push(item);
-        });
-        return result;
-    }, [searchQuery, sourceData]);
+        const hierarchy = machineGroups.flatMap<SessionListDisplayItem>((group) => [
+            {
+                type: 'machine-header',
+                machineId: group.machineId,
+                machineName: group.machineName,
+            },
+            ...group.projects,
+        ]);
+        const legacyItems = groupedRows.filter((item) => (
+            item.type !== 'project' && item.type !== 'projects-header'
+        ));
+        return [...hierarchy, ...legacyItems, ...archiveToggle, ...archivedRows];
+    }, [hasArchivedSessions, hideArchivedSessions, machines, sourceData]);
 
     // Early return if no data yet
     if (!data) {
@@ -291,19 +356,45 @@ export function SessionsList({
         );
     }
 
-    const keyExtractor = React.useCallback((item: SessionListViewItem, index: number) => {
+    const keyExtractor = React.useCallback((item: SessionListDisplayItem, index: number) => {
         switch (item.type) {
+            case 'machine-header': return `machine-header-${JSON.stringify(item.machineId)}`;
+            case 'archive-toggle': return 'archive-toggle';
             case 'header': return `header-${item.title}-${index}`;
             case 'active-sessions': return 'active-sessions';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'projects-header': return `projects-header-${item.source}`;
-            case 'project': return `project-${item.project.id}`;
+            case 'project': return `project-${item.source}-${item.project.machineId ?? 'unknown'}-${item.project.id}`;
             case 'session': return `session-${item.session.id}`;
         }
     }, []);
 
-    const renderItem = React.useCallback(({ item, index }: { item: SessionListViewItem, index: number }) => {
+    const renderItem = React.useCallback(({ item, index }: { item: SessionListDisplayItem, index: number }) => {
         switch (item.type) {
+            case 'machine-header':
+                return (
+                    <MachineHeader
+                        machineId={item.machineId}
+                        machineName={item.machineName}
+                    />
+                );
+
+            case 'archive-toggle':
+                return (
+                    <Pressable
+                        onPress={() => setHideArchivedSessions(!item.hidden)}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: !item.hidden }}
+                        style={({ pressed }) => [styles.archiveToggle, pressed && styles.archiveTogglePressed]}
+                    >
+                        <View style={styles.archiveToggleLine} />
+                        <Text style={styles.archiveToggleText}>
+                            {item.hidden ? t('sidebar.showArchived') : t('sidebar.hideArchived')}
+                        </Text>
+                        <View style={styles.archiveToggleLine} />
+                    </Pressable>
+                );
+
             case 'header':
                 return (
                     <View style={styles.headerSection}>
@@ -398,11 +489,6 @@ export function SessionsList({
                         maxWidth: layout.maxWidth,
                     }}
                     ListHeaderComponent={HeaderComponent}
-                    ListEmptyComponent={searchQuery.trim() ? (
-                        <View style={{ paddingTop: 48, alignItems: 'center' }}>
-                            <Text style={styles.headerText}>{t('sessionHistory.empty')}</Text>
-                        </View>
-                    ) : null}
                     windowSize={5}
                     maxToRenderPerBatch={8}
                     initialNumToRender={12}
