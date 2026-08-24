@@ -81,6 +81,7 @@ export const es: TranslationStructure = {
         offline: 'desconectado',
         lastSeen: ({ time }: { time: string }) => `visto por última vez ${time}`,
         permissionRequired: 'permiso requerido',
+        inputRequired: 'esperando tu respuesta',
         activeNow: 'Activo ahora',
         unknown: 'desconocido',
         unread: 'nuevos resultados',
@@ -211,8 +212,10 @@ export const es: TranslationStructure = {
             gradient: 'Gradiente',
             brutalist: 'Brutalista',
         },
-        showFlavorIcons: 'Mostrar íconos de proveedor de IA',
-        showFlavorIconsDescription: 'Mostrar íconos del proveedor de IA en los avatares de sesión',
+        showHarnessIconInSessionHeader: 'Mostrar el icono del harness en el encabezado de la sesión',
+        showHarnessIconInSessionHeaderDescription: 'Mostrar el icono del harness en el encabezado de la sesión',
+        showHarnessIconsInSessionList: 'Mostrar iconos de harness en la lista de sesiones',
+        showHarnessIconsInSessionListDescription: 'Mostrar iconos de harness en los avatares de la lista de sesiones',
     },
 
     settingsFeatures: {
@@ -456,7 +459,10 @@ export const es: TranslationStructure = {
     agentInput: {
         permissionMode: {
             title: 'MODO DE PERMISOS',
+            auto: 'decide por sí mismo, pregunta si duda',
             default: 'Por defecto',
+            agyDefault: 'sandbox de agy, sin preguntas',
+            openclawInert: 'no se aplica en openclaw',
             acceptEdits: 'Aceptar ediciones',
             plan: 'Modo de planificación',
             dontAsk: 'No preguntar',
@@ -485,6 +491,7 @@ export const es: TranslationStructure = {
             safeYolo: 'Safe YOLO',
             yolo: 'YOLO',
             defaultDescription: 'preguntar antes de comandos no confiables',
+            autoDescription: 'decide por sí mismo, pregunta si duda',
             readOnlyDescription: 'sin escritura',
             safeYoloDescription: 'sin preguntas, sandbox del espacio de trabajo',
             yoloDescription: 'sin preguntas, acceso completo',

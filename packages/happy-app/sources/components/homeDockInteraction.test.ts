@@ -53,11 +53,32 @@ describe('HomeDock interaction lifecycle', () => {
         })).toBe('close-focus');
     });
 
-    it('uses Android Back to unwind the picker before focus mode', () => {
-        expect(resolveHomeDockPickerBackAction({ hasPage: true, rootVisible: true })).toBe('show-root');
-        expect(resolveHomeDockPickerBackAction({ hasPage: true, rootVisible: false })).toBe('close-picker');
-        expect(resolveHomeDockPickerBackAction({ hasPage: false, rootVisible: true })).toBe('close-picker');
-        expect(resolveHomeDockPickerBackAction({ hasPage: false, rootVisible: false })).toBe('close-focus');
+    it('uses Android Back to close the picker before focus mode', () => {
+        expect(resolveHomeDockPickerBackAction({ hasPage: true })).toBe('close-picker');
+        expect(resolveHomeDockPickerBackAction({ hasPage: false })).toBe('close-focus');
+    });
+
+    // Neither way out is silently swallowed: the dock stays up and says so, so
+    // the screen never reads as frozen.
+    it('refuses both ways out while a session is being created', () => {
+        expect(resolveHomeDockPickerBackAction({ hasPage: true, starting: true })).toBe('refuse');
+        expect(resolveHomeDockBackdropPressAction({
+            nativeMenuOpen: false,
+            pickerVisible: false,
+            starting: true,
+        })).toBe('refuse');
+        // Even with a picker open, which would otherwise close first.
+        expect(resolveHomeDockBackdropPressAction({
+            nativeMenuOpen: false,
+            pickerVisible: true,
+            starting: true,
+        })).toBe('refuse');
+        // An open native menu still closes first: it covers the progress.
+        expect(resolveHomeDockBackdropPressAction({
+            nativeMenuOpen: true,
+            pickerVisible: false,
+            starting: true,
+        })).toBe('dismiss-menu');
     });
 
     it('does not select disabled picker options', () => {

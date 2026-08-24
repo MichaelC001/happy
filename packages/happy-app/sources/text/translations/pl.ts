@@ -92,6 +92,7 @@ export const pl: TranslationStructure = {
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `ostatnio widziano ${time}`,
         permissionRequired: 'wymagane uprawnienie',
+        inputRequired: 'oczekuje na Twoją odpowiedź',
         activeNow: 'Aktywny teraz',
         unknown: 'nieznane',
         unread: 'nowe wyniki',
@@ -228,8 +229,10 @@ export const pl: TranslationStructure = {
             gradient: 'Gradientowy',
             brutalist: 'Brutalistyczny',
         },
-        showFlavorIcons: 'Pokaż ikony dostawcy AI',
-        showFlavorIconsDescription: 'Wyświetlaj ikony dostawcy AI na awatarach sesji',
+        showHarnessIconInSessionHeader: 'Pokaż ikonę harnessu w nagłówku sesji',
+        showHarnessIconInSessionHeaderDescription: 'Wyświetlaj ikonę harnessu w nagłówku sesji',
+        showHarnessIconsInSessionList: 'Pokaż ikony harnessów na liście sesji',
+        showHarnessIconsInSessionListDescription: 'Wyświetlaj ikony harnessów na awatarach listy sesji',
     },
 
     settingsFeatures: {
@@ -472,7 +475,10 @@ export const pl: TranslationStructure = {
     agentInput: {
         permissionMode: {
             title: 'TRYB UPRAWNIEŃ',
+            auto: 'decyduje samodzielnie, pyta w razie wątpliwości',
             default: 'Domyślny',
+            agyDefault: 'piaskownica agy, bez pytań',
+            openclawInert: 'nieużywane przez openclaw',
             acceptEdits: 'Akceptuj edycje',
             plan: 'Tryb planowania',
             dontAsk: 'Nie pytaj',
@@ -501,6 +507,7 @@ export const pl: TranslationStructure = {
             safeYolo: 'Safe YOLO',
             yolo: 'YOLO',
             defaultDescription: 'pytaj przed niezaufanymi poleceniami',
+            autoDescription: 'decyduje samodzielnie, pyta w razie wątpliwości',
             readOnlyDescription: 'bez zapisu',
             safeYoloDescription: 'bez pytań, piaskownica obszaru roboczego',
             yoloDescription: 'bez pytań, pełny dostęp',

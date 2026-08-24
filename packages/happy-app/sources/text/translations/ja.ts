@@ -83,6 +83,7 @@ export const ja: TranslationStructure = {
         offline: 'オフライン',
         lastSeen: ({ time }: { time: string }) => `最終アクセス: ${time}`,
         permissionRequired: '権限が必要です',
+        inputRequired: '回答を待っています',
         activeNow: 'アクティブ',
         unknown: '不明',
         unread: '新しい結果',
@@ -212,8 +213,10 @@ export const ja: TranslationStructure = {
             gradient: 'グラデーション',
             brutalist: 'ブルータリスト',
         },
-        showFlavorIcons: 'AIプロバイダーアイコンを表示',
-        showFlavorIconsDescription: 'セッションアバターにAIプロバイダーアイコンを表示',
+        showHarnessIconInSessionHeader: 'セッションヘッダーにハーネスアイコンを表示',
+        showHarnessIconInSessionHeaderDescription: 'セッションヘッダーにハーネスアイコンを表示',
+        showHarnessIconsInSessionList: 'セッションリストにハーネスアイコンを表示',
+        showHarnessIconsInSessionListDescription: 'セッションリストのアバターにハーネスアイコンを表示',
     },
 
     settingsFeatures: {
@@ -457,7 +460,10 @@ export const ja: TranslationStructure = {
     agentInput: {
         permissionMode: {
             title: '権限モード',
+            auto: '自分で判断し、迷ったら確認します',
             default: 'デフォルト',
+            agyDefault: 'agy サンドボックス、確認なし',
+            openclawInert: 'openclaw では適用されません',
             acceptEdits: '編集を許可',
             plan: 'プランモード',
             dontAsk: '確認しない',
@@ -486,6 +492,7 @@ export const ja: TranslationStructure = {
             safeYolo: 'セーフYOLO',
             yolo: 'YOLO',
             defaultDescription: '信頼されていないコマンドの前に確認',
+            autoDescription: '自分で判断し、迷ったら確認します',
             readOnlyDescription: '書き込みなし',
             safeYoloDescription: '確認なし、ワークスペースサンドボックス',
             yoloDescription: '確認なし、フルアクセス',

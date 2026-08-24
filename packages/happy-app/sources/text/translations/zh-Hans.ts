@@ -83,6 +83,7 @@ export const zhHans: TranslationStructure = {
         offline: '离线',
         lastSeen: ({ time }: { time: string }) => `最后活跃时间 ${time}`,
         permissionRequired: '需要权限',
+        inputRequired: '等待你的回答',
         activeNow: '当前活跃',
         unknown: '未知',
         unread: '新结果',
@@ -212,8 +213,10 @@ export const zhHans: TranslationStructure = {
             gradient: '渐变',
             brutalist: '粗糙风格',
         },
-        showFlavorIcons: '显示 AI 提供商图标',
-        showFlavorIconsDescription: '在会话头像上显示 AI 提供商图标',
+        showHarnessIconInSessionHeader: '在会话标题中显示 harness 图标',
+        showHarnessIconInSessionHeaderDescription: '在会话标题中显示 harness 图标',
+        showHarnessIconsInSessionList: '在会话列表中显示 harness 图标',
+        showHarnessIconsInSessionListDescription: '在会话列表的头像上显示 harness 图标',
     },
 
     settingsFeatures: {
@@ -457,7 +460,10 @@ export const zhHans: TranslationStructure = {
     agentInput: {
         permissionMode: {
             title: '权限模式',
+            auto: '自行判断，不确定时询问',
             default: '默认',
+            agyDefault: 'agy 沙箱，不询问',
+            openclawInert: 'openclaw 不使用此设置',
             acceptEdits: '接受编辑',
             plan: '计划模式',
             dontAsk: '不再询问',
@@ -486,6 +492,7 @@ export const zhHans: TranslationStructure = {
             safeYolo: 'Safe YOLO',
             yolo: 'YOLO',
             defaultDescription: '不受信任的命令前询问',
+            autoDescription: '自行判断，不确定时询问',
             readOnlyDescription: '禁止写入',
             safeYoloDescription: '无需确认，工作区沙盒',
             yoloDescription: '无需确认，完全访问',

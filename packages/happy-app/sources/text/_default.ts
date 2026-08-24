@@ -80,6 +80,7 @@ export const en = {
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `last seen ${time}`,
         permissionRequired: 'permission required',
+        inputRequired: 'waiting for your answer',
         activeNow: 'Active now',
         unknown: 'unknown',
         unread: 'new results',
@@ -209,8 +210,10 @@ export const en = {
             gradient: 'Gradient',
             brutalist: 'Brutalist',
         },
-        showFlavorIcons: 'Show AI Provider Icons',
-        showFlavorIconsDescription: 'Display AI provider icons on session avatars',
+        showHarnessIconInSessionHeader: 'Show Harness Icon in Session Header',
+        showHarnessIconInSessionHeaderDescription: 'Display the harness icon in the session header',
+        showHarnessIconsInSessionList: 'Show Harness Icons in Session List',
+        showHarnessIconsInSessionListDescription: 'Display harness icons on session-list avatars',
     },
 
     settingsFeatures: {
@@ -469,12 +472,21 @@ export const en = {
 
     agentInput: {
         permissionMode: {
+            // Modes are named with one untranslated word so they fit the
+            // composer chip; these strings describe them under that name.
             title: 'PERMISSION MODE',
-            default: 'default permissions',
-            acceptEdits: 'accept edits',
-            plan: 'plan',
+            // Not "never asks": auto still stops for a human, it just decides
+            // for itself when that is warranted.
+            auto: 'asks when unsure',
+            // Default sends no mode at all, so naming a behaviour here would be
+            // a guess about someone else's config.
+            default: 'harness setting',
+            agyDefault: 'agy sandbox',
+            openclawInert: 'not applied',
+            acceptEdits: 'edits, no asking',
+            plan: 'plan first',
             dontAsk: "don't ask",
-            bypassPermissions: 'yolo',
+            bypassPermissions: 'never asks',
             badgeAcceptAllEdits: 'accept all edits',
             badgeBypassAllPermissions: 'yolo',
             badgePlanMode: 'plan mode',
@@ -498,10 +510,15 @@ export const en = {
             readOnly: 'read-only',
             safeYolo: 'safe yolo',
             yolo: 'yolo',
-            defaultDescription: 'ask before untrusted commands',
+            defaultDescription: 'codex setting',
+            // Codex's own Auto preset: on-request approvals inside the
+            // workspace sandbox.
+            autoDescription: 'asks when unsure',
             readOnlyDescription: 'no writes',
-            safeYoloDescription: 'no prompts, workspace sandbox',
-            yoloDescription: 'no prompts, full access',
+            // Not "no prompts": shouldAutoApproveCodexApproval deliberately
+            // skips safe-yolo, so a sandbox escalation still reaches you.
+            safeYoloDescription: 'sandboxed, can escalate',
+            yoloDescription: 'full access',
             badgeReadOnly: 'read-only',
             badgeSafeYolo: 'safe yolo',
             badgeYolo: 'yolo',
@@ -518,10 +535,10 @@ export const en = {
         },
         geminiPermissionMode: {
             title: 'GEMINI PERMISSION MODE',
-            default: 'default permissions',
-            autoEdit: 'auto edit',
-            yolo: 'yolo',
-            plan: 'plan',
+            default: 'ask before every tool',
+            autoEdit: 'accept file edits',
+            yolo: 'never ask, full access',
+            plan: 'read only, plan first',
             badgeAutoEdit: 'auto edit',
             badgeYolo: 'yolo',
             badgePlan: 'plan',

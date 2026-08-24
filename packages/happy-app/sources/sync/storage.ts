@@ -1,24 +1,23 @@
 import { create } from "zustand";
 import { useShallow } from 'zustand/react/shallow'
 import equal from 'fast-deep-equal'
-
-function useDeepEqual<T>(selector: (state: StorageState) => T): (state: StorageState) => T {
-    const prev = React.useRef<T>(undefined);
-    return (state: StorageState) => {
-        const next = selector(state);
-        return equal(prev.current, next) ? prev.current! : (prev.current = next);
-    };
-}
+import { useDeepEqual } from './storeSelectors';
 import { Session, Machine, GitStatus, SessionAgentModesPatch } from "./storageTypes";
 import type { GitStatusFiles } from "./gitStatusFiles";
 import type { ProjectFilesList } from "./projectFiles";
 import { buildPathProjectGroups, buildProjectGroups, isProjectSession, type ProjectGroupData } from "./projectGroups";
-import { selectPendingCommunications, type PendingAgentCommunication } from "./agentCommunications";
+import {
+    selectAgentFormCommunication,
+    selectPendingCommunications,
+    type PendingAgentCommunication,
+} from "./agentCommunications";
 import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import { isMachineOnline } from '@/utils/machineUtils';
-import { getSessionName, getSessionSubtitle, getSessionAvatarId, type SessionState } from '@/utils/sessionUtils';
+import { getSessionName, getSessionSubtitle, getSessionAvatarId } from '@/utils/sessionUtils';
+import { resolveSessionState, type SessionState } from './sessionState';
+import { getSessionActivityAt } from '@/utils/sessionActivity';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
@@ -34,7 +33,7 @@ import { getCurrentRealtimeSessionId, getVoiceSession } from '@/realtime/Realtim
 import { isMutableTool } from "@/components/tools/knownTools";
 import { DecryptedArtifact } from "./artifactTypes";
 import { FeedItem } from "./feedTypes";
-import { getRigActivityIndicators, getRigIdentity, isRigMetadata } from './rig';
+import { getRigActivityIndicators, getRigGitSummary, getRigIdentity, isRigMetadata } from './rig';
 import { indexSessionsById } from './sessionIdentity';
 import { t } from '@/text';
 
@@ -118,15 +117,29 @@ export interface SessionRowData {
     providerKind: string | null;
     modelName: string | null;
     activitySummary: string | null;
+    gitChangedFiles: number | null;
+    gitCountsExact: boolean;
+    gitDeletions: number | null;
+    gitInsertions: number | null;
     state: SessionState;
     // Only present on inactive sessions — active sessions never show "last seen"
     // and activeAt updates on every heartbeat, causing needless deep-equal diffs
     activeAt?: number;
-    createdAt?: number;
+    createdAt: number;
+    // Last meaningful message, falling back to this device's sent-message
+    // record and then creation — see getSessionActivityAt. Grouping the list by
+    // project loses the global ordering the sessions were sorted into, so the
+    // flat list re-sorts on these two keys instead.
+    lastActivityAt: number;
     hasDraft: boolean;
     active: boolean;
     archived: boolean;
     machineId: string | null;
+    // True only when the machine this session runs on is known to be offline.
+    // A session that merely dropped its own socket is still live work on a live
+    // machine, so the row greys out for this and never for that. Unknown
+    // machines count as online: better an unshaded row than a wrongly dead one.
+    machineOffline: boolean;
     path: string | null;
     homeDir: string | null;
     completedTodosCount: number;
@@ -141,23 +154,23 @@ export interface SessionRowData {
     workspaceName: string | null;
 }
 
-function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): SessionRowData {
+function buildSessionRowData(
+    session: Session,
+    unreadSessionIds?: Set<string>,
+    machines?: Record<string, Machine>,
+): SessionRowData {
     const isOnline = session.presence === "online";
-    const hasPermissions = !!(session.agentState?.requests && Object.keys(session.agentState.requests).length > 0);
-
-    let state: SessionState;
-    if (!isOnline) {
-        state = 'disconnected';
-    } else if (hasPermissions) {
-        state = 'permission_required';
-    } else if (session.thinking) {
-        state = 'thinking';
-    } else {
-        state = 'waiting';
-    }
+    const state = resolveSessionState({
+        agentState: session.agentState,
+        thinking: session.thinking,
+        isOnline,
+    });
 
     const rigIdentity = getRigIdentity(session.metadata);
     const rigActivity = getRigActivityIndicators(session.metadata);
+    const rigGit = getRigGitSummary(session.metadata);
+    const machineId = session.metadata?.machineId ?? null;
+    const machine = machineId ? machines?.[machineId] : undefined;
     return {
         id: session.id,
         name: getSessionName(session),
@@ -171,12 +184,19 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         activitySummary: rigActivity.length > 0
             ? rigActivity.map((item) => `${item.count}${item.queued ? `+${item.queued}` : ''} ${item.key}`).join(' · ')
             : null,
+        gitChangedFiles: rigGit?.changedFiles ?? null,
+        gitCountsExact: rigGit?.countsExact ?? true,
+        gitDeletions: rigGit?.deletions ?? null,
+        gitInsertions: rigGit?.insertions ?? null,
         state,
-        ...(!session.active && { activeAt: session.activeAt, createdAt: session.createdAt }),
+        createdAt: session.createdAt,
+        lastActivityAt: getSessionActivityAt(session),
+        ...(!session.active && { activeAt: session.activeAt }),
         hasDraft: !!session.draft,
         active: session.active,
         archived: isSessionArchived(session),
-        machineId: session.metadata?.machineId ?? null,
+        machineId,
+        machineOffline: machine ? !isMachineOnline(machine) : false,
         path: session.metadata?.path ?? null,
         homeDir: session.metadata?.homeDir ?? null,
         completedTodosCount: session.todos?.filter(todo => todo.status === 'completed').length ?? 0,
@@ -299,6 +319,9 @@ function buildSessionListViewData(
     // Required on purpose: an omitted set silently rebuilds the list with
     // hasUnread=false everywhere — exactly the bug this parameter caused twice.
     unreadSessionIds: Set<string>,
+    // Also required: rows grey out on their machine's presence, and an omitted
+    // map would quietly report every machine as online.
+    machines: Record<string, Machine>,
 ): SessionListViewItem[] {
     const rigProjectSessions: Session[] = [];
     const rigPathSessions: Session[] = [];
@@ -328,11 +351,11 @@ function buildSessionListViewData(
     });
 
     // Sort by last activity or creation date (newest first), per user setting — matches applySessions behavior
-    // Activity sort keys off the last user-sent message, not updatedAt: updatedAt
+    // Activity sort keys off the last meaningful message, not updatedAt: updatedAt
     // bumps on every background agent update, which would make the list jump while
-    // several sessions stream at once. lastMessageSentAt only moves when the user acts.
+    // several sessions stream at once.
     const sortKey = storage.getState().settings.sortSessionsByActivity
-        ? (s: Session) => s.lastMessageSentAt ?? s.createdAt
+        ? getSessionActivityAt
         : (s: Session) => s.createdAt;
     const sortProjectSessions = (items: Session[]) => items.sort((a, b) => {
         const activeDelta = Number(isSessionActive(b)) - Number(isSessionActive(a));
@@ -344,7 +367,7 @@ function buildSessionListViewData(
     archivedSessions.sort((a, b) => sortKey(b) - sortKey(a));
 
     const listData: SessionListViewItem[] = [];
-    const toRow = (session: Session) => buildSessionRowData(session, unreadSessionIds);
+    const toRow = (session: Session) => buildSessionRowData(session, unreadSessionIds, machines);
 
     const rigProjects = [
         ...buildProjectGroups(rigProjectSessions, toRow, isSessionActive),
@@ -525,7 +548,7 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Sort both arrays by last activity or creation date (newest first), per user setting
             const sortKey = get().settings.sortSessionsByActivity
-                ? (s: Session) => s.lastMessageSentAt ?? s.createdAt
+                ? getSessionActivityAt
                 : (s: Session) => s.createdAt;
             activeSessions.sort((a, b) => sortKey(b) - sortKey(a));
             inactiveSessions.sort((a, b) => sortKey(b) - sortKey(a));
@@ -649,6 +672,7 @@ export const storage = create<StorageState>()((set, get) => {
             const sessionListViewData = buildSessionListViewData(
                 mergedSessions,
                 unreadSessionIds,
+                state.machines,
             );
 
             return {
@@ -1062,7 +1086,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 sessions: updatedSessions,
-                sessionListViewData: buildSessionListViewData(updatedSessions, state.unreadSessionIds)
+                sessionListViewData: buildSessionListViewData(updatedSessions, state.unreadSessionIds, state.machines)
             };
         }),
         // Permission / model / effort picks are local mirrors of synced session
@@ -1113,7 +1137,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 sessions: updatedSessions,
-                sessionListViewData: buildSessionListViewData(updatedSessions, state.unreadSessionIds)
+                sessionListViewData: buildSessionListViewData(updatedSessions, state.unreadSessionIds, state.machines)
             };
         }),
         getSessionPathKey: (sessionId: string): string | null => {
@@ -1139,10 +1163,13 @@ export const storage = create<StorageState>()((set, get) => {
                 });
             }
 
-            // Rebuild sessionListViewData to reflect machine changes
+            // Rebuild sessionListViewData to reflect machine changes — from the
+            // merged map, since a machine going offline is exactly what has to
+            // reach the rows here.
             const sessionListViewData = buildSessionListViewData(
                 state.sessions,
-                state.unreadSessionIds
+                state.unreadSessionIds,
+                mergedMachines,
             );
 
             return {
@@ -1159,7 +1186,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 machines: remaining,
-                sessionListViewData: buildSessionListViewData(state.sessions, state.unreadSessionIds)
+                sessionListViewData: buildSessionListViewData(state.sessions, state.unreadSessionIds, remaining)
             };
         }),
         // Artifact methods
@@ -1227,7 +1254,7 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Rebuild sessionListViewData without the deleted session.
             // Pass unreadSessionIds so the remaining sessions keep their unread badges.
-            const sessionListViewData = buildSessionListViewData(remainingSessions, state.unreadSessionIds);
+            const sessionListViewData = buildSessionListViewData(remainingSessions, state.unreadSessionIds, state.machines);
             
             return {
                 ...state,
@@ -1367,7 +1394,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 unreadSessionIds: next,
-                sessionListViewData: buildSessionListViewData(state.sessions, next),
+                sessionListViewData: buildSessionListViewData(state.sessions, next, state.machines),
             };
         }),
         markSessionUnread: (sessionId: string) => set((state) => {
@@ -1377,7 +1404,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 unreadSessionIds: next,
-                sessionListViewData: buildSessionListViewData(state.sessions, next),
+                sessionListViewData: buildSessionListViewData(state.sessions, next, state.machines),
             };
         }),
         setCurrentViewingSession: (sessionId: string | null) => set((state) => {
@@ -1391,7 +1418,7 @@ export const storage = create<StorageState>()((set, get) => {
                 currentViewingSessionId: sessionId,
                 unreadSessionIds: next,
                 ...(next !== state.unreadSessionIds ? {
-                    sessionListViewData: buildSessionListViewData(state.sessions, next),
+                    sessionListViewData: buildSessionListViewData(state.sessions, next, state.machines),
                 } : {}),
             };
         }),
@@ -1598,10 +1625,32 @@ export function useSocketStatus() {
     })));
 }
 
-/** Agent-to-user communications this session is currently waiting on. */
+/**
+ * Agent-to-user communications this session is currently waiting on.
+ *
+ * Deep-equal, not shallow: this selector mints a fresh object per pending
+ * communication on every call, and shallow compares those elements by identity.
+ * Under `useShallow` a session with even one pending request therefore reports a
+ * changed snapshot on every read, which re-renders, which reads again — the
+ * render loop that used to crash any session holding a question. An empty list
+ * shallow-compares equal, which is why only sessions with a live request fell
+ * over.
+ */
 export function useSessionPendingCommunications(sessionId: string): PendingAgentCommunication[] {
-    return storage(useShallow((state) =>
+    return storage(useDeepEqual((state) =>
         selectPendingCommunications(state.sessions[sessionId]?.agentState ?? null)));
+}
+
+/**
+ * Agent form joined to one transcript tool call, pending or completed.
+ *
+ * Deep-equal for the same reason as the hook above: the selection is a fresh
+ * object whose `questions` is a fresh array, so shallow compares those by
+ * identity and never settles.
+ */
+export function useSessionAgentFormCommunication(sessionId: string, toolUseId: string) {
+    return storage(useDeepEqual((state) =>
+        selectAgentFormCommunication(state.sessions[sessionId]?.agentState ?? null, toolUseId)));
 }
 
 export function useSessionGitStatus(sessionId: string): GitStatus | null {

@@ -81,6 +81,7 @@ export const ca: TranslationStructure = {
         offline: 'fora de línia',
         lastSeen: ({ time }: { time: string }) => `vist per última vegada ${time}`,
         permissionRequired: 'permís requerit',
+        inputRequired: 'esperant la teva resposta',
         activeNow: 'Actiu ara',
         unknown: 'desconegut',
         unread: 'nous resultats',
@@ -211,8 +212,10 @@ export const ca: TranslationStructure = {
             gradient: 'Gradient',
             brutalist: 'Brutalista',
         },
-        showFlavorIcons: "Mostrar icones de proveïdors d'IA",
-        showFlavorIconsDescription: "Mostrar icones del proveïdor d'IA als avatars de sessió",
+        showHarnessIconInSessionHeader: 'Mostrar la icona de l\'arnès a la capçalera de la sessió',
+        showHarnessIconInSessionHeaderDescription: 'Mostra la icona de l\'arnès a la capçalera de la sessió',
+        showHarnessIconsInSessionList: 'Mostrar les icones d\'arnès a la llista de sessions',
+        showHarnessIconsInSessionListDescription: 'Mostra les icones d\'arnès als avatars de la llista de sessions',
     },
 
     settingsFeatures: {
@@ -456,7 +459,10 @@ export const ca: TranslationStructure = {
     agentInput: {
         permissionMode: {
             title: 'MODE DE PERMISOS',
+            auto: 'decideix pel seu compte, pregunta si dubta',
             default: 'Per defecte',
+            agyDefault: "sandbox d'agy, sense preguntes",
+            openclawInert: "no s'aplica a openclaw",
             acceptEdits: 'Accepta edicions',
             plan: 'Mode de planificació',
             dontAsk: 'No preguntis',
@@ -485,6 +491,7 @@ export const ca: TranslationStructure = {
             safeYolo: 'Safe YOLO',
             yolo: 'YOLO',
             defaultDescription: "pregunta abans d'ordres no fiables",
+            autoDescription: 'decideix pel seu compte, pregunta si dubta',
             readOnlyDescription: 'sense escriptura',
             safeYoloDescription: "sense preguntes, sandbox de l'espai de treball",
             yoloDescription: 'sense preguntes, accés complet',

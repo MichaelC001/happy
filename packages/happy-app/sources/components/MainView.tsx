@@ -5,7 +5,6 @@ import {
     Text,
     Pressable,
     Platform,
-    Keyboard,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -32,6 +31,7 @@ import { trackFriendsSearch } from '@/track';
 import { MOBILE_GLASS_HEADER_HEIGHT } from './navigation/headerMetrics';
 import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
 import { useStartSessionFromDraft } from '@/hooks/useStartSessionFromDraft';
+import { shouldShowHomeConnectionStatus } from './homeConnectionStatus';
 
 interface MainViewProps {
     variant: 'phone' | 'sidebar';
@@ -206,7 +206,7 @@ const HeaderTitle = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
             <Text style={styles.titleText}>
                 {t(TAB_TITLES[activeTab])}
             </Text>
-            {connectionStatus.text && (
+            {shouldShowHomeConnectionStatus(socketStatus.status) && connectionStatus.text && (
                 <View style={styles.statusContainer}>
                     <StatusDot
                         color={connectionStatus.color}
@@ -298,7 +298,12 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
     const friendRequests = useFriendRequests();
     const realtimeStatus = useRealtimeStatus();
     const safeArea = useSafeAreaInsets();
-    const { isStarting: isStartingHomeSession, startSession: startHomeSession } = useStartSessionFromDraft();
+    const {
+        isStarting: isStartingHomeSession,
+        phase: homeSessionPhase,
+        startSession: startHomeSession,
+        cancelStart: cancelHomeSession,
+    } = useStartSessionFromDraft();
 
     // Tab state management
     // NOTE: Zen tab removed - the feature never got to a useful state
@@ -322,7 +327,8 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
             return false;
         }
         useNewSessionDraft.getState().setInput(prompt);
-        Keyboard.dismiss();
+        // The keyboard stays up: the dock reports what is happening above the
+        // composer and closes itself once the session is open.
         const started = await startHomeSession();
         if (started) setHomePrompt('');
         return started;
@@ -436,6 +442,8 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
                         onPromptChange={setHomePrompt}
                         onSubmit={handleHomePromptSubmit}
                         isSubmitting={isStartingHomeSession}
+                        submitPhase={homeSessionPhase}
+                        onSubmitCancel={cancelHomeSession}
                         showBottomBackdrop={sessionListViewData !== null && sessionListViewData.length > 0}
                     />
                 </View>
