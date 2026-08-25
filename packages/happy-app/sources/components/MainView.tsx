@@ -110,7 +110,7 @@ const styles = StyleSheet.create((theme) => ({
     },
     titleContainer: {
         flex: 1,
-        alignItems: Platform.OS === 'web' ? 'center' : 'flex-start',
+        alignItems: 'center',
         justifyContent: Platform.OS === 'web' ? 'flex-start' : 'center',
     },
     titleText: {
@@ -310,12 +310,12 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
     const [activeTab, setActiveTab] = React.useState<ActiveTabType>('sessions');
     const [homePrompt, setHomePrompt] = React.useState('');
     const showHeaderRight = activeTab !== 'settings' || isUsingCustomServer();
-    const topContentInset = Platform.OS === 'web'
+    const topChromeInset = Platform.OS === 'web'
         ? 0
         : safeArea.top
             + MOBILE_GLASS_HEADER_HEIGHT
-            + (realtimeStatus !== 'disconnected' ? 32 : 0)
-            + 12;
+            + (realtimeStatus !== 'disconnected' ? 32 : 0);
+    const topContentInset = topChromeInset + (Platform.OS === 'web' ? 0 : 12);
     const bottomContentInset = Platform.OS === 'web'
         ? 0
         : MOBILE_HOME_DOCK_CONTENT_INSET;
@@ -408,6 +408,7 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
                 headerShadowVisible={false}
                 headerTransparent={true}
                 mobileTitleSurface="plain"
+                mobileTitleAlignment="center"
             />
             {realtimeStatus !== 'disconnected' && (
                 <VoiceAssistantStatusBar variant="full" />
@@ -423,6 +424,7 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
                     <View style={styles.phoneSceneStack}>
                         <SessionsListWrapper
                             topContentInset={topContentInset}
+                            scrollIndicatorTopInset={topChromeInset}
                             bottomContentInset={bottomContentInset}
                         />
                     </View>

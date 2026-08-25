@@ -3,6 +3,7 @@ import type { Machine } from './storageTypes';
 import { isRigMachine } from './rigSessionCreation';
 import { pairedMachineIds } from './agentSessionPlaces';
 import { isMachineOnline } from '@/utils/machineUtils';
+import { isHarnessAvailable } from '@/utils/harnessCatalog';
 import { NEW_SESSION_AGENT_ORDER, resolveMachineAgent } from '@/utils/newSessionAgentSelection';
 
 /**
@@ -141,11 +142,33 @@ export function machineChoiceAgentAvailable(
     agent: NewSessionAgentType,
 ): boolean {
     if (!choice) return false;
-    if (agent === 'rig') return choice.rigMachine !== null;
+    if (agent === 'rig') {
+        return isHarnessAvailable({
+            availability: choice.happyMachine?.metadata?.cliAvailability,
+            happyAgentAvailable: choice.rigMachine !== null,
+            key: agent,
+        });
+    }
     const happy = choice.happyMachine;
     if (!happy) return false;
-    const availability = happy.metadata?.cliAvailability;
-    return !availability || availability[agent] === true;
+    return isHarnessAvailable({
+        availability: happy.metadata?.cliAvailability,
+        happyAgentAvailable: choice.rigMachine !== null,
+        key: agent,
+    });
+}
+
+/**
+ * Whether the Home picker should contain this harness at all.
+ *
+ * Common harnesses stay visible but disabled when unavailable. Antigravity and
+ * Happy Agent stay absent until this computer reports them available.
+ */
+export function machineChoiceAgentVisible(
+    choice: MachineChoice | null,
+    agent: NewSessionAgentType,
+): boolean {
+    return (agent !== 'agy' && agent !== 'rig') || machineChoiceAgentAvailable(choice, agent);
 }
 
 /**
@@ -161,14 +184,37 @@ export function resolveChoiceAgent(
 ): NewSessionAgentType {
     if (!choice) return agent;
     if (machineChoiceAgentAvailable(choice, agent)) {
-        // Happy CLI machines that predate capability reporting say nothing, and are taken at their
-        // word rather than second-guessed.
+        // Older Happy CLI machines are trusted for common harnesses. Antigravity
+        // never reaches this branch without an explicit installation report.
         return agent === 'rig' || !choice.happyMachine?.metadata?.cliAvailability
             ? agent
             : resolveMachineAgent(agent, choice.happyMachine.metadata.cliAvailability);
     }
     return NEW_SESSION_AGENT_ORDER.find((candidate) => machineChoiceAgentAvailable(choice, candidate))
         ?? agent;
+}
+
+/**
+ * Resolve the harness a new-session surface may offer and launch.
+ *
+ * Happy's own harness remains fully supported for existing sessions and sync,
+ * but session creation is experimental. A saved Happy draft therefore falls
+ * back to the first regular harness while experiments are disabled. Falling
+ * back even when a computer only has Happy registered keeps the hidden harness
+ * from being launched through a stale draft; the normal missing-daemon check
+ * then explains why the regular harness cannot start on that computer.
+ */
+export function resolveNewSessionAgent(
+    choice: MachineChoice | null,
+    agent: NewSessionAgentType,
+    experiments: boolean,
+): NewSessionAgentType {
+    const resolved = resolveChoiceAgent(choice, agent);
+    if (experiments || resolved !== 'rig') return resolved;
+
+    return NEW_SESSION_AGENT_ORDER.find((candidate) => (
+        candidate !== 'rig' && machineChoiceAgentAvailable(choice, candidate)
+    )) ?? NEW_SESSION_AGENT_ORDER.find((candidate) => candidate !== 'rig') ?? resolved;
 }
 
 /**

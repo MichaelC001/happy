@@ -56,7 +56,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import * as React from 'react';
 import { useMemo } from 'react';
-import { ActivityIndicator, Platform, Pressable, Text, View, useWindowDimensions } from 'react-native';
+import { ActivityIndicator, LayoutChangeEvent, Platform, Pressable, Text, View, useWindowDimensions } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, withTiming, Easing } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -77,6 +77,7 @@ import {
     rigCanUseShell,
 } from '@/sync/rig';
 import { RigActivityBar } from '@/components/RigActivityBar';
+import { AnimatedFade } from '@/components/AnimatedOverlay';
 
 export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
@@ -639,46 +640,34 @@ export function SessionViewLoaded({
         && !isRunningOnMac()
         && !isLandscape;
     const [bottomDockInset, setBottomDockInset] = React.useState(0);
+    const [composerY, setComposerY] = React.useState(0);
     const [isChatAtBottom, setIsChatAtBottom] = React.useState(true);
-    const chatAtBottomRef = React.useRef(true);
     const showBottomDockDetails = !usesFloatingMobileDock || isChatAtBottom;
-    const usesFloatingMobileDockRef = React.useRef(usesFloatingMobileDock);
-    const showBottomDockDetailsRef = React.useRef(showBottomDockDetails);
-    usesFloatingMobileDockRef.current = usesFloatingMobileDock;
-    showBottomDockDetailsRef.current = showBottomDockDetails;
+    const scrollButtonInset = Math.max(0, bottomDockInset - composerY);
 
     const handleBottomDockInsetChange = React.useCallback((nextInset: number) => {
-        setBottomDockInset((currentInset) => {
-            // Hiding the auxiliary dock chrome must not shrink FlatList's
-            // spacer: that resize changes its scroll offset and makes the
-            // chrome immediately reappear. Keep the existing reserve while
-            // reading older history; it is refreshed at the newest message.
-            const nextReservedInset = Platform.OS === 'ios'
-                && usesFloatingMobileDockRef.current
-                && !showBottomDockDetailsRef.current
-                ? Math.max(currentInset, nextInset)
-                : nextInset;
-            return Math.abs(currentInset - nextReservedInset) < 1
-                ? currentInset
-                : nextReservedInset;
-        });
+        setBottomDockInset((currentInset) => (
+            Math.abs(currentInset - nextInset) < 1 ? currentInset : nextInset
+        ));
+    }, []);
+    const handleComposerLayout = React.useCallback((event: LayoutChangeEvent) => {
+        const nextY = Math.ceil(event.nativeEvent.layout.y);
+        setComposerY((currentY) => (
+            Math.abs(currentY - nextY) < 1 ? currentY : nextY
+        ));
     }, []);
     const handleChatBottomVisibilityChange = React.useCallback((visible: boolean) => {
-        if (!usesFloatingMobileDock || chatAtBottomRef.current === visible) {
-            return;
-        }
-        chatAtBottomRef.current = visible;
         setIsChatAtBottom(visible);
-    }, [usesFloatingMobileDock]);
+    }, []);
 
     React.useEffect(() => {
         if (!usesFloatingMobileDock) {
             setBottomDockInset(0);
+            setComposerY(0);
         }
     }, [usesFloatingMobileDock]);
 
     React.useEffect(() => {
-        chatAtBottomRef.current = true;
         setIsChatAtBottom(true);
     }, [sessionId, usesFloatingMobileDock]);
 
@@ -761,7 +750,6 @@ export function SessionViewLoaded({
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
     const sessionStatusBarDisplay = useSetting('sessionStatusBarDisplay');
     const experiments = useSetting('experiments');
-    const expResumeSession = useSetting('expResumeSession');
     const { canResume, resumeSession, resumingSession } = useSessionQuickActions(session);
     const isDisconnected = !sessionStatus.isConnected;
     const resumeCommandBlock = getResumeCommandBlock(session);
@@ -1016,6 +1004,7 @@ export function SessionViewLoaded({
                         session={session}
                         topContentInset={chatListTopContentInset}
                         bottomContentInset={usesFloatingMobileDock ? bottomDockInset : undefined}
+                        scrollButtonInset={usesFloatingMobileDock ? scrollButtonInset : undefined}
                         headerOverlayHeight={safeArea.top + MOBILE_GLASS_HEADER_HEIGHT}
                         onHeaderBackdropVisibilityChange={onHeaderBackdropVisibilityChange}
                         onBottomDockVisibilityChange={usesFloatingMobileDock
@@ -1037,51 +1026,53 @@ export function SessionViewLoaded({
     ) : null;
 
     const composer = (
-        <ChatComposer
-            composerHandleRef={composerHandleRef}
-            placeholder={t('session.inputPlaceholder')}
-            sessionId={sessionId}
-            permissionMode={permissionMode}
-            onPermissionModeChange={isRigPermissionSelectionEnabled(session.metadata) ? updatePermissionMode : undefined}
-            availableModes={availableModes}
-            modelMode={modelMode}
-            availableModels={availableModels}
-            onModelModeChange={isRigModelSelectionEnabled(session.metadata) ? updateModelMode : undefined}
-            effortLevel={effortLevel}
-            availableEffortLevels={availableEffortLevels}
-            onEffortLevelChange={isRigReasoningSelectionEnabled(session.metadata) ? updateEffortLevel : undefined}
-            metadata={session.metadata}
-            connectionStatus={connectionStatus}
-            blockSend={isRig && session.thinking && session.metadata?.capabilities?.steering !== true}
-            onSend={handleSend}
-            onMicPress={(embedded || isDisconnected) ? undefined : micButtonState.onMicPress}
-            isMicActive={(embedded || isDisconnected) ? false : micButtonState.isMicActive}
-            onAbort={isDisconnected || !rigCanAbort(session.metadata) ? undefined : handleAbort}
-            showAbortButton={rigCanAbort(session.metadata) && (
-                sessionStatus.state === 'thinking'
-                // A pending selection or permission request parks the agent inside
-                // a tool call. Keep Stop reachable on every platform while either
-                // kind of user action is outstanding.
-                || sessionStatus.state === 'permission_required'
-                || sessionStatus.state === 'input_required'
-                || (Platform.OS === 'web' && sessionStatus.state === 'waiting')
-            )}
-            onFileViewerPress={experiments && !isTablet && rigCanBrowseFiles(session.metadata) && rigCanReadFiles(session.metadata) ? handleFileViewerPress : undefined}
-            selectedImages={expImageUpload && canUseAttachments ? selectedImages : undefined}
-            onPickImages={expImageUpload && canUseAttachments ? pickImages : undefined}
-            onRemoveImage={expImageUpload && canUseAttachments ? removeImage : undefined}
-            onAddImages={expImageUpload && canUseAttachments ? addImages : undefined}
-            autocompletePrefixes={AGENT_INPUT_AUTOCOMPLETE_PREFIXES}
-            autocompleteSuggestions={handleAutocompleteSuggestions}
-            usageData={usageData}
-            alwaysShowContextSize={alwaysShowContextSize}
-            zenMode={zenMode}
-            showSessionStatusInfoInSettings={false}
-            showStatusDetails={!usesFloatingMobileDock || isChatAtBottom}
-            sessionStatusGitBranch={statusBarGitBranch}
-            sessionStatusModelLabel={statusBarModelLabel}
-            sessionStatusEffortLabel={statusBarEffortLabel}
-        />
+        <View onLayout={usesFloatingMobileDock ? handleComposerLayout : undefined}>
+            <ChatComposer
+                composerHandleRef={composerHandleRef}
+                placeholder={t('session.inputPlaceholder')}
+                sessionId={sessionId}
+                permissionMode={permissionMode}
+                onPermissionModeChange={isRigPermissionSelectionEnabled(session.metadata) ? updatePermissionMode : undefined}
+                availableModes={availableModes}
+                modelMode={modelMode}
+                availableModels={availableModels}
+                onModelModeChange={isRigModelSelectionEnabled(session.metadata) ? updateModelMode : undefined}
+                effortLevel={effortLevel}
+                availableEffortLevels={availableEffortLevels}
+                onEffortLevelChange={isRigReasoningSelectionEnabled(session.metadata) ? updateEffortLevel : undefined}
+                metadata={session.metadata}
+                connectionStatus={connectionStatus}
+                blockSend={isRig && session.thinking && session.metadata?.capabilities?.steering !== true}
+                onSend={handleSend}
+                onMicPress={(embedded || isDisconnected) ? undefined : micButtonState.onMicPress}
+                isMicActive={(embedded || isDisconnected) ? false : micButtonState.isMicActive}
+                onAbort={isDisconnected || !rigCanAbort(session.metadata) ? undefined : handleAbort}
+                showAbortButton={rigCanAbort(session.metadata) && (
+                    sessionStatus.state === 'thinking'
+                    // A pending selection or permission request parks the agent inside
+                    // a tool call. Keep Stop reachable on every platform while either
+                    // kind of user action is outstanding.
+                    || sessionStatus.state === 'permission_required'
+                    || sessionStatus.state === 'input_required'
+                    || (Platform.OS === 'web' && sessionStatus.state === 'waiting')
+                )}
+                onFileViewerPress={experiments && !isTablet && rigCanBrowseFiles(session.metadata) && rigCanReadFiles(session.metadata) ? handleFileViewerPress : undefined}
+                selectedImages={expImageUpload && canUseAttachments ? selectedImages : undefined}
+                onPickImages={expImageUpload && canUseAttachments ? pickImages : undefined}
+                onRemoveImage={expImageUpload && canUseAttachments ? removeImage : undefined}
+                onAddImages={expImageUpload && canUseAttachments ? addImages : undefined}
+                autocompletePrefixes={AGENT_INPUT_AUTOCOMPLETE_PREFIXES}
+                autocompleteSuggestions={handleAutocompleteSuggestions}
+                usageData={usageData}
+                alwaysShowContextSize={alwaysShowContextSize}
+                zenMode={zenMode}
+                showSessionStatusInfoInSettings={false}
+                showStatusDetails={showBottomDockDetails}
+                sessionStatusGitBranch={statusBarGitBranch}
+                sessionStatusModelLabel={statusBarModelLabel}
+                sessionStatusEffortLabel={statusBarEffortLabel}
+            />
+        </View>
     );
 
     // Disconnected sessions get the full Resume affordance regardless of
@@ -1089,57 +1080,67 @@ export function SessionViewLoaded({
     // Ctrl-C in terminal — lifecycleState stays 'running', server flips
     // active=false). InactiveArchivedHint handles both cases: shows the
     // Resume button when canResume is true, falls back to the
-    // copy-this-command hint when the experiments toggle is off or the
-    // machine isn't reachable.
-    const inactiveHint = showBottomDockDetails && isDisconnected && !isRig ? (
-        <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
-            <InactiveArchivedHint
-                resumeCommandBlock={expResumeSession ? resumeCommandBlock : null}
-                canResume={canResume}
-                resuming={resumingSession}
-                onResume={resumeSession}
-            />
-        </CenteredInputWidth>
+    // copy-this-command hint when the daemon is incompatible or the machine
+    // isn't reachable.
+    const inactiveHint = isDisconnected && !isRig ? (
+        <AnimatedFade visible={showBottomDockDetails}>
+            <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
+                <InactiveArchivedHint
+                    resumeCommandBlock={resumeCommandBlock}
+                    canResume={canResume}
+                    resuming={resumingSession}
+                    onResume={resumeSession}
+                />
+            </CenteredInputWidth>
+        </AnimatedFade>
     ) : null;
 
     const showSessionStatusBar = sessionStatusBarDisplay === 'above' || sessionStatusBarDisplay === 'below';
     const sessionStatusBarPosition = sessionStatusBarDisplay === 'above' ? 'above' : 'below';
-    const sessionStatusBar = showBottomDockDetails && showSessionStatusBar ? (
-        <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
-            <SessionStatusBar
-                gitBranch={statusBarGitBranch}
-                modelLabel={statusBarModelLabel}
-                modelMode={modelMode}
-                availableModels={availableModels}
-                onModelModeChange={isRigModelSelectionEnabled(session.metadata) ? updateModelMode : undefined}
-                effortLabel={statusBarEffortLabel}
-                effortLevel={effortLevel}
-                availableEffortLevels={availableEffortLevels}
-                onEffortLevelChange={isRigReasoningSelectionEnabled(session.metadata) ? updateEffortLevel : undefined}
-                contextSize={usageData?.contextSize}
-                contextWindow={usageData?.contextWindow}
-                usageLimits={session.agentState?.usageLimits}
-            />
-        </CenteredInputWidth>
+    const sessionStatusBar = showSessionStatusBar ? (
+        <AnimatedFade visible={showBottomDockDetails}>
+            <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
+                <SessionStatusBar
+                    gitBranch={statusBarGitBranch}
+                    modelLabel={statusBarModelLabel}
+                    modelMode={modelMode}
+                    availableModels={availableModels}
+                    onModelModeChange={isRigModelSelectionEnabled(session.metadata) ? updateModelMode : undefined}
+                    effortLabel={statusBarEffortLabel}
+                    effortLevel={effortLevel}
+                    availableEffortLevels={availableEffortLevels}
+                    onEffortLevelChange={isRigReasoningSelectionEnabled(session.metadata) ? updateEffortLevel : undefined}
+                    contextSize={usageData?.contextSize}
+                    contextWindow={usageData?.contextWindow}
+                    usageLimits={session.agentState?.usageLimits}
+                />
+            </CenteredInputWidth>
+        </AnimatedFade>
     ) : null;
 
     const input = (
         <>
             {inactiveHint}
-            {showBottomDockDetails && visibleAgentGoal && (
-                <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
-                    <AgentGoalBar
-                        goal={visibleAgentGoal}
-                        onAction={handleGoalAction}
-                        inFlightAction={goalActionInFlight}
-                    />
-                </CenteredInputWidth>
+            {visibleAgentGoal && (
+                <AnimatedFade visible={showBottomDockDetails}>
+                    <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
+                        <AgentGoalBar
+                            goal={visibleAgentGoal}
+                            onAction={handleGoalAction}
+                            inFlightAction={goalActionInFlight}
+                        />
+                    </CenteredInputWidth>
+                </AnimatedFade>
             )}
-            <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
-                <AgentQuestionBanner sessionId={sessionId} />
-            </CenteredInputWidth>
+            <AnimatedFade visible={showBottomDockDetails}>
+                <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
+                    <AgentQuestionBanner sessionId={sessionId} />
+                </CenteredInputWidth>
+            </AnimatedFade>
             {sessionStatusBarPosition === 'above' ? sessionStatusBar : null}
-            {showBottomDockDetails && <RigActivityBar metadata={session.metadata} />}
+            <AnimatedFade visible={showBottomDockDetails}>
+                <RigActivityBar metadata={session.metadata} />
+            </AnimatedFade>
             {composer}
             {sessionStatusBarPosition === 'below' ? sessionStatusBar : null}
         </>
@@ -1183,7 +1184,16 @@ export function SessionViewLoaded({
             )}
 
             {/* Main content area - no padding since header is overlay */}
-            <View style={{ flexBasis: 0, flexGrow: 1, paddingBottom: safeArea.bottom + ((isRunningOnMac() || Platform.OS === 'web') ? 8 : 0) }}>
+            <View style={{
+                flexBasis: 0,
+                flexGrow: 1,
+                // The floating chat content reaches the physical bottom of
+                // the screen. AgentContentView keeps the dock itself above
+                // the home indicator / navigation area.
+                paddingBottom: usesFloatingMobileDock
+                    ? 0
+                    : safeArea.bottom + ((isRunningOnMac() || Platform.OS === 'web') ? 8 : 0),
+            }}>
                 <AgentContentView
                     content={content}
                     input={input}

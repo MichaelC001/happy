@@ -2,7 +2,7 @@ import React from 'react';
 import { View, Pressable, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform } from 'react-native';
 import { Text } from '@/components/StyledText';
 import { usePathname, useRouter } from 'expo-router';
-import { SessionListViewItem, SessionRowData, useAllMachines, useLocalSetting, useSettingMutable } from '@/sync/storage';
+import { SessionListViewItem, SessionRowData, useAllMachines, useSettingMutable } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
 import { type SessionState, formatLastSeen, vibingMessages } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
@@ -264,6 +264,12 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingBottom: 12,
         backgroundColor: Platform.select({ web: theme.colors.groupped.background, default: 'transparent' }),
     },
+    phoneUpdateBanner: {
+        paddingBottom: 16,
+    },
+    phoneUpdateBannerHeader: {
+        paddingTop: 4,
+    },
 }));
 
 const MachineHeader = React.memo(({ machineId, machineName }: {
@@ -305,10 +311,12 @@ const MachineHeader = React.memo(({ machineId, machineName }: {
 
 export function SessionsList({
     topContentInset = 0,
+    scrollIndicatorTopInset = 0,
     bottomContentInset = 128,
     onScroll,
 }: {
     topContentInset?: number;
+    scrollIndicatorTopInset?: number;
     bottomContentInset?: number;
     onScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
 } = {}) {
@@ -319,9 +327,10 @@ export function SessionsList({
     // Stored under its original `hideInactiveSessions` key — synced settings
     // have no rename migration — but it hides archived sessions only.
     const [hideArchivedSessions, setHideArchivedSessions] = useSettingMutable('hideInactiveSessions');
-    // The flat variant replaces the machine → project → worktree hierarchy with
-    // one full-width chronological column. Both shapes read the same data.
-    const flatSessionList = useLocalSetting('flatSessionList');
+    // The home screen has one canonical, activity-sorted chat list. Keep the
+    // legacy project-card implementation below for now while the old synced
+    // setting ages out, but do not expose a layout fork to users.
+    const flatSessionList = true;
     const machines = useAllMachines();
     const pathname = usePathname();
     const isTablet = useIsTablet();
@@ -359,11 +368,8 @@ export function SessionsList({
             : [];
 
         if (flatSessionList) {
-            // Always by activity, regardless of `sortSessionsByActivity`. That
-            // setting exists for the project cards, where a card is a place and
-            // creation order is a reasonable way to list places. This is a chat
-            // list: a chat list that does not float the thing you just replied
-            // to is simply broken, and creation order would freeze it forever.
+            // A chat list should always float the thing the user just replied
+            // to, so the canonical layout is ordered by recent activity.
             const flatRows = buildFlatSessionRows(groupedRows, { sortByActivity: true });
             const flatItems = flatRows.map<SessionListDisplayItem>((row, index) => ({
                 type: 'flat-session',
@@ -548,10 +554,14 @@ export function SessionsList({
 
 
     const HeaderComponent = React.useCallback(() => {
+        const isPhoneLayout = topContentInset > 0;
         return (
-            <UpdateBanner />
+            <UpdateBanner
+                style={isPhoneLayout ? styles.phoneUpdateBanner : undefined}
+                headerStyle={isPhoneLayout ? styles.phoneUpdateBannerHeader : undefined}
+            />
         );
-    }, []);
+    }, [styles.phoneUpdateBanner, styles.phoneUpdateBannerHeader, topContentInset]);
 
     // Footer removed - all sessions now shown inline
 
@@ -569,6 +579,10 @@ export function SessionsList({
                         maxWidth: layout.maxWidth,
                     }}
                     ListHeaderComponent={HeaderComponent}
+                    automaticallyAdjustsScrollIndicatorInsets={scrollIndicatorTopInset === 0}
+                    scrollIndicatorInsets={scrollIndicatorTopInset > 0
+                        ? { top: scrollIndicatorTopInset }
+                        : undefined}
                     windowSize={5}
                     maxToRenderPerBatch={8}
                     initialNumToRender={12}
@@ -661,7 +675,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
             {...menuProps}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={session.avatarId} size={48} monochrome={!status.isConnected} flavor={session.flavor} clientId={session.clientId} badgeLocation="sessionList" />
+                <Avatar id={session.avatarId} size={48} monochrome={!status.isConnected} flavor={session.flavor} clientId={session.clientId} imageUrl={session.projectAvatarUri} thumbhash={session.projectAvatarThumbhash} badgeLocation="sessionList" />
                 {session.hasDraft && (
                     <View style={styles.draftIconContainer}>
                         <Ionicons
