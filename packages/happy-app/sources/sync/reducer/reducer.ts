@@ -493,6 +493,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             for (const [permId, completed] of Object.entries(agentState.completedRequests)) {
                 // Same join key as pending requests: raw tool-use id when scoped
                 const joinId = completed.toolUseId || permId;
+                // The CLI reports the "don't ask again" grant under the RPC's
+                // field name, `allowTools`. Fold both spellings into one value
+                // so the permission footer can recognize which button applied.
+                const completedAllowedTools = completed.allowedTools ?? completed.allowTools;
 
                 // Check if we have a message for this permission ID
                 const messageId = state.toolIdToMessageId.get(joinId);
@@ -514,7 +518,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             message.tool.permission?.status !== completed.status ||
                             message.tool.permission?.reason !== completed.reason ||
                             message.tool.permission?.mode !== completed.mode ||
-                            message.tool.permission?.allowedTools !== completed.allowedTools ||
+                            message.tool.permission?.allowedTools !== completedAllowedTools ||
                             message.tool.permission?.decision !== completed.decision;
 
                         if (!needsUpdate) {
@@ -529,7 +533,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 id: permId,
                                 status: completed.status,
                                 mode: completed.mode || undefined,
-                                allowedTools: completed.allowedTools || undefined,
+                                allowedTools: completedAllowedTools || undefined,
                                 decision: completed.decision || undefined,
                                 reason: completed.reason || undefined
                             };
@@ -538,7 +542,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             // Update all fields
                             message.tool.permission.status = completed.status;
                             message.tool.permission.mode = completed.mode || undefined;
-                            message.tool.permission.allowedTools = completed.allowedTools || undefined;
+                            message.tool.permission.allowedTools = completedAllowedTools || undefined;
                             message.tool.permission.decision = completed.decision || undefined;
                             if (completed.reason) {
                                 message.tool.permission.reason = completed.reason;
@@ -574,7 +578,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             status: completed.status,
                             reason: completed.reason || undefined,
                             mode: completed.mode || undefined,
-                            allowedTools: completed.allowedTools || undefined,
+                            allowedTools: completedAllowedTools || undefined,
                             decision: completed.decision || undefined
                         });
 
@@ -588,7 +592,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         if (ENABLE_LOGGING) {
                             console.log(`[REDUCER] Storing permission ${permId} for incoming tool`);
                         }
-                        // Store permission for when tool arrives in Phase 2
+                        // Store permission for when tool arrives in Phase 2. Keep
+                        // mode/allowedTools/decision — dropping them made the footer
+                        // forget which button granted the permission after a reload.
                         state.permissions.set(joinId, {
                             id: permId,
                             tool: completed.tool,
@@ -596,7 +602,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             createdAt: completed.createdAt || Date.now(),
                             completedAt: completed.completedAt || undefined,
                             status: completed.status,
-                            reason: completed.reason || undefined
+                            reason: completed.reason || undefined,
+                            mode: completed.mode || undefined,
+                            allowedTools: completedAllowedTools || undefined,
+                            decision: completed.decision || undefined
                         });
                         continue;
                     }
@@ -625,7 +634,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             status: completed.status,
                             reason: completed.reason || undefined,
                             mode: completed.mode || undefined,
-                            allowedTools: completed.allowedTools || undefined,
+                            allowedTools: completedAllowedTools || undefined,
                             decision: completed.decision || undefined
                         }
                     };
@@ -652,7 +661,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         status: completed.status,
                         reason: completed.reason || undefined,
                         mode: completed.mode || undefined,
-                        allowedTools: completed.allowedTools || undefined,
+                        allowedTools: completedAllowedTools || undefined,
                         decision: completed.decision || undefined
                     });
 

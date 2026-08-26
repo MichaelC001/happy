@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+    filterPermissionModesForCli,
+    modeSupportedByCli,
+    permissionModeSupportedByCli,
     getAgyModelModes,
     getAgyPermissionModes,
     getAvailableModels,
@@ -105,7 +108,7 @@ describe('modelModeOptions', () => {
             'gpt-5.6-terra',
             'gpt-5.6-luna',
         ]);
-        expect(models[0].name).toBe('gpt-5.6 sol');
+        expect(models[0].name).toBe('GPT-5.6 Sol');
     });
 
     it('adds a configured custom codex model without expanding the shared catalog', () => {
@@ -130,9 +133,9 @@ describe('modelModeOptions', () => {
             'claude-sonnet-5',
         ]);
         expect(models.map((model) => model.name)).toEqual([
-            'fable 5',
-            'opus 5',
-            'sonnet 5',
+            'Fable 5',
+            'Opus 5',
+            'Sonnet 5',
         ]);
         // No `default model` row, and no alias keys: an alias would silently
         // resolve to an older model than the row claims.
@@ -301,5 +304,60 @@ describe('modelModeOptions', () => {
         expect(getAvailablePermissionModes('codex', metadata, translate).map((mode) => mode.key)).toEqual([
             'auto', 'safe-yolo', 'read-only', 'yolo', 'default',
         ]);
+    });
+
+    // `auto` is tagged sinceCliVersion 1.2.1-beta.2. compareVersions cannot see
+    // prerelease numbers, so beta.1 vs beta.2 is the case that matters most.
+    // No version stays permissive: it means the client is not happy-cli.
+    it('gates a tagged mode on the CLI version that has to parse it', () => {
+        const auto = { sinceCliVersion: '1.2.1-beta.2' };
+        expect(modeSupportedByCli(auto, '1.2.1-beta.2')).toBe(true);
+        expect(modeSupportedByCli(auto, '1.2.1')).toBe(true);
+        expect(modeSupportedByCli(auto, '1.3.0')).toBe(true);
+        expect(modeSupportedByCli(auto, '1.2.1-beta.1')).toBe(false);
+        expect(modeSupportedByCli(auto, '1.2.0')).toBe(false);
+        expect(modeSupportedByCli(auto, '0.11.2')).toBe(false);
+        expect(modeSupportedByCli(auto, undefined)).toBe(true);
+        expect(modeSupportedByCli(auto, null)).toBe(true);
+        // Build metadata is ignored, as semver requires.
+        expect(modeSupportedByCli(auto, '1.2.1-beta.2+local')).toBe(true);
+        expect(modeSupportedByCli(auto, '1.2.0+local')).toBe(false);
+        // A present-but-mangled version hides tagged modes: more likely old than new.
+        expect(modeSupportedByCli(auto, 'not-a-version')).toBe(false);
+        // Untagged modes are offered to every CLI, however old.
+        expect(modeSupportedByCli({}, '0.9.0')).toBe(true);
+        expect(modeSupportedByCli({}, 'not-a-version')).toBe(true);
+    });
+
+    // The outbound-message side of the same gate: the send path asks this
+    // before serializing a saved key, and refuses loudly on false rather than
+    // substituting a different mode.
+    it('answers whether the session CLI can parse a saved mode key', () => {
+        expect(permissionModeSupportedByCli('auto', '1.2.1-beta.1')).toBe(false);
+        expect(permissionModeSupportedByCli('auto', '1.2.0')).toBe(false);
+        expect(permissionModeSupportedByCli('auto', '1.2.1-beta.2')).toBe(true);
+        expect(permissionModeSupportedByCli('auto', undefined)).toBe(true);
+        expect(permissionModeSupportedByCli('plan', '1.2.0')).toBe(true);
+        expect(permissionModeSupportedByCli(undefined, '1.2.0')).toBe(true);
+        expect(permissionModeSupportedByCli(null, '1.2.0')).toBe(true);
+    });
+
+    it('hides auto from session pickers when the session CLI is too old', () => {
+        const oldCli = { path: '/tmp', host: 'host', version: '1.2.0' } as any;
+        expect(getAvailablePermissionModes('claude', oldCli, translate).map((mode) => mode.key)).toEqual([
+            'acceptEdits', 'plan', 'bypassPermissions', 'default',
+        ]);
+        expect(getAvailablePermissionModes('codex', oldCli, translate).map((mode) => mode.key)).toEqual([
+            'safe-yolo', 'read-only', 'yolo', 'default',
+        ]);
+    });
+
+    it('drops only auto when filtering for an old CLI, and nothing when new', () => {
+        const modes = getClaudePermissionModes(translate);
+        expect(filterPermissionModesForCli(modes, '1.2.0').map((mode) => mode.key)).toEqual([
+            'acceptEdits', 'plan', 'bypassPermissions', 'default',
+        ]);
+        expect(filterPermissionModesForCli(modes, '1.2.1-beta.2')).toEqual(modes);
+        expect(filterPermissionModesForCli(modes, undefined)).toEqual(modes);
     });
 });

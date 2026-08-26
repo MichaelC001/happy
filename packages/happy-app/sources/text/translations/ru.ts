@@ -26,6 +26,13 @@ function plural({ count, one, few, many }: { count: number; one: string; few: st
  * Must match the exact structure of the English translations
  */
 export const ru: TranslationStructure = {
+    voiceStatusBar: {
+        tapToEnd: 'нажмите, чтобы завершить',
+        connecting: 'Подключение…',
+        error: 'Ошибка соединения',
+        active: 'Голосовой ассистент активен',
+    },
+
     tabs: {
         // Tab navigation labels
         inbox: 'Входящие',
@@ -149,13 +156,6 @@ export const ru: TranslationStructure = {
         },
         chat: 'Чат',
         chatDescription: 'Настройте внешний вид сообщений в чате',
-        sessionStatusBar: 'Информация о сессии',
-        sessionStatusBarDescription: 'Выберите, где показывать ветку, модель, усилия и контекст',
-        sessionStatusDisplayOptions: {
-            hidden: 'Скрыто',
-            above: 'Над полем ввода',
-            below: 'Под полем ввода',
-        },
         usageLimitShowRemaining: 'Показывать остаток',
         usageLimitShowRemainingDescription: 'Индикаторы лимита отсчитывают остаток, а не использование',
         userMessageBubbleColor: 'Цвет ваших сообщений',
@@ -174,12 +174,33 @@ export const ru: TranslationStructure = {
         compactToolCallsDescription: 'Показывать неинтерактивные вызовы одной строкой; нажмите строку для подробностей',
         showLineNumbersInToolViews: 'Показывать номера строк в представлениях инструментов',
         showLineNumbersInToolViewsDescription: 'Отображать номера строк в различиях представлений инструментов',
-        alwaysShowContextSize: 'Всегда показывать размер контекста',
-        alwaysShowContextSizeDescription: 'Отображать использование контекста даже когда не близко к лимиту',
+        alwaysShowContextSize: 'Показывать использование',
+        alwaysShowContextSizeDescription: 'Контекст и лимиты плана под полем ввода. Предупреждения у лимита видны всегда.',
+        input: 'Ввод',
+        inputDescription: 'Настройка поля ввода',
         showHarnessIconInSessionHeader: 'Показывать значок harness в заголовке сессии',
         showHarnessIconInSessionHeaderDescription: 'Отображать значок harness в заголовке сессии',
         showHarnessIconsInSessionList: 'Показывать значки harness в списке сессий',
         showHarnessIconsInSessionListDescription: 'Отображать значки harness на аватарах в списке сессий',
+        avatars: 'Аватары',
+        avatarsDescription: 'Выберите, как выглядят генерируемые аватары сессий',
+        avatarStyle: 'Стиль аватаров',
+        avatarStyleOptions: {
+            brutalist: 'Брутализм',
+            pixelated: 'Пиксельный',
+            gradient: 'Градиент',
+        },
+        avatarMonochrome: 'Чёрно-белые аватары',
+        avatarMonochromeDescription: 'Отображать аватары без цвета',
+    },
+
+    sessionsFilter: {
+        // Filter menu on the home sessions list header
+        title: 'Фильтр',
+        groupingTitle: 'Группировка',
+        flatList: 'Общий список',
+        groupByProject: 'Группировать по проектам',
+        appearanceSettings: 'Настройки внешнего вида',
     },
 
     settingsFeatures: {
@@ -288,7 +309,12 @@ export const ru: TranslationStructure = {
         failedToConnectToServer: 'Не удалось подключиться к серверу',
         currentlyUsingCustomServer: 'Сейчас используется пользовательский сервер',
         customServerUrlLabel: 'URL пользовательского сервера',
-        advancedFeatureFooter: 'Это расширенная функция. Изменяйте сервер только если знаете, что делаете. Вам нужно будет выйти и войти снова после изменения серверов.'
+        advancedFeatureFooter: 'Это расширенная функция. Изменяйте сервер только если знаете, что делаете. Вам нужно будет выйти и войти снова после изменения серверов.',
+        services: 'Сервисы',
+        useCustomServerForVoice: 'Использовать пользовательский сервер для голоса',
+        customServerVoiceEnabled: 'Голосовые учетные данные и данные об использовании обрабатываются вашим сервером',
+        customServerVoiceDisabled: 'Голос использует Happy Cloud и вашу подписку Happy',
+        customServerVoiceFooter: 'Если выключено, при запуске голосового режима используются Happy Cloud и ElevenLabs. Включайте только если на вашем сервере настроена голосовая связь.',
     },
 
     sessionInfo: {
@@ -372,14 +398,6 @@ export const ru: TranslationStructure = {
             clearGoal: 'Очистить цель',
             stopGoal: 'Остановить цель',
             editGoal: 'Изменить цель',
-        },
-        sessionStatusBar: {
-            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `Контекст ${used} из ${total} токенов, ${percent}%`,
-            limitFiveHour: 'Лимит 5 часов',
-            limitSevenDay: 'Лимит 7 дней',
-            limitResets: ({ time }: { time: string }) => `сброс ${time}`,
-            limitAsOf: ({ age }: { age: string }) => `данные ${age} назад`,
-            limitRemaining: ({ percent }: { percent: number }) => `осталось ${percent}%`,
         },
     },
 
@@ -509,7 +527,14 @@ export const ru: TranslationStructure = {
             badgePlan: 'Планирование',
         },
         context: {
-            remaining: ({ percent }: { percent: number }) => `Осталось ${percent}%`,
+            detailContext: ({ used, total }: { used: string; total: string }) => `Контекст ${used} / ${total}`,
+            percentContext: ({ percent }: { percent: number }) => `${percent}% контекста`,
+            percentWeek: ({ percent }: { percent: number }) => `${percent}% за неделю`,
+        },
+        usagePopup: {
+            session: 'Сессия',
+            week: 'Неделя',
+            resets: ({ time }: { time: string }) => `Сброс ${time}`,
         },
         suggestion: {
             fileLabel: 'ФАЙЛ',

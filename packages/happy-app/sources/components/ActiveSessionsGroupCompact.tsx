@@ -22,8 +22,6 @@ import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
 import { useRouter } from 'expo-router';
 import { SessionShortcutHintBadge } from './ShortcutHints';
 import { buildActiveSessionDisplayGroups } from '@/utils/sessionDisplayOrder';
-import { ProviderIcon } from './ProviderIcon';
-import { RigGitLineChanges } from './RigGitLineChanges';
 
 const STATUS_CONFIG: Record<SessionState, { color: string; dotColor: string; isPulsing: boolean; isConnected: boolean }> = {
     disconnected: { color: '#999', dotColor: '#999', isPulsing: false, isConnected: false },
@@ -271,7 +269,7 @@ export const CompactSessionRow = React.memo(({ session, selected, showBorder }: 
         onLongPress: showActionAlert,
     };
 
-    const renderLeadingIndicator = () => {
+    const renderTrailingIndicator = () => {
         let indicator: React.ReactNode = null;
 
         if (needsUserAction) {
@@ -293,7 +291,7 @@ export const CompactSessionRow = React.memo(({ session, selected, showBorder }: 
         }
 
         return (
-            <View style={styles.leadingIndicatorSlot}>
+            <View style={styles.trailingIndicatorSlot}>
                 {indicator}
             </View>
         );
@@ -311,8 +309,6 @@ export const CompactSessionRow = React.memo(({ session, selected, showBorder }: 
         >
             <View style={styles.sessionContent}>
                 <View style={styles.sessionTitleRow}>
-                    {renderLeadingIndicator()}
-
                     <Text
                         style={[
                             styles.sessionTitle,
@@ -326,27 +322,8 @@ export const CompactSessionRow = React.memo(({ session, selected, showBorder }: 
                         sessionId={session.id}
                         style={styles.sessionShortcutBadge}
                     />
+                    {renderTrailingIndicator()}
                 </View>
-                {(session.identityLine || session.gitChangedFiles !== null) && (
-                    <View style={styles.sessionIdentityRow}>
-                        {session.identityLine && (
-                            <>
-                                <ProviderIcon kind={session.providerKind} size={11} />
-                                <Text style={styles.sessionIdentity} numberOfLines={1}>
-                                    {session.identityLine}{session.modelName ? ` · ${session.modelName}` : ''}{session.activitySummary ? ` · ${session.activitySummary}` : ''}
-                                </Text>
-                            </>
-                        )}
-                        {session.gitChangedFiles !== null && (
-                            <RigGitLineChanges
-                                changedFiles={session.gitChangedFiles}
-                                countsExact={session.gitCountsExact}
-                                deletions={session.gitDeletions ?? 0}
-                                insertions={session.gitInsertions ?? 0}
-                            />
-                        )}
-                    </View>
-                )}
             </View>
         </Pressable>
     );
@@ -497,7 +474,11 @@ const stylesheet = StyleSheet.create((theme) => ({
         flexDirection: 'row',
         alignItems: 'center',
         paddingHorizontal: 16,
-        backgroundColor: 'transparent',
+        // Solid, and the same color the card behind it paints: the row is the
+        // thing that slides during the archive swipe, so it must cover the red
+        // action underneath the way the flat list's rows do — a transparent
+        // row lets the red show through the moment the drag starts.
+        backgroundColor: theme.colors.surface,
     },
     sessionRowWithBorder: {
         borderBottomWidth: StyleSheet.hairlineWidth,
@@ -529,27 +510,14 @@ const stylesheet = StyleSheet.create((theme) => ({
     sessionTitleDisconnected: {
         color: theme.colors.textSecondary,
     },
-    sessionIdentity: {
-        fontSize: 11,
-        color: theme.colors.textSecondary,
-        ...Typography.default('regular'),
-        flex: 1,
-        minWidth: 0,
-        flexShrink: 1,
-    },
-    sessionIdentityRow: {
-        marginLeft: 24,
-        marginTop: 2,
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 4,
-    },
-    leadingIndicatorSlot: {
+    // 18 wide so the dot's center lines up with the center of the project
+    // header's "+" button above the card, on both platform paddings.
+    trailingIndicatorSlot: {
         alignItems: 'center',
         justifyContent: 'center',
-        width: 16,
-        height: 16,
-        marginRight: 8,
+        width: 18,
+        height: 18,
+        marginLeft: 8,
     },
     swipeAction: {
         width: 112,

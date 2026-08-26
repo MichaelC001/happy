@@ -1,6 +1,7 @@
 import type { Metadata } from '@/sync/storageTypes';
 import { hackModes } from '@/sync/modeHacks';
 import { sortPermissionModes } from '@/utils/permissionModeLabels';
+import { compareVersionsWithPrerelease, isWellFormedVersion } from '@/utils/versionUtils';
 import { getCodeAgentDefaults } from '@/sync/agentDefaults';
 import {
     getRigCurrentModel,
@@ -16,6 +17,10 @@ export type ModeOption = {
     description?: string | null;
     semanticKind?: string | null;
     disabled?: boolean;
+    // The happy-cli version that first parses this mode. Untagged modes are
+    // offered to every CLI; tagged ones are hidden from CLIs known to be older
+    // (see filterPermissionModesForCli).
+    sinceCliVersion?: string;
 };
 
 export type PermissionMode = ModeOption;
@@ -46,12 +51,12 @@ type MetadataOption = {
 };
 
 const GEMINI_MODEL_FALLBACKS: ModelMode[] = [
-    { key: 'gemini-3.1-pro-preview', name: 'gemini 3.1 pro', description: 'latest & most capable' },
-    { key: 'gemini-3-flash-preview', name: 'gemini 3 flash', description: 'latest & fast' },
-    { key: 'gemini-3.1-flash-lite-preview', name: 'gemini 3.1 flash lite', description: 'latest & fastest' },
-    { key: 'gemini-2.5-pro', name: 'gemini 2.5 pro', description: 'most capable' },
-    { key: 'gemini-2.5-flash', name: 'gemini 2.5 flash', description: 'fast & efficient' },
-    { key: 'gemini-2.5-flash-lite', name: 'gemini 2.5 flash lite', description: 'fastest' },
+    { key: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', description: 'latest & most capable' },
+    { key: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', description: 'latest & fast' },
+    { key: 'gemini-3.1-flash-lite-preview', name: 'Gemini 3.1 Flash Lite', description: 'latest & fastest' },
+    { key: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'most capable' },
+    { key: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'fast & efficient' },
+    { key: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', description: 'fastest' },
 ];
 
 export function mapMetadataOptions(options?: MetadataOption[] | null): ModeOption[] {
@@ -81,7 +86,7 @@ export function mapMetadataOptions(options?: MetadataOption[] | null): ModeOptio
 // sending it fails UserMessageSchema.safeParse and drops the whole prompt.
 export function getClaudePermissionModes(translate: Translate): PermissionMode[] {
     return [
-        { key: 'auto', name: 'Auto', description: translate('agentInput.permissionMode.auto') },
+        { key: 'auto', name: 'Auto', description: translate('agentInput.permissionMode.auto'), sinceCliVersion: CLI_VERSION_WITH_AUTO },
         { key: 'acceptEdits', name: 'Edits', description: translate('agentInput.permissionMode.acceptEdits') },
         { key: 'plan', name: 'Plan', description: translate('agentInput.permissionMode.plan') },
         { key: 'bypassPermissions', name: 'Yolo', description: translate('agentInput.permissionMode.bypassPermissions') },
@@ -97,7 +102,7 @@ export function getClaudePermissionModes(translate: Translate): PermissionMode[]
 // sandbox but stops asking, so it is the one named for the sandbox.
 export function getCodexPermissionModes(translate: Translate): PermissionMode[] {
     return [
-        { key: 'auto', name: 'Auto', description: translate('agentInput.codexPermissionMode.autoDescription') },
+        { key: 'auto', name: 'Auto', description: translate('agentInput.codexPermissionMode.autoDescription'), sinceCliVersion: CLI_VERSION_WITH_AUTO },
         { key: 'safe-yolo', name: 'Workspace', description: translate('agentInput.codexPermissionMode.safeYoloDescription') },
         { key: 'read-only', name: 'Read', description: translate('agentInput.codexPermissionMode.readOnlyDescription') },
         { key: 'yolo', name: 'Yolo', description: translate('agentInput.codexPermissionMode.yoloDescription') },
@@ -126,20 +131,24 @@ export function getGeminiPermissionModes(translate: Translate): PermissionMode[]
 // do not all mean what the row says. `sonnet` still resolves to Sonnet 4.6 in
 // the CLI's alias table, and `opus-5` is not in that table at all (`claude
 // --model opus-5` errors on 2.1.199). Full IDs pass straight through to the
-// API, so they say exactly which model is meant.
+// API, so they say exactly which model is meant. The `[1m]` suffix is part of
+// the model ID Claude Code accepts (`claude --model 'claude-opus-5[1m]'`) and
+// selects the 1M-context variant; unknown bracket models are rejected, so the
+// suffix is honored rather than silently dropped (#1721).
 export function getClaudeModelModes(): ModelMode[] {
     return [
-        { key: 'claude-fable-5', name: 'fable 5', description: null },
-        { key: 'claude-opus-5', name: 'opus 5', description: null },
-        { key: 'claude-sonnet-5', name: 'sonnet 5', description: null },
+        { key: 'claude-fable-5', name: 'Fable 5', description: null },
+        { key: 'claude-opus-5', name: 'Opus 5', description: null },
+        { key: 'claude-opus-5[1m]', name: 'Opus 5 [1M]', description: '1M context' },
+        { key: 'claude-sonnet-5', name: 'Sonnet 5', description: null },
     ];
 }
 
 export function getCodexModelModes(): ModelMode[] {
     return [
-        { key: 'gpt-5.6-sol', name: 'gpt-5.6 sol', description: null },
-        { key: 'gpt-5.6-terra', name: 'gpt-5.6 terra', description: null },
-        { key: 'gpt-5.6-luna', name: 'gpt-5.6 luna', description: null },
+        { key: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', description: null },
+        { key: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', description: null },
+        { key: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', description: null },
     ];
 }
 
@@ -198,6 +207,74 @@ export function getAgyPermissionModes(translate: Translate): PermissionMode[] {
     ];
 }
 
+// `auto` first shipped in happy-cli 1.2.1-beta.2, for Claude and Codex alike.
+// Before that the CLI's MessageMetaSchema rejected it, and before the schema
+// was loosened to accept any string (same release cycle) a rejected mode
+// dropped the whole prompt — the same failure mode `dontAsk` had.
+export const CLI_VERSION_WITH_AUTO = '1.2.1-beta.2';
+
+/**
+ * True when the CLI at `cliVersion` parses this mode. An untagged mode is
+ * supported everywhere. An absent version stays permissive: every happy-cli
+ * reports its version in both session and machine metadata, so no version
+ * means the client is not happy-cli (e.g. a pre-catalog Rig session). A
+ * version that is present but unparseable hides tagged modes instead — a
+ * mangled happy-cli version is more likely old than new.
+ */
+export function modeSupportedByCli(
+    mode: Pick<ModeOption, 'sinceCliVersion'>,
+    cliVersion: string | null | undefined,
+): boolean {
+    if (!mode.sinceCliVersion || !cliVersion) {
+        return true;
+    }
+    if (!isWellFormedVersion(cliVersion)) {
+        return false;
+    }
+    return compareVersionsWithPrerelease(cliVersion, mode.sinceCliVersion) >= 0;
+}
+
+// The version tags by mode key, for callers that hold a bare key rather than
+// a ModeOption — the option lists below and the outbound-message path both
+// read from here so the two can never disagree.
+const PERMISSION_MODE_SINCE_CLI_VERSION: Record<string, string> = {
+    auto: CLI_VERSION_WITH_AUTO,
+};
+
+/**
+ * True when the CLI at `cliVersion` parses this mode key. The bare-key twin of
+ * modeSupportedByCli, for callers that hold a saved key rather than a
+ * ModeOption. Picker filtering alone does not cover those: an existing session
+ * or a saved agent default can carry a mode the session's older CLI never
+ * offered, and the send path must refuse it loudly rather than substitute a
+ * different mode behind the user's back.
+ */
+export function permissionModeSupportedByCli(
+    modeKey: string | null | undefined,
+    cliVersion: string | null | undefined,
+): boolean {
+    if (!modeKey) {
+        return true;
+    }
+    return modeSupportedByCli(
+        { sinceCliVersion: PERMISSION_MODE_SINCE_CLI_VERSION[modeKey] },
+        cliVersion,
+    );
+}
+
+/**
+ * Drops modes the CLI on the receiving machine cannot parse, going by each
+ * mode's own sinceCliVersion tag. Applies to the hardcoded flavor lists only —
+ * a harness that publishes its own catalog (rig metadata) owns its codes and
+ * already matches its own version.
+ */
+export function filterPermissionModesForCli<T extends ModeOption>(
+    modes: T[],
+    cliVersion: string | null | undefined,
+): T[] {
+    return modes.filter((mode) => modeSupportedByCli(mode, cliVersion));
+}
+
 export function getHardcodedPermissionModes(flavor: AgentFlavor, translate: Translate): PermissionMode[] {
     if (flavor === 'codex') {
         return getCodexPermissionModes(translate);
@@ -216,24 +293,24 @@ export function getHardcodedPermissionModes(flavor: AgentFlavor, translate: Tran
 
 export function getOpenClawModelModes(): ModelMode[] {
     return [
-        { key: 'default', name: 'default model', description: null },
+        { key: 'default', name: 'Default model', description: null },
     ];
 }
 
 // Keys are the exact display names `agy --model` accepts (as printed by `agy models`).
 export function getAgyModelModes(): ModelMode[] {
     return [
-        { key: 'Gemini 3.6 Flash (High)', name: 'gemini 3.6 flash (high)', description: null },
-        { key: 'Gemini 3.6 Flash (Medium)', name: 'gemini 3.6 flash (medium)', description: null },
-        { key: 'Gemini 3.6 Flash (Low)', name: 'gemini 3.6 flash (low)', description: null },
-        { key: 'Gemini 3.1 Pro (High)', name: 'gemini 3.1 pro (high)', description: null },
-        { key: 'Gemini 3.1 Pro (Low)', name: 'gemini 3.1 pro (low)', description: null },
-        { key: 'Gemini 3.5 Flash (High)', name: 'gemini 3.5 flash (high)', description: null },
-        { key: 'Gemini 3.5 Flash (Medium)', name: 'gemini 3.5 flash (medium)', description: null },
-        { key: 'Gemini 3.5 Flash (Low)', name: 'gemini 3.5 flash (low)', description: null },
-        { key: 'Claude Opus 4.6 (Thinking)', name: 'claude opus 4.6 (thinking)', description: null },
-        { key: 'Claude Sonnet 4.6 (Thinking)', name: 'claude sonnet 4.6 (thinking)', description: null },
-        { key: 'GPT-OSS 120B (Medium)', name: 'gpt-oss 120b (medium)', description: null },
+        { key: 'Gemini 3.6 Flash (High)', name: 'Gemini 3.6 Flash (High)', description: null },
+        { key: 'Gemini 3.6 Flash (Medium)', name: 'Gemini 3.6 Flash (Medium)', description: null },
+        { key: 'Gemini 3.6 Flash (Low)', name: 'Gemini 3.6 Flash (Low)', description: null },
+        { key: 'Gemini 3.1 Pro (High)', name: 'Gemini 3.1 Pro (High)', description: null },
+        { key: 'Gemini 3.1 Pro (Low)', name: 'Gemini 3.1 Pro (Low)', description: null },
+        { key: 'Gemini 3.5 Flash (High)', name: 'Gemini 3.5 Flash (High)', description: null },
+        { key: 'Gemini 3.5 Flash (Medium)', name: 'Gemini 3.5 Flash (Medium)', description: null },
+        { key: 'Gemini 3.5 Flash (Low)', name: 'Gemini 3.5 Flash (Low)', description: null },
+        { key: 'Claude Opus 4.6 (Thinking)', name: 'Claude Opus 4.6 (Thinking)', description: null },
+        { key: 'Claude Sonnet 4.6 (Thinking)', name: 'Claude Sonnet 4.6 (Thinking)', description: null },
+        { key: 'GPT-OSS 120B (Medium)', name: 'GPT-OSS 120B (Medium)', description: null },
     ];
 }
 
@@ -351,7 +428,12 @@ export function getAvailablePermissionModes(
         return modes;
     }
     if (flavor === 'claude' || flavor === 'codex' || flavor === 'openclaw' || flavor === 'agy') {
-        return hackModes(getHardcodedPermissionModes(flavor, translate));
+        // metadata.version is the happy-cli version running this session
+        // (createSessionMetadata.ts), which is what has to parse the mode.
+        return hackModes(filterPermissionModesForCli(
+            getHardcodedPermissionModes(flavor, translate),
+            metadata?.version,
+        ));
     }
 
     const metadataModes = mapMetadataOptions(metadata?.operatingModes);
@@ -392,8 +474,18 @@ export function getDefaultPermissionModeKey(flavor: AgentFlavor): string {
 
 // Effort levels per agent type
 
+// Display capitalization only — the key is what the wire protocol accepts.
+// `xhigh` keeps its camel-cased brand spelling instead of plain title case.
+const EFFORT_DISPLAY_NAMES: Record<string, string> = {
+    xhigh: 'xHigh',
+};
+
+export function effortDisplayName(key: string): string {
+    return EFFORT_DISPLAY_NAMES[key] ?? (key.charAt(0).toUpperCase() + key.slice(1));
+}
+
 function effortLevels(keys: readonly string[]): EffortLevel[] {
-    return keys.map((key) => ({ key, name: key }));
+    return keys.map((key) => ({ key, name: effortDisplayName(key) }));
 }
 
 // The Claude Agent SDK's own EffortLevel union, in order
@@ -448,7 +540,7 @@ export function getEffortLevelsForModel(
     if (isRigMetadataV1(metadata)) {
         return getRigReasoningLevels(metadata, modelKey).map((level) => ({
             key: level,
-            name: level,
+            name: effortDisplayName(level),
         }));
     }
     // Claude's effort scale is a property of the SDK rather than of the model:

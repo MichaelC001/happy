@@ -7,6 +7,7 @@ import { AvatarBrutalist } from "./AvatarBrutalist";
 import { useSetting } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { resolveAvatarHarness, type AvatarHarnessIcon } from '@/utils/avatarHarness';
+import { normalizeAvatarStyle } from '@/utils/avatarStyle';
 
 export type AvatarBadgeLocation = 'sessionHeader' | 'sessionList' | 'none';
 
@@ -31,6 +32,23 @@ const harnessIcons: Record<AvatarHarnessIcon, number> = {
     rig: require('@/assets/images/logo-black.png'),
 };
 
+// One badge geometry for every place an avatar carries a harness icon. The
+// glyph ratios keep clear air between glyph and circle edge. The Happy "H"
+// is a square mark, so its corners reach √2 further than its width — at
+// 0.30 in a 0.42 circle the diagonal touched the rim exactly; 0.26 leaves a
+// real margin.
+function harnessBadgeSizes(size: number, harness: AvatarHarnessIcon) {
+    const circleSize = Math.round(size * 0.42);
+    const iconSize = harness === 'rig'
+        ? Math.round(size * 0.26)
+        : harness === 'codex'
+            ? Math.round(size * 0.3)
+            : harness === 'claude'
+                ? Math.round(size * 0.34)
+                : Math.round(size * 0.42);
+    return { circleSize, iconSize };
+}
+
 const styles = StyleSheet.create((theme) => ({
     container: {
         position: 'relative',
@@ -52,9 +70,13 @@ const styles = StyleSheet.create((theme) => ({
 
 export const Avatar = React.memo((props: AvatarProps) => {
     const { flavor, clientId, badgeLocation = 'none', size = 48, imageUrl, thumbhash, ...avatarProps } = props;
-    // Brutalist is the product default now. Keep the renderer branches below
-    // so another style can be restored without rebuilding the avatar variants.
-    const avatarStyle: string = 'brutalist';
+    const avatarStyle = normalizeAvatarStyle(useSetting('avatarStyle'));
+    // The black-and-white preference applies to every generated style; a
+    // caller passing monochrome explicitly (e.g. offline rows) still wins.
+    const monochromeSetting = useSetting('avatarMonochrome');
+    if (monochromeSetting) {
+        avatarProps.monochrome = true;
+    }
     const showFlavorIcons = useSetting('showFlavorIcons');
     const showHarnessIconInSessionHeader = useSetting('showHarnessIconInSessionHeader');
     const { theme } = useUnistyles();
@@ -84,14 +106,7 @@ export const Avatar = React.memo((props: AvatarProps) => {
         // Add harness icon overlay if enabled
         if (showHarnessIcon && effectiveHarness) {
             const harnessIcon = harnessIcons[effectiveHarness];
-            const circleSize = Math.round(size * 0.35);
-            const iconSize = effectiveHarness === 'codex'
-                ? Math.round(size * 0.25)
-                : effectiveHarness === 'claude'
-                    ? Math.round(size * 0.28)
-                    : effectiveHarness === 'rig'
-                        ? Math.round(size * 0.29)
-                        : Math.round(size * 0.35);
+            const { circleSize, iconSize } = harnessBadgeSizes(size, effectiveHarness);
 
             return (
                 <View style={[styles.container, { width: size, height: size }]}>
@@ -129,16 +144,9 @@ export const Avatar = React.memo((props: AvatarProps) => {
 
     // Determine harness icon for generated avatars
     const harnessIcon = effectiveHarness ? harnessIcons[effectiveHarness] : null;
-    // Make icons smaller while keeping same circle size
-    // Claude slightly bigger than codex
-    const circleSize = Math.round(size * 0.35);
-    const iconSize = effectiveHarness === 'codex'
-        ? Math.round(size * 0.25)
-        : effectiveHarness === 'claude'
-            ? Math.round(size * 0.28)
-            : effectiveHarness === 'rig'
-                ? Math.round(size * 0.29)
-                : Math.round(size * 0.35);
+    const { circleSize, iconSize } = effectiveHarness
+        ? harnessBadgeSizes(size, effectiveHarness)
+        : { circleSize: 0, iconSize: 0 };
 
     // Only wrap in a container when this caller explicitly opts into a badge
     // location and the session has an identifiable harness.

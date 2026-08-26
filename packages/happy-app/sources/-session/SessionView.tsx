@@ -19,9 +19,8 @@ import { ChatHeaderView } from '@/components/ChatHeaderView';
 import { ChatList } from '@/components/ChatList';
 import { Deferred } from '@/components/Deferred';
 import { EmptyMessages } from '@/components/EmptyMessages';
-import { SessionStatusBar } from '@/components/SessionStatusBar';
 import { Avatar } from '@/components/Avatar';
-import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
+import { VoiceAssistantStatusBar, VOICE_PILL_TOTAL_HEIGHT } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
 import { useImagePicker } from '@/hooks/useImagePicker';
 import { Modal } from '@/modal';
@@ -42,6 +41,7 @@ import { getVoiceMessageCount, getVoiceOnboardingPromptLoadCount } from '@/sync/
 import { isRunningOnMac } from '@/utils/platform';
 import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/utils/responsive';
 import { resolveStatusBarGitBranch } from '@/utils/sessionStatusBar';
+import { visibleRigGitLineChanges } from '@/utils/rigGitLineChanges';
 import { FilesSidebar, SidebarMode } from '@/components/FilesSidebar';
 import { AllFilesDiffView } from '@/components/AllFilesDiffView';
 import { FileViewPanel } from '@/components/FileViewPanel';
@@ -65,6 +65,7 @@ import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
 import { performAgentGoalAction } from './agentGoalActionHandler';
 import { MOBILE_GLASS_HEADER_HEIGHT } from '@/components/navigation/headerMetrics';
 import {
+    getRigGitSummary,
     getRigReasoningSelection,
     isRigMetadata,
     isRigModelSelectionEnabled,
@@ -405,7 +406,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                     paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web')
                         ? contentRunsUnderHeader
                             ? 0
-                            : safeArea.top + mobileHeaderHeight + (!isTablet && realtimeStatus !== 'disconnected' ? 32 : 0)
+                            : safeArea.top + mobileHeaderHeight + (!isTablet && realtimeStatus !== 'disconnected' ? VOICE_PILL_TOTAL_HEIGHT : 0)
                         : 0,
                 }}
             >
@@ -641,9 +642,13 @@ export function SessionViewLoaded({
         && !isLandscape;
     const [bottomDockInset, setBottomDockInset] = React.useState(0);
     const [composerY, setComposerY] = React.useState(0);
+    // Offset of the composer card inside AgentInput — the faded status rows
+    // above it keep their space, so anchoring to the dock top floats the
+    // scroll button over a visually empty band.
+    const [composerCardOffset, setComposerCardOffset] = React.useState(0);
     const [isChatAtBottom, setIsChatAtBottom] = React.useState(true);
     const showBottomDockDetails = !usesFloatingMobileDock || isChatAtBottom;
-    const scrollButtonInset = Math.max(0, bottomDockInset - composerY);
+    const scrollButtonInset = Math.max(0, bottomDockInset - composerY - composerCardOffset);
 
     const handleBottomDockInsetChange = React.useCallback((nextInset: number) => {
         setBottomDockInset((currentInset) => (
@@ -654,6 +659,12 @@ export function SessionViewLoaded({
         const nextY = Math.ceil(event.nativeEvent.layout.y);
         setComposerY((currentY) => (
             Math.abs(currentY - nextY) < 1 ? currentY : nextY
+        ));
+    }, []);
+    const handleComposerCardOffsetChange = React.useCallback((offset: number) => {
+        const nextOffset = Math.ceil(offset);
+        setComposerCardOffset((currentOffset) => (
+            Math.abs(currentOffset - nextOffset) < 1 ? currentOffset : nextOffset
         ));
     }, []);
     const handleChatBottomVisibilityChange = React.useCallback((visible: boolean) => {
@@ -682,7 +693,7 @@ export function SessionViewLoaded({
         : deviceType === 'phone' && Platform.OS !== 'web'
             ? safeArea.top
                 + MOBILE_GLASS_HEADER_HEIGHT
-                + (realtimeStatus !== 'disconnected' ? 32 : 0)
+                + (realtimeStatus !== 'disconnected' ? VOICE_PILL_TOTAL_HEIGHT : 0)
                 + 12
             : undefined;
 
@@ -748,7 +759,6 @@ export function SessionViewLoaded({
     const sessionUsage = useSessionUsage(sessionId);
     const gitStatus = useSessionGitStatus(sessionId);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
-    const sessionStatusBarDisplay = useSetting('sessionStatusBarDisplay');
     const experiments = useSetting('experiments');
     const { canResume, resumeSession, resumingSession } = useSessionQuickActions(session);
     const isDisconnected = !sessionStatus.isConnected;
@@ -849,13 +859,10 @@ export function SessionViewLoaded({
     }, [sessionId, expImageUpload, selectedImages, clearImages, pendingCommunications]);
 
     const handleAbort = React.useCallback(() => {
-        // Mode picks live in synced metadata — clear them there, otherwise the
-        // next inbound metadata update resurrects them (#1492)
-        if (!isRig) {
-            sessionSetAgentModes(sessionId, { permissionMode: null, modelMode: null, effortLevel: null });
-        }
+        // Stop cancels only the active turn. Permission, model, and effort are
+        // session choices and must remain sticky for the next message.
         sessionAbort(sessionId);
-    }, [sessionId, isRig]);
+    }, [sessionId]);
 
     const handleFileViewerPress = React.useCallback(() => {
         router.push(`/session/${sessionId}/files`);
@@ -889,10 +896,24 @@ export function SessionViewLoaded({
         return typeof gitBranch === 'string' && gitBranch.trim() ? gitBranch.trim() : null;
     }, [session.metadata]);
     const statusBarGitBranch = resolveStatusBarGitBranch(gitStatus?.branch, metadataGitBranch);
-    const statusBarModelLabel = modelMode?.name ?? session.metadata?.currentModelCode ?? session.modelMode ?? null;
-    const statusBarEffortLabel = effortLevel?.name
-        ? effortLevel.name.charAt(0).toUpperCase() + effortLevel.name.slice(1)
-        : null;
+    // Same source and fallback chain as the session list rows.
+    const statusBarGitChanges = React.useMemo(() => {
+        const liveInsertions = gitStatus?.unstagedLinesAdded ?? 0;
+        const liveDeletions = gitStatus?.unstagedLinesRemoved ?? 0;
+        if (liveInsertions > 0 || liveDeletions > 0) {
+            return { approximate: false, insertions: liveInsertions, deletions: liveDeletions };
+        }
+        const rigGit = getRigGitSummary(session.metadata);
+        if (rigGit && rigGit.changedFiles !== null) {
+            return visibleRigGitLineChanges({
+                changedFiles: rigGit.changedFiles,
+                countsExact: rigGit.countsExact ?? true,
+                deletions: rigGit.deletions ?? 0,
+                insertions: rigGit.insertions ?? 0,
+            });
+        }
+        return null;
+    }, [gitStatus?.unstagedLinesAdded, gitStatus?.unstagedLinesRemoved, session.metadata]);
 
     const visibleAgentGoal = React.useMemo(() => (
         resolveVisibleAgentGoalStatus(session)
@@ -962,11 +983,14 @@ export function SessionViewLoaded({
         }
     }, [realtimeStatus, sessionId]);
 
-    // Memoize mic button state to prevent flashing during chat transitions
+    // Memoize mic button state to prevent flashing during chat transitions.
+    // While a call runs the pill under the header is the only stop control,
+    // so the composer mic disappears instead of doubling as a stop button.
+    const voiceSessionActive = realtimeStatus === 'connected' || realtimeStatus === 'connecting';
     const micButtonState = useMemo(() => ({
-        onMicPress: handleMicrophonePress,
-        isMicActive: realtimeStatus === 'connected' || realtimeStatus === 'connecting'
-    }), [handleMicrophonePress, realtimeStatus]);
+        onMicPress: voiceSessionActive ? undefined : handleMicrophonePress,
+        isMicActive: false,
+    }), [handleMicrophonePress, voiceSessionActive]);
 
     // Trigger session visibility and initialize git status sync
     React.useLayoutEffect(() => {
@@ -1066,11 +1090,11 @@ export function SessionViewLoaded({
                 usageData={usageData}
                 alwaysShowContextSize={alwaysShowContextSize}
                 zenMode={zenMode}
-                showSessionStatusInfoInSettings={false}
                 showStatusDetails={showBottomDockDetails}
-                sessionStatusGitBranch={statusBarGitBranch}
-                sessionStatusModelLabel={statusBarModelLabel}
-                sessionStatusEffortLabel={statusBarEffortLabel}
+                sessionStatusGitBranch={statusBarGitBranch ?? 'main'}
+                sessionStatusGitChanges={statusBarGitChanges}
+                sessionStatusUsageLimits={session.agentState?.usageLimits ?? null}
+                onActionAreaOffsetChange={usesFloatingMobileDock ? handleComposerCardOffsetChange : undefined}
             />
         </View>
     );
@@ -1095,29 +1119,6 @@ export function SessionViewLoaded({
         </AnimatedFade>
     ) : null;
 
-    const showSessionStatusBar = sessionStatusBarDisplay === 'above' || sessionStatusBarDisplay === 'below';
-    const sessionStatusBarPosition = sessionStatusBarDisplay === 'above' ? 'above' : 'below';
-    const sessionStatusBar = showSessionStatusBar ? (
-        <AnimatedFade visible={showBottomDockDetails}>
-            <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
-                <SessionStatusBar
-                    gitBranch={statusBarGitBranch}
-                    modelLabel={statusBarModelLabel}
-                    modelMode={modelMode}
-                    availableModels={availableModels}
-                    onModelModeChange={isRigModelSelectionEnabled(session.metadata) ? updateModelMode : undefined}
-                    effortLabel={statusBarEffortLabel}
-                    effortLevel={effortLevel}
-                    availableEffortLevels={availableEffortLevels}
-                    onEffortLevelChange={isRigReasoningSelectionEnabled(session.metadata) ? updateEffortLevel : undefined}
-                    contextSize={usageData?.contextSize}
-                    contextWindow={usageData?.contextWindow}
-                    usageLimits={session.agentState?.usageLimits}
-                />
-            </CenteredInputWidth>
-        </AnimatedFade>
-    ) : null;
-
     const input = (
         <>
             {inactiveHint}
@@ -1137,12 +1138,10 @@ export function SessionViewLoaded({
                     <AgentQuestionBanner sessionId={sessionId} />
                 </CenteredInputWidth>
             </AnimatedFade>
-            {sessionStatusBarPosition === 'above' ? sessionStatusBar : null}
             <AnimatedFade visible={showBottomDockDetails}>
                 <RigActivityBar metadata={session.metadata} />
             </AnimatedFade>
             {composer}
-            {sessionStatusBarPosition === 'below' ? sessionStatusBar : null}
         </>
     );
 

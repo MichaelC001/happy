@@ -30,6 +30,13 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
  * - New translation keys must be added to ALL language files
  */
 export const en: TranslationStructure = {
+    voiceStatusBar: {
+        tapToEnd: 'tap to end',
+        connecting: 'Connecting…',
+        error: 'Connection error',
+        active: 'Voice assistant active',
+    },
+
     tabs: {
         // Tab navigation labels
         inbox: 'Inbox',
@@ -178,13 +185,6 @@ export const en: TranslationStructure = {
         },
         chat: 'Chat',
         chatDescription: 'Customize chat message appearance',
-        sessionStatusBar: 'Session Status Info',
-        sessionStatusBarDescription: 'Choose where branch, model, effort, and context appear',
-        sessionStatusDisplayOptions: {
-            hidden: 'Hidden',
-            above: 'Above composer',
-            below: 'Below composer',
-        },
         usageLimitShowRemaining: 'Show Quota Remaining',
         usageLimitShowRemainingDescription: 'Count plan limits down from full instead of up from empty',
         userMessageBubbleColor: 'User Bubble Color',
@@ -203,12 +203,33 @@ export const en: TranslationStructure = {
         compactToolCallsDescription: 'Show non-interactive tool calls as one-line rows; open a row for details',
         showLineNumbersInToolViews: 'Show Line Numbers in Tool Views',
         showLineNumbersInToolViewsDescription: 'Display line numbers in tool view diffs',
-        alwaysShowContextSize: 'Always Show Context Size',
-        alwaysShowContextSizeDescription: 'Display context usage even when not near limit',
+        alwaysShowContextSize: 'Show Usage Status',
+        alwaysShowContextSizeDescription: 'Context and plan usage below the input. Near-limit warnings always show.',
+        input: 'Input',
+        inputDescription: 'Configure the message input',
         showHarnessIconInSessionHeader: 'Show Harness Icon in Session Header',
         showHarnessIconInSessionHeaderDescription: 'Display the harness icon in the session header',
         showHarnessIconsInSessionList: 'Show Harness Icons in Session List',
         showHarnessIconsInSessionListDescription: 'Display harness icons on session-list avatars',
+        avatars: 'Avatars',
+        avatarsDescription: 'Choose how generated session avatars look',
+        avatarStyle: 'Avatar Style',
+        avatarStyleOptions: {
+            brutalist: 'Brutalist',
+            pixelated: 'Pixelated',
+            gradient: 'Gradient',
+        },
+        avatarMonochrome: 'Black & White Avatars',
+        avatarMonochromeDescription: 'Render avatars without color',
+    },
+
+    sessionsFilter: {
+        // Filter menu on the home sessions list header
+        title: 'Filter',
+        groupingTitle: 'Grouping',
+        flatList: 'Flat List',
+        groupByProject: 'Group by Project',
+        appearanceSettings: 'Appearance Settings',
     },
 
     settingsFeatures: {
@@ -347,7 +368,12 @@ export const en: TranslationStructure = {
         failedToConnectToServer: 'Failed to connect to server',
         currentlyUsingCustomServer: 'Currently using custom server',
         customServerUrlLabel: 'Custom Server URL',
-        advancedFeatureFooter: "This is an advanced feature. Only change the server if you know what you're doing. You will need to log out and log in again after changing servers."
+        advancedFeatureFooter: "This is an advanced feature. Only change the server if you know what you're doing. You will need to log out and log in again after changing servers.",
+        services: 'Services',
+        useCustomServerForVoice: 'Use Custom Server for Voice',
+        customServerVoiceEnabled: 'Voice credentials and usage use your custom server',
+        customServerVoiceDisabled: 'Voice uses Happy Cloud and your Happy subscription',
+        customServerVoiceFooter: 'When off, starting voice contacts Happy Cloud and ElevenLabs. Turn this on only if your custom server is configured for voice.',
     },
 
     sessionInfo: {
@@ -433,14 +459,6 @@ export const en: TranslationStructure = {
             stopGoal: 'Stop goal',
             editGoal: 'Edit goal',
         },
-        sessionStatusBar: {
-            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `Context ${used} of ${total} tokens, ${percent}%`,
-            limitFiveHour: '5-hour limit',
-            limitSevenDay: '7-day limit',
-            limitResets: ({ time }: { time: string }) => `resets ${time}`,
-            limitAsOf: ({ age }: { age: string }) => `as of ${age} ago`,
-            limitRemaining: ({ percent }: { percent: number }) => `${percent}% left`,
-        },
     },
 
     agentInput: {
@@ -507,7 +525,14 @@ export const en: TranslationStructure = {
             badgePlan: 'plan',
         },
         context: {
-            remaining: ({ percent }: { percent: number }) => `${percent}% left`,
+            detailContext: ({ used, total }: { used: string; total: string }) => `${used} / ${total} context`,
+            percentContext: ({ percent }: { percent: number }) => `${percent}% context`,
+            percentWeek: ({ percent }: { percent: number }) => `${percent}% week`,
+        },
+        usagePopup: {
+            session: 'Session',
+            week: 'Week',
+            resets: ({ time }: { time: string }) => `Resets ${time}`,
         },
         suggestion: {
             fileLabel: 'FILE',
