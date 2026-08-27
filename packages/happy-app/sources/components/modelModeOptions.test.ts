@@ -130,11 +130,13 @@ describe('modelModeOptions', () => {
         expect(models.map((model) => model.key)).toEqual([
             'claude-fable-5',
             'claude-opus-5',
+            'claude-opus-5[1m]',
             'claude-sonnet-5',
         ]);
         expect(models.map((model) => model.name)).toEqual([
             'Fable 5',
             'Opus 5',
+            'Opus 5 [1M]',
             'Sonnet 5',
         ]);
         // No `default model` row, and no alias keys: an alias would silently
@@ -172,10 +174,10 @@ describe('modelModeOptions', () => {
     });
 
     it('uses code defaults for agent defaults', () => {
-        expect(getDefaultPermissionModeKey('claude')).toBe('bypassPermissions');
+        expect(getDefaultPermissionModeKey('claude')).toBe('auto');
         expect(getDefaultModelKey('claude')).toBe('claude-opus-5');
         expect(getDefaultEffortKey('claude')).toBe('medium');
-        expect(getDefaultPermissionModeKey('codex')).toBe('yolo');
+        expect(getDefaultPermissionModeKey('codex')).toBe('auto');
         expect(getDefaultModelKey('codex')).toBe('gpt-5.6-sol');
         expect(getDefaultEffortKey('codex')).toBe('medium');
     });

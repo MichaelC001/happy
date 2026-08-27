@@ -39,6 +39,7 @@ import {
     machineChoiceAgentAvailable,
     machineChoiceAgentVisible,
     resolveChoiceAgent,
+    resolveWorktreeCreationMachine,
 } from '@/sync/machineChoices';
 import type { Session } from '@/sync/storageTypes';
 import {
@@ -666,7 +667,6 @@ export const HomeDock = React.memo(({
     // and use an in-modal React Native picker only on Android.
     const useNativeMenus = shouldUseNativeHomeDockMenus(Platform.OS);
     const [sheetPage, setSheetPage] = React.useState<PickerPage | null>(null);
-    const expImageUpload = useSetting('expImageUpload');
     const { selectedImages, pickImages, removeImage, clearImages } = useImagePicker();
     const agentType = useNewSessionDraft((state) => state.agentType);
     const selectedMachineId = useNewSessionDraft((state) => state.selectedMachineId);
@@ -766,6 +766,7 @@ export const HomeDock = React.memo(({
         [rigSelectionMachine],
     );
     const rigCreation = agentType === 'rig' ? rigSelectionCreation : null;
+    const happyCliVersion = selectedChoice?.happyMachine?.metadata?.happyCliVersion;
     const supportsWorktree = rigCreation?.supportsWorktrees
         ?? (agentType === 'rig' ? false : getSupportsWorktree(agentType));
     const selectedWorktreeKey = sessionType === 'worktree'
@@ -821,6 +822,14 @@ export const HomeDock = React.memo(({
 
     // Happy Agent calls these workspaces, and names them; git calls them worktrees.
     const picksWorkspaces = selectedProjectId !== null;
+    const worktreeCreationMachine = React.useMemo(
+        () => resolveWorktreeCreationMachine(selectedChoice, agentType, supportsWorktree),
+        [agentType, selectedChoice, supportsWorktree],
+    );
+    // Happy Agent can ask its paired Happy CLI daemon to create the checkout
+    // even when its own machine metadata does not advertise worktrees.
+    const canCreateWorktree = supportsWorktree
+        || (picksWorkspaces && worktreeCreationMachine !== null);
 
     React.useEffect(() => {
         if (!supportsWorktree && !picksWorkspaces && sessionType === 'worktree') {
@@ -842,7 +851,7 @@ export const HomeDock = React.memo(({
             // checkout, which is a place with a name rather than an absence.
             { key: '__none__', name: picksWorkspaces ? 'Main' : 'No worktree' },
             // Making one is a separate ability from starting in one that already exists.
-            ...(supportsWorktree
+            ...(canCreateWorktree
                 ? [{ key: '__new__', name: picksWorkspaces ? 'Create New' : 'Create new worktree' }]
                 : []),
             ...existingWorktrees,
@@ -854,7 +863,7 @@ export const HomeDock = React.memo(({
             options.push({ key: worktreeKey, name: worktreeKey });
         }
         return options;
-    }, [agentType, existingWorktrees, picksWorkspaces, supportsWorktree, worktreeKey]);
+    }, [agentType, canCreateWorktree, existingWorktrees, picksWorkspaces, supportsWorktree, worktreeKey]);
     const currentWorktree = resolveOption(worktreeOptions, [selectedWorktreeKey]);
     // Common harnesses stay listed but disabled when unavailable, so the picker
     // still reads as a choice. Antigravity is niche and stays entirely absent
@@ -884,15 +893,15 @@ export const HomeDock = React.memo(({
             modelMode: rigCreation.defaultModelKey ?? '',
             effortLevel: rigCreation.defaultEffortForModel(rigCreation.defaultModelKey),
         }
-        : resolveAgentDefaultConfig(defaultOverrides, agentType), [agentType, defaultOverrides, rigCreation]);
+        : resolveAgentDefaultConfig(defaultOverrides, agentType, happyCliVersion), [agentType, defaultOverrides, happyCliVersion, rigCreation]);
     const permissionOptions = React.useMemo(
         // The CLI daemon on the picked computer is what will parse the mode;
         // older CLIs drop the whole prompt on modes they do not know (`auto`).
         () => rigCreation?.permissionModes ?? filterPermissionModesForCli(
             getHardcodedPermissionModes(agentType, t),
-            selectedChoice?.happyMachine?.metadata?.happyCliVersion,
+            happyCliVersion,
         ),
-        [agentType, rigCreation, selectedChoice],
+        [agentType, happyCliVersion, rigCreation],
     );
     const modelOptions = React.useMemo(
         () => rigCreation?.models ?? includeConfiguredModel(
@@ -908,7 +917,7 @@ export const HomeDock = React.memo(({
     const currentPermission = resolveOption(permissionOptions, [
         permissionMode,
         defaults.permissionMode,
-        rigCreation ? null : getCodeAgentDefaults(agentType).permissionMode,
+        rigCreation ? null : getCodeAgentDefaults(agentType, happyCliVersion).permissionMode,
     ]);
     const currentModel = resolveOption(modelOptions, [modelMode, defaults.modelMode]);
     const effortOptions = React.useMemo(
@@ -926,7 +935,7 @@ export const HomeDock = React.memo(({
     const permissionLabel = getPermissionModeShortLabel(currentPermission);
     const focusedPromptPlaceholder = resolveHomeDockPromptPlaceholder(currentAgent.key, currentAgent.name);
     const canSubmit = !isSubmitting && (
-        prompt.trim().length > 0 || (expImageUpload && selectedImages.length > 0)
+        prompt.trim().length > 0 || selectedImages.length > 0
     );
     const startPhase = isSubmitting ? submitPhase ?? 'spawning' : null;
     const startProgressLabel = resolveNewSessionProgressLabel({
@@ -1080,13 +1089,6 @@ export const HomeDock = React.memo(({
         };
     }, []);
 
-    React.useEffect(() => {
-        if (!expImageUpload && selectedImages.length > 0) {
-            clearImages();
-            useNewSessionDraft.getState().setAttachments([]);
-        }
-    }, [clearImages, expImageUpload, selectedImages.length]);
-
     const openFocusMode = React.useCallback(() => {
         if (focusAnimationTimerRef.current) {
             clearTimeout(focusAnimationTimerRef.current);
@@ -1169,14 +1171,14 @@ export const HomeDock = React.memo(({
                 modelMode: nextRigCreation.defaultModelKey ?? '',
                 effortLevel: nextRigCreation.defaultEffortForModel(nextRigCreation.defaultModelKey),
             }
-            : resolveAgentDefaultConfig(defaultOverrides, agent);
+            : resolveAgentDefaultConfig(defaultOverrides, agent, happyCliVersion);
         // Choosing Happy Agent no longer moves the machine selection: the computer already covers
         // both daemons, and switching it under the person was what made the picker show two.
         setAgentType(agent);
         setPermissionMode(nextDefaults.permissionMode);
         setModelMode(nextDefaults.modelMode);
         if (nextDefaults.effortLevel) setEffortLevel(nextDefaults.effortLevel);
-    }, [defaultOverrides, rigSelectionCreation, setAgentType, setEffortLevel, setModelMode, setPermissionMode]);
+    }, [defaultOverrides, happyCliVersion, rigSelectionCreation, setAgentType, setEffortLevel, setModelMode, setPermissionMode]);
 
     React.useEffect(() => {
         if (resolvedAgentType !== agentType) {
@@ -1619,7 +1621,7 @@ export const HomeDock = React.memo(({
 
     const submit = async () => {
         if (!canSubmit) return false;
-        useNewSessionDraft.getState().setAttachments(expImageUpload ? selectedImages : []);
+        useNewSessionDraft.getState().setAttachments(selectedImages);
         const started = await onSubmit();
         if (started) clearImages();
         return started;
@@ -1651,7 +1653,7 @@ export const HomeDock = React.memo(({
                     ]}
                 >
                 <View style={styles.focusedComposerContent}>
-                    {expImageUpload && selectedImages.length > 0 && (
+                    {selectedImages.length > 0 && (
                         <Animated.View style={focusedInputRevealStyle}>
                             <AgentInputAttachmentStrip images={selectedImages} onRemove={removeImage} />
                         </Animated.View>
@@ -1704,22 +1706,20 @@ export const HomeDock = React.memo(({
                         />
                     )}
                     <Animated.View style={[styles.focusedComposerActions, focusedActionsRevealStyle]}>
-                        {expImageUpload && (
-                            <RefusableControl refusing={isSubmitting} onRefuse={refuse}>
-                                <BubblePressable
-                                    onPress={() => void pickImages()}
-                                    style={styles.sideButton}
-                                    accessibilityRole="button"
-                                    accessibilityLabel="Add image"
-                                >
-                                    <Ionicons
-                                        name="add"
-                                        size={MOBILE_COMPOSER_METRICS.addIconSize}
-                                        color={theme.colors.text}
-                                    />
-                                </BubblePressable>
-                            </RefusableControl>
-                        )}
+                        <RefusableControl refusing={isSubmitting} onRefuse={refuse}>
+                            <BubblePressable
+                                onPress={() => void pickImages()}
+                                style={styles.sideButton}
+                                accessibilityRole="button"
+                                accessibilityLabel="Add image"
+                            >
+                                <Ionicons
+                                    name="add"
+                                    size={MOBILE_COMPOSER_METRICS.addIconSize}
+                                    color={theme.colors.text}
+                                />
+                            </BubblePressable>
+                        </RefusableControl>
                         {/* The permission mode reads out in words instead of
                             hiding behind a gear: it is the one setting here that
                             changes what the agent is allowed to do to your
