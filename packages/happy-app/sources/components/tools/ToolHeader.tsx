@@ -3,7 +3,7 @@ import { Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { ToolCall } from '@/sync/typesMessage';
 import { getToolCategoryIcon, knownTools } from '@/components/tools/knownTools';
-import { getToolSummaryCategory } from '@/utils/toolDisplay';
+import { getToolActivityLabel, getToolDisplayTitle, getToolSummaryCategory, isTerminalToolName } from '@/utils/toolDisplay';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 interface ToolHeaderProps {
@@ -24,7 +24,7 @@ export function ToolHeader({ tool }: ToolHeaderProps) {
     }
 
     // Handle optional title and function type
-    let toolTitle = tool.name;
+    let toolTitle = getToolDisplayTitle(tool);
     if (knownTool?.title) {
         if (typeof knownTool.title === 'function') {
             toolTitle = knownTool.title({ tool, metadata: null });
@@ -32,6 +32,7 @@ export function ToolHeader({ tool }: ToolHeaderProps) {
             toolTitle = knownTool.title;
         }
     }
+    if (isTerminalToolName(tool.name)) toolTitle = getToolActivityLabel(tool);
 
     const icon = knownTool?.icon
         ? knownTool.icon(18, theme.colors.header.tint)
@@ -46,6 +47,8 @@ export function ToolHeader({ tool }: ToolHeaderProps) {
             subtitle = extractedSubtitle;
         }
     }
+    // Terminal titles already contain the command/control action.
+    if (isTerminalToolName(tool.name)) subtitle = null;
 
     return (
         <View style={styles.container}>

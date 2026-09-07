@@ -22,11 +22,11 @@ import { EmptyMessages } from '@/components/EmptyMessages';
 import { Avatar } from '@/components/Avatar';
 import { VoiceAssistantStatusBar, VOICE_PILL_TOTAL_HEIGHT } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
+import { useSessionVisibility } from '@/hooks/useSessionVisibility';
 import { useImagePicker } from '@/hooks/useImagePicker';
 import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { getCurrentVoiceConversationId, getCurrentVoiceSessionDurationSeconds, startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
-import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort, sessionCancelCommunication, sessionGoalAction, sessionSetAgentModes, spawnSideChat, sessionKill, sessionArchive } from '@/sync/ops';
 import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionGitStatus, useSessionMessages, useSessionPendingCommunications, useSessionUsage, useSetting, useSideChatSessions } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
@@ -54,6 +54,7 @@ import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
 import * as Clipboard from 'expo-clipboard';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import * as React from 'react';
 import { useMemo } from 'react';
 import { ActivityIndicator, LayoutChangeEvent, Platform, Pressable, Text, View, useWindowDimensions } from 'react-native';
@@ -84,6 +85,7 @@ import { AnimatedFade } from '@/components/AnimatedOverlay';
 export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
     const router = useRouter();
+    const isFocused = useIsFocused();
     const session = useSession(sessionId);
     const isDataReady = useIsDataReady();
     const { theme } = useUnistyles();
@@ -313,8 +315,8 @@ export const SessionView = React.memo((props: { id: string }) => {
     // Wire intra-session back / forward into the global SidebarNavigator arrows.
     const canOverlayBack = overlayHistory.cursor > 0;
     const canOverlayForward = overlayHistory.cursor < overlayHistory.stack.length - 1;
-    React.useEffect(() => {
-        useOverlayNav.getState().publish({
+    useFocusEffect(React.useCallback(() => {
+        const controls = {
             canBack: canOverlayBack,
             canForward: canOverlayForward,
             back: () => {
@@ -331,9 +333,14 @@ export const SessionView = React.memo((props: { id: string }) => {
                 ));
                 return true;
             },
-        });
-        return () => useOverlayNav.getState().reset();
-    }, [canOverlayBack, canOverlayForward]);
+        };
+        useOverlayNav.getState().publish(controls);
+        return () => {
+            if (useOverlayNav.getState().back === controls.back) {
+                useOverlayNav.getState().reset();
+            }
+        };
+    }, [canOverlayBack, canOverlayForward]));
 
     // Compute header props based on session state
     const headerProps = useMemo(() => {
@@ -421,6 +428,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         key={sessionId}
                         sessionId={sessionId}
                         session={session}
+                        active={isFocused}
                         onHeaderBackdropVisibilityChange={contentRunsUnderHeader
                             ? setHeaderBackdropVisible
                             : undefined}
@@ -615,11 +623,13 @@ const ChatComposer = React.memo(function ChatComposer(props: ChatComposerProps) 
 export function SessionViewLoaded({
     sessionId,
     session,
+    active = true,
     embedded = false,
     onHeaderBackdropVisibilityChange,
 }: {
     sessionId: string;
     session: Session;
+    active?: boolean;
     embedded?: boolean;
     onHeaderBackdropVisibilityChange?: (visible: boolean) => void;
 }) {
@@ -989,33 +999,7 @@ export function SessionViewLoaded({
         isMicActive: false,
     }), [handleMicrophonePress, voiceSessionActive]);
 
-    // Trigger session visibility and initialize git status sync
-    React.useLayoutEffect(() => {
-
-        // Trigger session sync
-        sync.onSessionVisible(sessionId);
-
-        // Mark session as currently being viewed (clears unread). Skipped when
-        // embedded (e.g. the side-chat panel) so a second mounted chat body
-        // doesn't steal "currently viewing" from the primary session.
-        if (!embedded) {
-            storage.getState().setCurrentViewingSession(sessionId);
-        }
-
-        // Initialize git status sync for this session
-        gitStatusSync.getSync(sessionId).invalidate();
-
-        return () => {
-            if (embedded) {
-                return;
-            }
-            // Clear viewing session on unmount
-            const current = storage.getState().currentViewingSessionId;
-            if (current === sessionId) {
-                storage.getState().setCurrentViewingSession(null);
-            }
-        };
-    }, [sessionId, realtimeStatus, embedded]);
+    useSessionVisibility(sessionId, active, embedded, realtimeStatus);
 
     let content = (
         <>
@@ -1023,6 +1007,7 @@ export function SessionViewLoaded({
                 {messages.length > 0 && (
                     <ChatList
                         session={session}
+                        active={active}
                         topContentInset={chatListTopContentInset}
                         bottomContentInset={usesFloatingMobileDock ? bottomDockInset : undefined}
                         scrollButtonInset={usesFloatingMobileDock ? scrollButtonInset : undefined}

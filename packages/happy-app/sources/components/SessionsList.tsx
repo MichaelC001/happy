@@ -20,7 +20,7 @@ import { getHarnessName } from '@/utils/harnessCatalog';
 import { requestReview } from '@/utils/requestReview';
 import { UpdateBanner } from './UpdateBanner';
 import { layout } from './layout';
-import { useNavigateToSession } from '@/hooks/useNavigateToSession';
+import { useSessionPressHandlers } from '@/hooks/useNavigateToSession';
 import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPopover';
 import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
 import { t } from '@/text';
@@ -610,7 +610,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
     isSingle?: boolean;
 }) => {
     const styles = stylesheet;
-    const navigateToSession = useNavigateToSession();
+    const sessionPressHandlers = useSessionPressHandlers(session.id);
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
     const baseStatus = STATUS_CONFIG[session.state];
     const needsUserAction = session.state === 'permission_required' || session.state === 'input_required';
@@ -634,10 +634,6 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     : session.state === 'disconnected'
                         ? t('status.lastSeen', { time: formatLastSeen(session.activeAt!, false) })
                         : t('status.online');
-
-    const handlePress = React.useCallback(() => {
-        navigateToSession(session.id);
-    }, [navigateToSession, session.id]);
 
     const handleContextMenu = React.useCallback((event: any) => {
         event.preventDefault?.();
@@ -671,7 +667,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     isFirst ? styles.sessionItemFirst :
                         isLast ? styles.sessionItemLast : {}
             ]}
-            onPress={handlePress}
+            {...sessionPressHandlers}
             {...menuProps}
         >
             <View style={styles.avatarContainer}>

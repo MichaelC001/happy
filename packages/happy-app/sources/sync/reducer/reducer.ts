@@ -770,6 +770,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             message.tool.callId = c.id;
                             message.tool.input = mergeToolInputs(message.tool.input, c.input);
                             message.tool.description = c.description;
+                            if (c.title !== undefined) {
+                                message.tool.title = c.title;
+                            }
                             message.tool.startedAt = msg.createdAt;
                             // If permission was approved and shown as completed (no tool), now it's running
                             if (message.tool.permission?.status === 'approved' && message.tool.state === 'completed') {
@@ -796,6 +799,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             startedAt: msg.createdAt,
                             completedAt: null,
                             description: c.description,
+                            title: c.title,
                             result: undefined,
                         };
 
@@ -987,6 +991,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         startedAt: null,
                         completedAt: null,
                         description: c.description,
+                        title: c.title,
                         result: undefined
                     };
 
@@ -1000,6 +1005,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                                 permissionMessage.tool.state = 'running';
                                 permissionMessage.tool.startedAt = msg.createdAt;
                                 permissionMessage.tool.description = c.description;
+                                if (c.title !== undefined) {
+                                    permissionMessage.tool.title = c.title;
+                                }
                                 changed.add(existingPermissionMessageId);
                             }
                         }

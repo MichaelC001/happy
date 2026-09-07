@@ -145,6 +145,7 @@ function windowEndForTurn(messages: Message[], desiredEnd: number, hasMoreOlder:
 
 export const ChatList = React.memo((props: {
     session: Session;
+    active?: boolean;
     topContentInset?: number;
     bottomContentInset?: number;
     /** Distance from the screen bottom to the composer. Independent of status-chrome fade. */
@@ -158,6 +159,7 @@ export const ChatList = React.memo((props: {
         <ChatListInternal
             metadata={props.session.metadata}
             sessionId={props.session.id}
+            active={props.active ?? true}
             messages={messages}
             hasMoreOlder={hasMoreOlder}
             isLoadingOlder={isLoadingOlder}
@@ -208,6 +210,7 @@ const NewerEnd = React.memo((props: { sessionId: string }) => {
 const ChatListInternal = React.memo((props: {
     metadata: Metadata | null,
     sessionId: string,
+    active: boolean,
     messages: Message[],
     hasMoreOlder: boolean,
     isLoadingOlder: boolean,
@@ -442,6 +445,19 @@ const ChatListInternal = React.memo((props: {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [props.sessionId]);
 
+    // A preloaded list may lay out before the tap completes. Measure readiness
+    // from the real navigation request, including reuse of that prepared list.
+    const readyReportedRef = React.useRef(false);
+    const reportReady = useCallback(() => {
+        if (!props.active || !listReadyRef.current || readyReportedRef.current) return;
+        readyReportedRef.current = true;
+        perfSince(`session-open:${props.sessionId}`, `ChatList ${props.sessionId} focused and laid out items=${listItemsRef.current.length}`);
+    }, [props.sessionId, props.active]);
+    React.useLayoutEffect(() => {
+        if (!props.active) readyReportedRef.current = false;
+        reportReady();
+    }, [props.active, reportReady]);
+
     const keyExtractor = useCallback((item: ListItem) => item.id, []);
     // FlashList sizes rows it has not measured from a rolling average of the
     // last few measured rows *of the same type*, so the types have to separate
@@ -575,7 +591,8 @@ const ChatListInternal = React.memo((props: {
     // gate to hide it.
     const handleLoad = useCallback(() => {
         listReadyRef.current = true;
-    }, []);
+        reportReady();
+    }, [reportReady]);
 
     // A drag is the reader's finger and nothing else, which makes it the only
     // trustworthy signal of who is scrolling — FlashList's own scrolls emit
@@ -620,7 +637,7 @@ const ChatListInternal = React.memo((props: {
         // conversation rests with its oldest message already inside the
         // trigger zone, and layout corrections can drift into it as well —
         // neither is a request for more history.
-        if (!listReadyRef.current || !userTookOverRef.current) {
+        if (!props.active || !listReadyRef.current || !userTookOverRef.current) {
             return;
         }
         if (awaitingOlderRef.current) return;
@@ -642,7 +659,7 @@ const ChatListInternal = React.memo((props: {
         }
         requestedWindowEndRef.current = nextEnd;
         setOldestRenderedId(all[nextEnd - 1].id);
-    }, [sessionId]);
+    }, [sessionId, props.active]);
     const requestOlderHistoryRef = React.useRef(requestOlderHistory);
     requestOlderHistoryRef.current = requestOlderHistory;
 

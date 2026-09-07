@@ -17,6 +17,7 @@ import { t } from '@/text';
 import {
     formatMCPTitle,
     getToolActivityLabel,
+    getToolDisplayTitle,
     getToolSummaryCategory,
     getTerminalToolCommand,
     shouldRenderToolCardHeader,
@@ -90,7 +91,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     }
 
     // Handle optional title and function type
-    let toolTitle = tool.name;
+    let toolTitle = getToolDisplayTitle(tool);
     
     // Special handling for MCP tools
     if (tool.name.startsWith('mcp__')) {
@@ -175,11 +176,13 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
 
     const terminalCommand = getTerminalToolCommand(tool);
     const isCompactTerminalTool = terminalCommand !== null;
-    const isCompactActivityTool = shouldUseCompactToolRow(tool, compactToolCalls)
+    const SpecificToolView = getToolViewComponent(tool.name);
+    const needsApprovalInput = tool.permission?.status === 'pending' && SpecificToolView === null;
+    const isCompactActivityTool = !needsApprovalInput && (shouldUseCompactToolRow(tool, compactToolCalls, SpecificToolView !== null)
         || minimal
-        || isCompactTerminalTool;
+        || isCompactTerminalTool);
     const activityLabel = getToolActivityLabel(tool);
-    const isInlineCodexPatch = Platform.OS === 'web' && tool.name === 'CodexPatch';
+    const isInlineCodexPatch = Platform.OS === 'web' && (tool.name === 'CodexPatch' || tool.name === 'apply_patch');
     const renderCardHeader = isCompactActivityTool || shouldRenderToolCardHeader(tool.name, Platform.OS);
     const renderPermissionFooter = () => (
         tool.permission && sessionId && tool.name !== 'AskUserQuestion'
@@ -252,7 +255,6 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                 }
 
                 // Try to use a specific tool view component first
-                const SpecificToolView = getToolViewComponent(tool.name);
                 if (SpecificToolView) {
                     return (
                         <View style={styles.content}>

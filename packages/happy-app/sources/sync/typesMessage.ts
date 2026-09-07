@@ -5,6 +5,8 @@ export type ToolCall = {
     /** Provider/session-protocol tool-call id used to join side-channel UI state. */
     callId?: string;
     name: string;
+    /** Human-readable title supplied by the session protocol. */
+    title?: string;
     state: 'running' | 'completed' | 'error';
     input: any;
     createdAt: number;

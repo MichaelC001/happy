@@ -10,6 +10,10 @@ import { resolvePath } from '@/utils/pathUtils';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { countContentStats, countPatchStats } from '@/components/diff/engine/stats';
 import { materializeUnifiedDiffPatch } from '@/utils/codexUnifiedDiff';
+import { CodeView } from '@/components/CodeView';
+import { ToolError } from '../ToolError';
+import { toolResultText } from '@/utils/toolResult';
+import { t } from '@/text';
 import {
     getPatchChanges,
     getPatchInput,
@@ -36,11 +40,12 @@ export const CodexPatchView = React.memo<CodexPatchViewProps>(({ tool, metadata,
     const entries = changes ? Object.entries(changes) : [];
 
     if (entries.length === 0) {
-        return null;
+        return <PatchFallback tool={tool} permissionFooter={permissionFooter} />;
     }
 
     return (
         <>
+            <PatchError tool={tool} />
             {entries.map(([file, change], index) => (
                 <CodexPatchFileView
                     key={file}
@@ -67,7 +72,7 @@ export const CodexPatchViewFull = React.memo<CodexPatchViewProps>(({ tool, metad
     const entries = focused.length > 0 ? focused : allEntries;
 
     if (entries.length === 0) {
-        return null;
+        return <PatchFallback tool={tool} showError={false} />;
     }
 
     return (
@@ -78,6 +83,24 @@ export const CodexPatchViewFull = React.memo<CodexPatchViewProps>(({ tool, metad
         </View>
     );
 });
+
+function PatchError({ tool }: { tool: ToolCall }) {
+    return tool.state === 'error' && tool.result != null
+        ? <ToolError message={toolResultText(tool.result) ?? ''} /> : null;
+}
+
+/** A rejected or future patch format must never become a blank, headerless card. */
+function PatchFallback({ tool, permissionFooter, showError = true }: { tool: ToolCall; permissionFooter?: React.ReactNode; showError?: boolean }) {
+    const rawPatch = typeof tool.input?.patch === 'string' ? tool.input.patch
+        : typeof tool.input?.input === 'string' ? tool.input.input : toolResultText(tool.input);
+    return (
+        <ToolSectionView title={t('tools.names.applyChanges')}>
+            {showError ? <PatchError tool={tool} /> : null}
+            {rawPatch ? <CodeView code={rawPatch} /> : null}
+            {permissionFooter}
+        </ToolSectionView>
+    );
+}
 
 const CodexPatchFileContent = React.memo(function CodexPatchFileContent(props: {
     file: string;

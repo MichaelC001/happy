@@ -1,6 +1,7 @@
 import type { Metadata } from '@/sync/storageTypes';
 import { hackModes } from '@/sync/modeHacks';
 import { sortPermissionModes } from '@/utils/permissionModeLabels';
+import { sortRigModelsForPicker } from '@/utils/rigModelPickerOrder';
 import { compareVersionsWithPrerelease, isWellFormedVersion } from '@/utils/versionUtils';
 import { CLI_VERSION_WITH_AUTO, getCodeAgentDefaults } from '@/sync/agentDefaults';
 export { CLI_VERSION_WITH_AUTO } from '@/sync/agentDefaults';
@@ -362,7 +363,7 @@ export function getAvailableModels(
     selectedKey?: string | null,
 ): ModelMode[] {
     if (isRigMetadataV1(metadata)) {
-        const models: ModelMode[] = getRigModels(metadata).map((model) => ({
+        const models: ModelMode[] = sortRigModelsForPicker(getRigModels(metadata)).map((model) => ({
             key: model.key,
             name: model.name,
             description: model.providerName,

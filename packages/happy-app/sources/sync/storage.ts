@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { messagePlanMode } from './messagePlanMode';
 import { useShallow } from 'zustand/react/shallow'
 import equal from 'fast-deep-equal'
 import { useDeepEqual } from './storeSelectors';
@@ -277,7 +278,7 @@ interface StorageState {
     deleteMachine: (machineId: string) => void;
     applyLoaded: () => void;
     applyReady: () => void;
-    applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean, enteredPlanMode: boolean };
+    applyMessages: (sessionId: string, messages: NormalizedMessage[], source?: 'sync' | 'preload') => { changed: string[], hasReadyEvent: boolean, enteredPlanMode: boolean };
     applyMessagesLoaded: (sessionId: string) => void;
     applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => void;
     applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => void;
@@ -724,7 +725,7 @@ export const storage = create<StorageState>()((set, get) => {
             ...state,
             isDataReady: true
         })),
-        applyMessages: (sessionId: string, messages: NormalizedMessage[]) => {
+        applyMessages: (sessionId: string, messages: NormalizedMessage[], source = 'sync') => {
             let changed = new Set<string>();
             let hasReadyEvent = false;
 
@@ -733,20 +734,11 @@ export const storage = create<StorageState>()((set, get) => {
             // tells us whether the batch ends with an unresolved plan entry.
             // This prevents history replays (which contain both Enter + Exit) from
             // re-triggering plan mode, while still catching real-time EnterPlanMode.
-            let shouldEnterPlanMode = false;
-            for (const msg of messages) {
-                if (msg.role === 'agent') {
-                    for (const c of msg.content) {
-                        if (c.type === 'tool-call') {
-                            if (c.name === 'EnterPlanMode' || c.name === 'enter_plan_mode') {
-                                shouldEnterPlanMode = true;
-                            } else if (c.name === 'ExitPlanMode' || c.name === 'exit_plan_mode') {
-                                shouldEnterPlanMode = false;
-                            }
-                        }
-                    }
-                }
-            }
+            const enteredPlanMode = messagePlanMode(messages) === true;
+
+            // Speculative history must not alter a session's operating mode.
+            // Its synced metadata remains authoritative while we warm the UI.
+            const shouldEnterPlanMode = enteredPlanMode && source !== 'preload';
 
             set((state) => {
 
@@ -825,7 +817,7 @@ export const storage = create<StorageState>()((set, get) => {
                 };
             });
 
-            return { changed: Array.from(changed), hasReadyEvent, enteredPlanMode: shouldEnterPlanMode };
+            return { changed: Array.from(changed), hasReadyEvent, enteredPlanMode };
         },
         applyMessagesLoaded: (sessionId: string) => set((state) => {
             const existingSession = state.sessionMessages[sessionId];

@@ -72,6 +72,8 @@ import { isRigMetadataV1, rigCanUseAttachments, usesControlledSessionUi } from '
 import { fetchProjects as fetchProjectRecords } from './apiProjects';
 import { decryptProjectRecord, loadProjectAvatar, type DecryptedProjectRecord } from './projects';
 import type { Project, ProjectAvatar } from './projectTypes';
+import { SessionMessagePreloader } from './sessionMessagePreloader';
+import { messagePlanMode } from './messagePlanMode';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -133,6 +135,10 @@ class Sync {
     private sessionsSync: InvalidateSync;
     private projectsSync: InvalidateSync;
     private messagesSync = new Map<string, InvalidateSync>();
+    private messagePreloader = new SessionMessagePreloader((sessionId, signal) => this.preloadLatestPage(sessionId, signal));
+    private historyPrefetchSessions = new Set<string>();
+    private olderMessagesPrefetching = new Set<string>();
+    private preloadedPlanModes = new Map<string, Session['permissionMode']>();
     private sendSync = new Map<string, InvalidateSync>();
     private sendAbortControllers = new Map<string, AbortController>();
     private sessionLastSeq = new Map<string, number>();
@@ -334,16 +340,66 @@ class Sync {
 
 
     onSessionVisible = (sessionId: string) => {
-        this.getMessagesSync(sessionId).invalidate();
+        this.historyPrefetchSessions.add(sessionId);
+        this.refreshSessionData(sessionId);
+        // Also cover focus arriving while the speculative first page is still
+        // being decrypted. Revalidate first so a newer ExitPlanMode can cancel
+        // the deferred transition before activation consumes it once.
+        void this.getMessagesSync(sessionId).awaitQueue().then(() => this.activatePreloadedPlanMode(sessionId));
 
-        // Also invalidate git status sync for this session
-        gitStatusSync.getSync(sessionId).invalidate();
+        this.notifyVoiceSessionFocus(sessionId);
+    }
 
-        // Notify voice assistant about session visibility
+    private notifyVoiceSessionFocus = (sessionId: string) => {
         const session = storage.getState().sessions[sessionId];
         if (session) {
             voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
         }
+    }
+
+    private refreshSessionData = (sessionId: string) => {
+        this.getMessagesSync(sessionId).invalidate();
+
+        // Also invalidate git status sync for this session
+        gitStatusSync.getSync(sessionId).invalidate();
+    }
+
+    private onSessionDataUpdated = (sessionId: string) => {
+        this.refreshSessionData(sessionId);
+        // Preserve existing voice-follow behavior for actual server events.
+        // Unlike a user visit, these must not opt a session into full history.
+        this.notifyVoiceSessionFocus(sessionId);
+    }
+
+    preloadSession = (sessionId: string) => {
+        this.messagePreloader.preload(sessionId);
+    }
+
+    private activatePreloadedPlanMode = (sessionId: string) => {
+        if (!this.preloadedPlanModes.has(sessionId)) return;
+        const previousMode = this.preloadedPlanModes.get(sessionId);
+        this.preloadedPlanModes.delete(sessionId);
+        const session = storage.getState().sessions[sessionId];
+        // Do not replay history over a mode chosen since the preload.
+        if (session && session.permissionMode === previousMode) {
+            sessionSetAgentModes(sessionId, { permissionMode: 'plan' });
+        }
+    }
+
+    private preloadLatestPage = async (sessionId: string, signal: AbortSignal): Promise<boolean> => {
+        const lock = this.getSessionMessageLock(sessionId);
+        return lock.inLock(async () => {
+            // Recheck inside the shared lock: normal sync or a previous touch
+            // may have already populated the cache while this request waited.
+            const encryption = this.encryption?.getSessionEncryption(sessionId);
+            if (signal.aborted || !encryption || !storage.getState().sessions[sessionId]
+                || this.sessionLastSeq.has(sessionId)) {
+                return false;
+            }
+            await this.fetchInitialLatestPage(sessionId, encryption, signal);
+            storage.getState().applyMessagesLoaded(sessionId);
+            return true;
+        });
     }
 
     private getMessagesSync(sessionId: string): InvalidateSync {
@@ -2104,9 +2160,20 @@ class Sync {
     }
 
     private fetchMessages = async (sessionId: string) => {
+        // Take ownership before waiting. A touch on a different row must not
+        // abort the first page once ordinary sync needs it. No duplicate GET
+        // or second decryption when touch-up overlaps the speculative request.
+        const preload = this.messagePreloader.take(sessionId);
+        if (preload && await preload) {
+            void this.prefetchOlderMessagesInBackground(sessionId);
+            return;
+        }
+        // Deletion during a handed-off preload is not a transient fetch error.
+        if (!storage.getState().sessions[sessionId]) return;
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
         const lock = this.getSessionMessageLock(sessionId);
         await lock.inLock(async () => {
+            if (!storage.getState().sessions[sessionId]) return;
             const encryption = this.encryption.getSessionEncryption(sessionId);
             if (!encryption) {
                 log.log(`💬 fetchMessages: Session encryption not ready for ${sessionId}, will retry`);
@@ -2138,18 +2205,23 @@ class Sync {
             storage.getState().applyMessagesLoaded(sessionId);
             log.log(`💬 fetchMessages completed for session ${sessionId}`);
 
-            if (isInitialLoad) {
-                // Fire-and-forget. The chat is interactive at this point;
-                // background pages stream in without blocking either the
-                // surrounding lock or the UI. loadOlderMessages takes the
-                // same lock internally, so the loop naturally serialises
-                // with on-scroll triggers and live socket updates.
-                void this.prefetchOlderMessagesInBackground(sessionId);
-            }
+            // A preloaded first page may already be cached. History starts
+            // after an actual visit, regardless of who fetched that first page.
+            void this.prefetchOlderMessagesInBackground(sessionId);
         });
     }
 
     private prefetchOlderMessagesInBackground = async (sessionId: string) => {
+        if (!this.historyPrefetchSessions.has(sessionId) || this.olderMessagesPrefetching.has(sessionId)) return;
+        this.olderMessagesPrefetching.add(sessionId);
+        try {
+            await this.fetchOlderMessagesInBackground(sessionId);
+        } finally {
+            this.olderMessagesPrefetching.delete(sessionId);
+        }
+    }
+
+    private fetchOlderMessagesInBackground = async (sessionId: string) => {
         const SLEEP_BETWEEN_PAGES_MS = 250;
         // While loadOlderMessages handles the actual work, this loop is what
         // keeps it going without user input. We keep stepping until either:
@@ -2186,10 +2258,12 @@ class Sync {
 
     private fetchInitialLatestPage = async (
         sessionId: string,
-        encryption: ReturnType<Encryption['getSessionEncryption']> & {}
+        encryption: ReturnType<Encryption['getSessionEncryption']> & {},
+        preloadSignal?: AbortSignal,
     ) => {
         const response = await apiSocket.request(
-            `/v3/sessions/${sessionId}/messages?before_seq=${SEQ_BACKWARD_INITIAL_SENTINEL}&limit=100`
+            `/v3/sessions/${sessionId}/messages?before_seq=${SEQ_BACKWARD_INITIAL_SENTINEL}&limit=100`,
+            { signal: preloadSignal },
         );
         if (!response.ok) {
             throw new Error(`Failed to fetch initial page for ${sessionId}: ${response.status}`);
@@ -2197,7 +2271,7 @@ class Sync {
         const data = await response.json() as V3GetSessionMessagesResponse;
         const messages = Array.isArray(data.messages) ? data.messages : [];
 
-        await this.applyFetchedMessages(sessionId, encryption, messages);
+        await this.applyFetchedMessages(sessionId, encryption, messages, preloadSignal);
 
         // Anchor both ends so future incremental forward sync resumes from
         // maxSeq, and loadOlderMessages can page backward from minSeq.
@@ -2250,10 +2324,19 @@ class Sync {
     private applyFetchedMessages = async (
         sessionId: string,
         encryption: ReturnType<Encryption['getSessionEncryption']> & {},
-        messages: ApiMessage[]
+        messages: ApiMessage[],
+        preloadSignal?: AbortSignal,
     ) => {
+        const assertPreloadActive = () => {
+            if (preloadSignal && (preloadSignal.aborted || !storage.getState().sessions[sessionId]
+                || this.encryption.getSessionEncryption(sessionId) !== encryption)) {
+                throw new Error('Session preload cancelled');
+            }
+        };
+        assertPreloadActive();
         if (messages.length === 0) return;
         const decryptedMessages = await encryption.decryptMessages(messages);
+        assertPreloadActive();
         const normalizedMessages: NormalizedMessage[] = [];
         for (let i = 0; i < decryptedMessages.length; i++) {
             const decrypted = decryptedMessages[i];
@@ -2264,7 +2347,10 @@ class Sync {
             }
         }
         if (normalizedMessages.length > 0) {
-            this.applyMessages(sessionId, normalizedMessages);
+            // Once the destination has focus this is an ordinary first page,
+            // including voice updates if the call began before it arrived.
+            const source = preloadSignal && storage.getState().currentViewingSessionId !== sessionId ? 'preload' : 'sync';
+            this.applyMessages(sessionId, normalizedMessages, source);
         }
     }
 
@@ -2485,8 +2571,8 @@ class Sync {
                 }
             }
 
-            // Ping session
-            this.onSessionVisible(updateData.body.sid);
+            // A socket update refreshes data; it is not a user opening a chat.
+            this.onSessionDataUpdated(updateData.body.sid);
 
         } else if (updateData.body.t === 'new-session') {
             log.log('🆕 New session update received');
@@ -2503,6 +2589,9 @@ class Sync {
 
             // Clear any cached git status
             gitStatusSync.clearForSession(sessionId);
+            this.messagePreloader.cancel(sessionId);
+            this.historyPrefetchSessions.delete(sessionId);
+            this.preloadedPlanModes.delete(sessionId);
             this.messagesSync.delete(sessionId);
             this.sendSync.delete(sessionId);
             this.pendingOutbox.delete(sessionId);
@@ -2582,7 +2671,7 @@ class Sync {
                     if (handoffDirection) {
                         const target = handoffDirection === 'desktop-to-mobile' ? 'mobile' : 'desktop';
                         log.log(`🔄 Control returned to ${target} for session ${updateData.body.id}, re-fetching messages`);
-                        this.onSessionVisible(updateData.body.id);
+                        this.onSessionDataUpdated(updateData.body.id);
                     }
                 }
             }
@@ -2999,13 +3088,23 @@ class Sync {
     // Apply store
     //
 
-    private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
+    private applyMessages = (sessionId: string, messages: NormalizedMessage[], source: 'sync' | 'preload' = 'sync') => {
+        const planMode = messagePlanMode(messages);
+        if (planMode !== null) this.preloadedPlanModes.delete(sessionId);
         const applyStarted = Date.now();
-        const result = storage.getState().applyMessages(sessionId, messages);
+        const result = storage.getState().applyMessages(sessionId, messages, source);
         const applyElapsed = Date.now() - applyStarted;
         if (applyElapsed > 8) {
             const total = storage.getState().sessionMessages[sessionId]?.messages.length ?? 0;
             console.log(`[perf] applyMessages ${sessionId} ${applyElapsed}ms batch=${messages.length} total=${total}`);
+        }
+        // History preparation is cache hydration, not a new agent event. It
+        // must not send voice prompts or change the agent's operating mode.
+        if (source === 'preload') {
+            if (result.enteredPlanMode) {
+                this.preloadedPlanModes.set(sessionId, storage.getState().sessions[sessionId]?.permissionMode);
+            }
+            return;
         }
         let m: Message[] = [];
         for (let messageId of result.changed) {
