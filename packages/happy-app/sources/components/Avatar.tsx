@@ -1,5 +1,6 @@
 import * as React from "react";
 import { View } from "react-native";
+import { Ionicons } from '@expo/vector-icons';
 import { Image } from "expo-image";
 import { AvatarSkia } from "./AvatarSkia";
 import { AvatarGradient } from "./AvatarGradient";
@@ -12,6 +13,7 @@ import { normalizeAvatarStyle } from '@/utils/avatarStyle';
 export type AvatarBadgeLocation = 'sessionHeader' | 'sessionList' | 'none';
 
 interface AvatarProps {
+    bot?: boolean;
     id: string;
     title?: boolean;
     square?: boolean;
@@ -69,7 +71,7 @@ const styles = StyleSheet.create((theme) => ({
 }));
 
 export const Avatar = React.memo((props: AvatarProps) => {
-    const { flavor, clientId, badgeLocation = 'none', size = 48, imageUrl, thumbhash, ...avatarProps } = props;
+    const { bot, flavor, clientId, badgeLocation = 'none', size = 48, imageUrl, thumbhash, ...avatarProps } = props;
     const avatarStyle = normalizeAvatarStyle(useSetting('avatarStyle'));
     // The black-and-white preference applies to every generated style; a
     // caller passing monochrome explicitly (e.g. offline rows) still wins.
@@ -86,6 +88,25 @@ export const Avatar = React.memo((props: AvatarProps) => {
             ? showFlavorIcons
             : false;
     const effectiveHarness = resolveAvatarHarness(flavor, clientId);
+
+    if (bot) {
+        return (
+            <View style={{
+                width: size,
+                height: size,
+                borderRadius: size / 2,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: theme.colors.surface,
+            }}>
+                <Ionicons
+                    name="hardware-chip-outline"
+                    size={Math.round(size * 0.55)}
+                    color={avatarProps.monochrome ? theme.colors.textSecondary : theme.colors.text}
+                />
+            </View>
+        );
+    }
 
     // Render custom image if provided
     if (imageUrl) {

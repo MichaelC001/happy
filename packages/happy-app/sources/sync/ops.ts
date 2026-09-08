@@ -1061,6 +1061,9 @@ export async function sessionKill(sessionId: string): Promise<SessionKillRespons
  * Use this when the CLI process is already dead and sessionKill can't reach it.
  */
 export async function sessionArchive(sessionId: string): Promise<{ success: boolean; message?: string }> {
+    if (storage.getState().sessions[sessionId]?.metadata?.bot) {
+        return { success: false, message: 'Connect to the bot’s machine to archive it.' };
+    }
     try {
         const response = await apiSocket.request(`/v1/sessions/${sessionId}/archive`, {
             method: 'POST'
@@ -1080,6 +1083,9 @@ export async function sessionArchive(sessionId: string): Promise<{ success: bool
  * The session should be inactive/archived before deletion
  */
 export async function sessionDelete(sessionId: string): Promise<{ success: boolean; message?: string }> {
+    if (storage.getState().sessions[sessionId]?.metadata?.bot) {
+        return { success: false, message: 'A bot keeps one continuous conversation. Archive the bot instead.' };
+    }
     try {
         const response = await apiSocket.request(`/v1/sessions/${sessionId}`, {
             method: 'DELETE'

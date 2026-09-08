@@ -417,7 +417,7 @@ export function SessionsList({
         const legacyItems = groupedRows.filter((item) => (
             item.type !== 'project' && item.type !== 'projects-header'
         ));
-        return [...hierarchy, ...legacyItems, ...archiveToggle, ...archivedRows];
+        return [...legacyItems, ...hierarchy, ...archiveToggle, ...archivedRows];
     }, [flatSessionList, hasArchivedSessions, hideArchivedSessions, machines, sourceData]);
 
     // Early return if no data yet
@@ -429,6 +429,7 @@ export function SessionsList({
 
     const keyExtractor = React.useCallback((item: SessionListDisplayItem, index: number) => {
         switch (item.type) {
+            case 'bots': return 'bots';
             case 'machine-header': return `machine-header-${JSON.stringify(item.machineId)}`;
             case 'archive-toggle': return 'archive-toggle';
             case 'flat-session': return `flat-session-${item.row.session.id}`;
@@ -443,6 +444,22 @@ export function SessionsList({
 
     const renderItem = React.useCallback(({ item, index }: { item: SessionListDisplayItem, index: number }) => {
         switch (item.type) {
+            case 'bots':
+                return (
+                    <View>
+                        <View style={styles.headerSection}>
+                            <Text style={styles.headerText}>Bots</Text>
+                        </View>
+                        {item.sessions.map((session, botIndex) => (
+                            <FlatSessionRow
+                                key={session.id}
+                                row={toFlatSessionRow(session)}
+                                selected={session.id === selectedSessionId}
+                                showBorder={botIndex < item.sessions.length - 1}
+                            />
+                        ))}
+                    </View>
+                );
             case 'machine-header':
                 return (
                     <MachineHeader
@@ -671,7 +688,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
             {...menuProps}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={session.avatarId} size={48} monochrome={!status.isConnected} flavor={session.flavor} clientId={session.clientId} imageUrl={session.projectAvatarUri} thumbhash={session.projectAvatarThumbhash} badgeLocation="sessionList" />
+                <Avatar bot={!!session.botId} id={session.avatarId} size={48} monochrome={!status.isConnected} flavor={session.flavor} clientId={session.clientId} imageUrl={session.projectAvatarUri} thumbhash={session.projectAvatarThumbhash} badgeLocation="sessionList" />
                 {session.hasDraft && (
                     <View style={styles.draftIconContainer}>
                         <Ionicons
@@ -711,7 +728,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     </View>
                 ) : (
                     <Text style={styles.sessionSubtitle} numberOfLines={1}>
-                        {session.subtitle}
+                        {session.botId ? toFlatSessionRow(session).projectName : session.subtitle}
                     </Text>
                 )}
 

@@ -20,13 +20,11 @@ import { AgentInputAutocomplete } from './AgentInputAutocomplete';
 import { FloatingOverlay } from './FloatingOverlay';
 import { TextInputState, MultiTextInputHandle } from './MultiTextInput';
 import { applySuggestion } from './autocomplete/applySuggestion';
-import { GitStatusBadge, useHasMeaningfulGitStatus } from './GitStatusBadge';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSetting } from '@/sync/storage';
 import { hackMode, hackModes } from '@/sync/modeHacks';
 import { getPermissionModeMenuLabel, getPermissionModeShortLabel } from '@/utils/permissionModeLabels';
 import { getUsageLimitDisplayPercentage, getUsageLimitRows, formatUsageLimitResetTime, type UsageLimitsLike } from '@/utils/sessionStatusBar';
-import { compactCount } from '@/utils/rigGitLineChanges';
 import { Theme } from '@/theme';
 import { t } from '@/text';
 import { Metadata } from '@/sync/storageTypes';
@@ -103,9 +101,6 @@ interface AgentInputProps {
      * out, so callers anchoring to AgentInput would float above empty space.
      */
     onActionAreaOffsetChange?: (offset: number) => void;
-    sessionStatusGitBranch?: string | null;
-    /** Unstaged line changes for the checkout, matching the session list. */
-    sessionStatusGitChanges?: { insertions: number; deletions: number; approximate: boolean } | null;
     /** Plan quota windows from agent state, for the week stat and its popup. */
     sessionStatusUsageLimits?: UsageLimitsLike | null;
     onFileViewerPress?: () => void;
@@ -503,13 +498,11 @@ const getContextStatus = (contextSize: number, alwaysShow: boolean = false, them
 
 type StatusRowProps = {
     connectionStatus?: AgentInputProps['connectionStatus'];
-    gitBranch: string | null;
-    gitChanges: { insertions: number; deletions: number; approximate: boolean } | null;
 };
 
 const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRowProps) {
     const { theme } = useUnistyles();
-    if (!p.connectionStatus && !p.gitBranch) {
+    if (!p.connectionStatus) {
         return null;
     }
     return (
@@ -597,27 +590,6 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
                     </>
                 )}
             </View>
-            {p.gitBranch && (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 1 }}>
-                    <Octicons name="git-branch" size={11} color={theme.colors.textSecondary} />
-                    <Text style={{ fontSize: 11, color: theme.colors.textSecondary, flexShrink: 1, ...Typography.default() }} numberOfLines={1}>
-                        {p.gitBranch}
-                    </Text>
-                    {p.gitChanges?.approximate && (
-                        <Text style={{ fontSize: 11, color: theme.colors.textSecondary, ...Typography.default() }}>≈</Text>
-                    )}
-                    {p.gitChanges && p.gitChanges.insertions > 0 && (
-                        <Text style={{ fontSize: 11, fontWeight: '600', color: theme.colors.gitAddedText, ...Typography.default() }}>
-                            +{compactCount(p.gitChanges.insertions)}
-                        </Text>
-                    )}
-                    {p.gitChanges && p.gitChanges.deletions > 0 && (
-                        <Text style={{ fontSize: 11, fontWeight: '600', color: theme.colors.gitRemovedText, ...Typography.default() }}>
-                            -{compactCount(p.gitChanges.deletions)}
-                        </Text>
-                    )}
-                </View>
-            )}
         </View>
     );
 });
@@ -1531,7 +1503,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             </Shaker>
                         )}
 
-                        <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
+                        <FileViewerButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
 
                         {props.onPickImages && (
                             <Pressable
@@ -2071,8 +2043,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 <AnimatedFade visible={props.showStatusDetails !== false}>
                     <AgentInputStatusRow
                         connectionStatus={props.connectionStatus}
-                        gitBranch={props.sessionStatusGitBranch ?? null}
-                        gitChanges={props.sessionStatusGitChanges ?? null}
                     />
 
                     <AgentInputContextChips
@@ -2281,7 +2251,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                         )}
 
                         {!compactMobileComposer && (
-                            <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
+                            <FileViewerButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
                         )}
 
                         <Shaker ref={shakerRef}>
@@ -2381,10 +2351,8 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     );
 }));
 
-// Git Status Button Component
-function GitStatusButton({ sessionId, onPress }: { sessionId?: string, onPress?: () => void }) {
-    const hasMeaningfulGitStatus = useHasMeaningfulGitStatus(sessionId || '');
-    const styles = stylesheet;
+// Keep file browsing available without duplicating the header's git statistics.
+function FileViewerButton({ sessionId, onPress }: { sessionId?: string, onPress?: () => void }) {
     const { theme } = useUnistyles();
 
     if (!sessionId || !onPress) {
@@ -2405,20 +2373,14 @@ function GitStatusButton({ sessionId, onPress }: { sessionId?: string, onPress?:
                 overflow: 'hidden',
             })}
             hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
+            accessibilityRole="button"
+            accessibilityLabel={t('common.files')}
             onPress={() => {
                 hapticsLight();
                 onPress?.();
             }}
         >
-            {hasMeaningfulGitStatus ? (
-                <GitStatusBadge sessionId={sessionId} />
-            ) : (
-                <Octicons
-                    name="git-branch"
-                    size={16}
-                    color={theme.colors.button.secondary.tint}
-                />
-            )}
+            <Octicons name="file-directory" size={16} color={theme.colors.button.secondary.tint} />
         </BubblePressable>
     );
 }

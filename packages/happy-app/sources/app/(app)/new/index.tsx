@@ -38,11 +38,12 @@ import type { NewSessionAgentType } from '@/sync/persistence';
 import { sync } from '@/sync/sync';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { machineSpawnNewSession, sessionSetAgentModes } from '@/sync/ops';
-import { createWorktree, listWorktrees } from '@/utils/worktree';
+import { createWorktree } from '@/utils/worktree';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
+import { useWorktrees } from '@/hooks/useWorktrees';
 import { useShallow } from 'zustand/react/shallow';
 import type { MultiTextInputHandle } from '@/components/MultiTextInput';
 import { Modal } from '@/modal';
@@ -965,39 +966,26 @@ function NewSessionScreen() {
     );
     const canCreateWorktree = createsNativeHappyAgentWorkspace
         || (selectedAgent !== 'rig' && worktreeCreationMachine !== null);
+    const worktreeMachineId = worktreeMachine?.id ?? null;
+    const worktreeMachineOnline = worktreeMachine !== null && isMachineOnline(worktreeMachine);
 
-    // Fetch existing worktrees/workspaces from the selected computer/path
-    const [worktreeItems, setWorktreeItems] = React.useState<PickerItem[]>([]);
-    React.useEffect(() => {
-        if (!debouncedResolvedSelectedPath) {
-            setWorktreeItems([]);
-            return;
-        }
-
-        if (picksWorkspaces) {
-            setWorktreeItems(agentWorkspaces.map((workspace) => ({
-                key: workspace.key,
-                label: workspace.name,
-                subtitle: workspace.path,
-            })));
-            return;
-        }
-
-        if (!supportsWorktree || !worktreeMachine || !isMachineOnline(worktreeMachine)) {
-            setWorktreeItems([]);
-            return;
-        }
-        let cancelled = false;
-        listWorktrees(worktreeMachine.id, debouncedResolvedSelectedPath).then(worktrees => {
-            if (cancelled) return;
-            setWorktreeItems(worktrees.map(wt => ({
-                key: wt.path,
-                label: wt.branch,
-                subtitle: wt.path,
-            })));
-        });
-        return () => { cancelled = true; };
-    }, [agentWorkspaces, debouncedResolvedSelectedPath, picksWorkspaces, supportsWorktree, worktreeMachine]);
+    const { worktrees, refresh: refreshWorktrees } = useWorktrees(
+        worktreeMachineId,
+        debouncedResolvedSelectedPath,
+        !picksWorkspaces && supportsWorktree && worktreeMachineOnline,
+    );
+    // Native workspace options follow session updates without triggering Git discovery.
+    const worktreeItems = React.useMemo<PickerItem[]>(() => picksWorkspaces
+        ? (debouncedResolvedSelectedPath ? agentWorkspaces.map((workspace) => ({
+            key: workspace.key,
+            label: workspace.name,
+            subtitle: workspace.path,
+        })) : [])
+        : worktrees.map((worktree) => ({
+            key: worktree.path,
+            label: worktree.branch,
+            subtitle: worktree.path,
+        })), [agentWorkspaces, debouncedResolvedSelectedPath, picksWorkspaces, worktrees]);
 
     React.useEffect(() => {
         if (!canPickWorktree) {
@@ -1162,6 +1150,7 @@ function NewSessionScreen() {
         }
 
         closePicker();
+        if (type === 'worktree') refreshWorktrees();
         if (isDesktop || !Keyboard.isVisible()) {
             setActivePicker(type);
             return;
@@ -1179,7 +1168,7 @@ function NewSessionScreen() {
         pickerOpenTimerRef.current = setTimeout(finishOpening, 420);
         composerInputRef.current?.blur();
         Keyboard.dismiss();
-    }, [activePicker, cancelPendingPickerOpen, closePicker, isDesktop]);
+    }, [activePicker, cancelPendingPickerOpen, closePicker, isDesktop, refreshWorktrees]);
 
     const isOffline = selectedMachine ? !isMachineOnline(selectedMachine) : false;
     const agent = availableAgents.find(a => a.key === selectedAgent)

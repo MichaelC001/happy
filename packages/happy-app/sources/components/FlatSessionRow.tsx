@@ -142,6 +142,7 @@ export const FlatSessionRow = React.memo(({ row, selected, showBorder, archived 
         >
             <View style={[styles.avatar, faded && styles.avatarFaded]}>
                 <Avatar
+                    bot={!!session.botId}
                     id={session.avatarId}
                     size={AVATAR_SIZE}
                     monochrome={faded}

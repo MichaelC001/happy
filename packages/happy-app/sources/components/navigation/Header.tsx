@@ -310,6 +310,7 @@ const NavigationHeaderComponent: React.FC<NavigationHeaderComponentProps> = Reac
 
     // Hide back button on tablet — navigation is handled via sidebar and persistent header
     const shouldHideBackButton = isTablet;
+    const titleAlign = options.headerTitleAlign ?? (Platform.OS === 'ios' ? 'center' : 'left');
 
     // Extract title - handle both string and function types
     let title: React.ReactNode | null = null;
@@ -323,7 +324,7 @@ const NavigationHeaderComponent: React.FC<NavigationHeaderComponentProps> = Reac
                         {
                             fontSize: isDesktop ? 17 : 16,
                             fontWeight: '600',
-                            textAlign: Platform.OS === 'ios' ? 'center' : 'left',
+                            textAlign: titleAlign,
                             color: options.headerTintColor || '#000',
                             maxWidth: '100%',
                             flexShrink: 1,
@@ -345,7 +346,7 @@ const NavigationHeaderComponent: React.FC<NavigationHeaderComponentProps> = Reac
                 numberOfLines={1}
                 ellipsizeMode="tail"
                 style={[
-                    { fontSize: 17, fontWeight: '600', textAlign: Platform.OS === 'ios' ? 'center' : 'left', color: options.headerTintColor || '#000', maxWidth: '100%', flexShrink: 1 },
+                    { fontSize: 17, fontWeight: '600', textAlign: titleAlign, color: options.headerTintColor || '#000', maxWidth: '100%', flexShrink: 1 },
                     Typography.default('semiBold'),
                     options.headerTitleStyle
                 ]}
@@ -388,7 +389,7 @@ const NavigationHeaderComponent: React.FC<NavigationHeaderComponentProps> = Reac
             headerBackdropAlwaysVisible={Platform.OS === 'ios'}
             headerBackdropVariant="strong"
             mobileTitleSurface={props.mobileTitleSurfaceOverride}
-            mobileTitleAlignment={Platform.OS === 'ios' ? 'center' : 'start'}
+            mobileTitleAlignment={titleAlign === 'center' ? 'center' : 'start'}
         />
     );
 });

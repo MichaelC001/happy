@@ -31,7 +31,7 @@ import { getCodeAgentDefaults, resolveAgentDefaultConfig } from '@/sync/agentDef
 import { formatLastSeen, formatPathRelativeToHome } from '@/utils/sessionUtils';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
-import { listWorktrees } from '@/utils/worktree';
+import { useWorktrees } from '@/hooks/useWorktrees';
 import { collectSessionPlaces, collectSessionWorkspaces } from '@/sync/agentSessionPlaces';
 import {
     collectMachineChoices,
@@ -781,7 +781,6 @@ export const HomeDock = React.memo(({
     const selectedWorktreeKey = sessionType === 'worktree'
         ? worktreeKey ?? '__new__'
         : '__none__';
-    const [existingWorktrees, setExistingWorktrees] = React.useState<ModeOption[]>([]);
     const agentWorkspaces = React.useMemo(
         () => collectSessionWorkspaces({
             machineIds: placeMachineIds,
@@ -790,47 +789,32 @@ export const HomeDock = React.memo(({
         }),
         [placeMachineIds, selectedProjectId, sessionList],
     );
-
-    React.useEffect(() => {
-        const path = resolveAbsolutePath(selectedPath ?? '~', selectedHomeDir);
-
-        // A Happy Agent project keeps its own workspaces, each with a name somebody chose. Those
-        // are better than the branches git reports, so git is only asked when nothing knows better.
-        // Starting in one only needs its directory, so this does not wait on the worktree
-        // capability the daemon advertises for making new ones.
-        if (selectedProjectId) {
-            setExistingWorktrees(agentWorkspaces.map((workspace) => ({
-                key: workspace.key,
-                name: workspace.name,
-                description: workspace.path,
-            })));
-            return;
-        }
-
-        // Only Happy CLI's daemon answers the worktree RPC, so it is asked directly rather than
-        // through whichever machine the draft happens to name.
-        const happyMachine = selectedChoice?.happyMachine ?? null;
-        if (!supportsWorktree || !happyMachine || !isMachineOnline(happyMachine) || !path) {
-            setExistingWorktrees([]);
-            return;
-        }
-
-        let cancelled = false;
-        listWorktrees(happyMachine.id, path).then((worktrees) => {
-            if (cancelled) return;
-            setExistingWorktrees(worktrees.map((worktree) => ({
-                key: worktree.path,
-                name: worktree.branch,
-                description: worktree.path,
-            })));
-        });
-        return () => {
-            cancelled = true;
-        };
-    }, [agentWorkspaces, selectedChoice, selectedHomeDir, selectedPath, selectedProjectId, supportsWorktree]);
-
+    const resolvedWorktreePath = React.useMemo(
+        () => resolveAbsolutePath(selectedPath ?? '~', selectedHomeDir),
+        [selectedHomeDir, selectedPath],
+    );
+    const happyMachine = selectedChoice?.happyMachine ?? null;
+    const happyMachineId = happyMachine?.id ?? null;
+    const happyMachineOnline = happyMachine !== null && isMachineOnline(happyMachine);
     // Happy Agent calls these workspaces, and names them; git calls them worktrees.
     const picksWorkspaces = selectedProjectId !== null;
+    const { worktrees, refresh: refreshWorktrees } = useWorktrees(
+        happyMachineId,
+        resolvedWorktreePath,
+        !picksWorkspaces && supportsWorktree && happyMachineOnline,
+    );
+    // Native workspaces are already in the session store; deriving their options must not fetch Git.
+    const existingWorktrees = React.useMemo<ModeOption[]>(() => picksWorkspaces
+        ? agentWorkspaces.map((workspace) => ({
+            key: workspace.key,
+            name: workspace.name,
+            description: workspace.path,
+        }))
+        : worktrees.map((worktree) => ({
+            key: worktree.path,
+            name: worktree.branch,
+            description: worktree.path,
+        })), [agentWorkspaces, picksWorkspaces, worktrees]);
     const createsNativeHappyAgentWorkspace = agentType === 'rig'
         && picksWorkspaces
         && rigCreation !== null;
@@ -1398,7 +1382,10 @@ export const HomeDock = React.memo(({
             return (
                 <Pressable
                     key={row.page}
-                    onPress={() => setSheetPage(row.page as PickerPage)}
+                    onPress={() => {
+                        if (row.page === 'worktree') refreshWorktrees();
+                        setSheetPage(row.page as PickerPage);
+                    }}
                     accessibilityRole="button"
                     accessibilityLabel={`${row.label}: ${row.value}`}
                 >
@@ -1423,7 +1410,10 @@ export const HomeDock = React.memo(({
                 }[row.page]}
                 options={config.options.map((option) => ({ key: option.key, label: option.name }))}
                 selectedKey={config.selectedKey}
-                onMenuOpen={markNativeMenuOpen}
+                onMenuOpen={() => {
+                    markNativeMenuOpen();
+                    if (row.page === 'worktree') refreshWorktrees();
+                }}
                 onSelect={(key) => {
                     nativeMenuOpenRef.current = false;
                     config.onSelect(key);

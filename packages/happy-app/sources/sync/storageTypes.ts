@@ -1,10 +1,12 @@
 import { z } from "zod";
+import { RigBotSchema } from '@slopus/happy-wire';
 
 //
 // Agent states
 //
 
 export const MetadataSchema = z.object({
+    bot: RigBotSchema.optional(),
     models: z.array(z.object({
         code: z.string(),
         value: z.string(),

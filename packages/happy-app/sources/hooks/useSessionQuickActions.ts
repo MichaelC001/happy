@@ -232,6 +232,14 @@ export function useSessionQuickActions(
     });
 
     const [archivingSession, performArchive] = useHappyAction(async () => {
+        if (session.metadata?.bot) {
+            const result = await sessionKill(session.id);
+            if (!result.success) {
+                throw new HappyError(result.message || 'Connect to the bot’s machine to archive it.', false);
+            }
+            onAfterArchive?.();
+            return;
+        }
         await maybeCleanupWorktree(session.id, session.metadata?.path, session.metadata?.machineId);
 
         // Try to kill the CLI process; if it's already dead, force-archive via server

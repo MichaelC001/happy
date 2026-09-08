@@ -110,6 +110,8 @@ interface SessionMessages {
 
 // Display-only row data — all primitives, cheap to deep-equal
 export interface SessionRowData {
+    botId?: string | null;
+    botUsername?: string | null;
     id: string;
     name: string;
     subtitle: string;
@@ -138,6 +140,7 @@ export interface SessionRowData {
     active: boolean;
     archived: boolean;
     machineId: string | null;
+    machineName?: string | null;
     // True only when the machine this session runs on is known to be offline.
     // A session that merely dropped its own socket is still live work on a live
     // machine, so the row greys out for this and never for that. Unknown
@@ -184,6 +187,8 @@ function buildSessionRowData(
     const projectAvatar = isHappyAgentSession(session) ? linkedProject?.avatar : null;
     return {
         id: session.id,
+        botId: session.metadata?.bot?.id ?? null,
+        botUsername: session.metadata?.bot?.username ?? null,
         name: getSessionName(session),
         subtitle: getSessionSubtitle(session),
         avatarId: getSessionAvatarId(session),
@@ -207,6 +212,7 @@ function buildSessionRowData(
         active: session.active,
         archived: isSessionArchived(session),
         machineId,
+        machineName: machine?.metadata?.displayName || machine?.metadata?.host || session.metadata?.host || null,
         machineOffline: machine ? !isMachineOnline(machine) : false,
         path: session.metadata?.path ?? null,
         homeDir: session.metadata?.homeDir ?? null,
@@ -225,6 +231,7 @@ function buildSessionRowData(
 
 // Unified list item type for SessionsList component
 export type SessionListViewItem =
+    | { type: 'bots'; sessions: SessionRowData[] }
     | { type: 'header'; title: string }
     | { type: 'active-sessions'; sessions: SessionRowData[] }
     | { type: 'project-group'; displayPath: string; machine: Machine }
@@ -341,6 +348,7 @@ function buildSessionListViewData(
     projects: Record<string, Project> = {},
 ): SessionListViewItem[] {
     const rigProjectSessions: Session[] = [];
+    const botSessions: Session[] = [];
     const rigPathSessions: Session[] = [];
     const happySessions: Session[] = [];
     const archivedSessions: Session[] = [];
@@ -354,6 +362,10 @@ function buildSessionListViewData(
         // The archive is a flat chronological tail, not part of any project.
         if (isSessionArchived(session)) {
             archivedSessions.push(session);
+            return;
+        }
+        if (session.metadata?.bot) {
+            botSessions.push(session);
             return;
         }
         if (isRigMetadata(session.metadata)) {
@@ -383,6 +395,17 @@ function buildSessionListViewData(
 
     const listData: SessionListViewItem[] = [];
     const toRow = (session: Session) => buildSessionRowData(session, unreadSessionIds, machines, projects);
+
+    if (botSessions.length > 0) {
+        botSessions.sort((a, b) => {
+            const machineOrder = (a.metadata?.machineId ?? '').localeCompare(b.metadata?.machineId ?? '');
+            if (machineOrder !== 0) return machineOrder;
+            const aKey = a.metadata!.bot!.orderKey;
+            const bKey = b.metadata!.bot!.orderKey;
+            return aKey < bKey ? -1 : aKey > bKey ? 1 : a.id.localeCompare(b.id);
+        });
+        listData.push({ type: 'bots', sessions: botSessions.map(toRow) });
+    }
 
     const rigProjects = [
         ...buildProjectGroups(rigProjectSessions, toRow, isSessionActive),
