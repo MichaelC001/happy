@@ -3,7 +3,7 @@ import { useSession, useSessionMessages, useSetting } from "@/sync/storage";
 import { sync } from '@/sync/sync';
 import { ActivityIndicator, AppState, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, View } from 'react-native';
 import { useCallback } from 'react';
-import { FlashList, FlashListRef } from '@shopify/flash-list';
+import { FlashList, FlashListRef, type ListRenderItemInfo } from '@shopify/flash-list';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MessageView } from './MessageView';
@@ -18,6 +18,7 @@ import { resolveControlMode } from '@/sync/controlHandoff';
 import { usesControlledSessionUi } from '@/sync/rig';
 import { buildAgentTurnCopyTextByMessageId } from '@/utils/agentTurnCopy';
 import { perfSince, useCommitPerf } from '@/utils/perfLog';
+import { DiffSyntaxCell, SyntaxViewport, SYNTAX_VIEWABILITY } from './diff/syntax/viewport';
 
 const SCROLL_THRESHOLD = 300;
 const DOCK_DETAILS_SHOW_OFFSET = 16;
@@ -232,6 +233,7 @@ const ChatListInternal = React.memo((props: {
 }) => {
     const { theme } = useUnistyles();
     const listRef = React.useRef<FlashListRef<ListItem>>(null);
+    const syntaxViewport = React.useMemo(() => new SyntaxViewport(), [props.sessionId]);
     const [showScrollButton, setShowScrollButton] = React.useState(false);
     const [handoffListRevision, setHandoffListRevision] = React.useState(0);
     // Tracks whether the scroll-button is currently shown, so we only call
@@ -569,7 +571,7 @@ const ChatListInternal = React.memo((props: {
         setBottomDockVisibility(true);
     }, [props.onHeaderBackdropVisibilityChange, setBottomDockVisibility]);
 
-    const renderItem = useCallback(({ item }: { item: ListItem }) => {
+    const renderItem = useCallback(({ item, target }: ListRenderItemInfo<ListItem>) => {
         // The inner `key` opts out of FlashList's cell recycling for the row
         // content: rows carry local state (expanded diffs, collapsed output)
         // that must never leak into a different message via a recycled cell.
@@ -587,15 +589,16 @@ const ChatListInternal = React.memo((props: {
             );
         }
         return (
-            <MessageView
-                key={item.message.id}
-                message={item.message}
-                metadata={props.metadata}
-                sessionId={props.sessionId}
-                copyText={agentCopyTextByMessageId.get(item.message.id)}
-            />
+            <DiffSyntaxCell key={item.message.id} viewport={syntaxViewport} itemKey={item.id} enabled={target !== 'Measurement'}>
+                <MessageView
+                    message={item.message}
+                    metadata={props.metadata}
+                    sessionId={props.sessionId}
+                    copyText={agentCopyTextByMessageId.get(item.message.id)}
+                />
+            </DiffSyntaxCell>
         );
-    }, [agentCopyTextByMessageId, props.metadata, props.sessionId, isGroupExpanded, handleToggleGroup]);
+    }, [agentCopyTextByMessageId, props.metadata, props.sessionId, syntaxViewport, isGroupExpanded, handleToggleGroup]);
 
     // The list is inverted, so offset 0 is the newest message and growing
     // offsets walk back through history.
@@ -769,6 +772,8 @@ const ChatListInternal = React.memo((props: {
                 // of the screen.
                 contentContainerStyle={{ paddingTop: 8 + (props.bottomContentInset ?? 0) }}
                 renderItem={renderItem}
+                viewabilityConfig={SYNTAX_VIEWABILITY}
+                onViewableItemsChanged={syntaxViewport.update}
                 onScroll={handleScroll}
                 onScrollBeginDrag={handleScrollBeginDrag}
                 scrollEventThrottle={16}

@@ -15,7 +15,7 @@
 
 import * as React from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native';
-import { FlashList, type FlashListRef } from '@shopify/flash-list';
+import { FlashList, type FlashListRef, type ListRenderItemInfo } from '@shopify/flash-list';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { layout } from '@/components/layout';
@@ -24,6 +24,7 @@ import { DiffFileView } from './DiffFileView';
 import { useDiffPalette } from './DiffPalette';
 import { useDiffDocument, type DiffSource } from './useDiffDocument';
 import { DiffImageView } from './DiffImageView';
+import { DiffSyntaxCell, SyntaxViewport, SYNTAX_VIEWABILITY } from './syntax/viewport';
 
 export interface DiffFileItem extends DiffFileSummary {
     /** Stable identity; defaults to `path` when omitted. */
@@ -81,6 +82,7 @@ export const DiffFilesList = React.memo(function DiffFilesList({
 }: DiffFilesListProps) {
     const palette = useDiffPalette();
     const listRef = React.useRef<FlashListRef<DiffFileItem>>(null);
+    const syntaxViewport = React.useMemo(() => new SyntaxViewport(), []);
     const [overrides, setOverrides] = React.useState<Record<string, boolean>>({});
 
     const toggle = React.useCallback((path: string, current: boolean) => {
@@ -108,28 +110,30 @@ export const DiffFilesList = React.memo(function DiffFilesList({
         return () => cancelAnimationFrame(id);
     }, [scrollToPath, items]);
 
-    const renderItem = React.useCallback(({ item }: { item: DiffFileItem }) => {
+    const renderItem = React.useCallback(({ item, target }: ListRenderItemInfo<DiffFileItem>) => {
         const tooBig = item.additions + item.deletions > autoCollapseAbove;
         const collapsed = overrides[item.path] ?? (defaultCollapsed || tooBig);
         return (
-            <FileSection
-                item={item}
-                collapsed={collapsed}
-                // The "N changed lines" line explains why a file is closed when
-                // its size forced it. When everything starts closed it explains
-                // nothing and doubles the height of the list, so it is dropped.
-                showSizeHint={collapsed && tooBig}
-                onToggle={() => toggle(item.path, collapsed)}
-                showLineNumbers={showLineNumbers}
-                wrap={wrap}
-                split={split}
-                fontSize={fontSize}
-                highlighted={scrollToPath === item.path}
-                onExpandContext={onExpandContext}
-                onRequestContent={onRequestContent}
-            />
+            <DiffSyntaxCell viewport={syntaxViewport} itemKey={item.key ?? item.path} enabled={target !== 'Measurement'}>
+                <FileSection
+                    item={item}
+                    collapsed={collapsed}
+                    // The "N changed lines" line explains why a file is closed when
+                    // its size forced it. When everything starts closed it explains
+                    // nothing and doubles the height of the list, so it is dropped.
+                    showSizeHint={collapsed && tooBig}
+                    onToggle={() => toggle(item.path, collapsed)}
+                    showLineNumbers={showLineNumbers}
+                    wrap={wrap}
+                    split={split}
+                    fontSize={fontSize}
+                    highlighted={scrollToPath === item.path}
+                    onExpandContext={onExpandContext}
+                    onRequestContent={onRequestContent}
+                />
+            </DiffSyntaxCell>
         );
-    }, [overrides, autoCollapseAbove, defaultCollapsed, toggle, showLineNumbers, wrap, split, fontSize, scrollToPath, onExpandContext, onRequestContent]);
+    }, [overrides, autoCollapseAbove, defaultCollapsed, toggle, showLineNumbers, wrap, split, fontSize, scrollToPath, onExpandContext, onRequestContent, syntaxViewport]);
 
     return (
         <View style={{ flex: 1, backgroundColor: palette.surface }}>
@@ -146,6 +150,8 @@ export const DiffFilesList = React.memo(function DiffFilesList({
                 }
                 contentContainerStyle={{ paddingBottom: 32 }}
                 drawDistance={Platform.OS === 'web' ? 2000 : 800}
+                viewabilityConfig={SYNTAX_VIEWABILITY}
+                onViewableItemsChanged={syntaxViewport.update}
             />
         </View>
     );

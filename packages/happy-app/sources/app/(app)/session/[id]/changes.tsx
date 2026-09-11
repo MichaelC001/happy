@@ -10,7 +10,7 @@
 
 import * as React from 'react';
 import { View } from 'react-native';
-import { Stack, useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import { AllFilesDiffView } from '@/components/AllFilesDiffView';
 import { sync } from '@/sync/sync';
 import { useGitStatusFiles } from '@/hooks/useGitStatusFiles';
@@ -22,10 +22,6 @@ export default React.memo(function SessionChangesScreen() {
     const { id: sessionId, file } = useLocalSearchParams<{ id: string; file?: string }>();
     const { theme } = useUnistyles();
     const session = useSession(sessionId!);
-
-    // The in-session overlay publishes its controls into the chat header; here
-    // there is no such slot, so the screen keeps them to itself.
-    const [headerRight, setHeaderRight] = React.useState<React.ReactNode>(null);
 
     // Opened outside the chat, so nothing else has told sync this session is on
     // screen — without it the git status backing the diff goes stale.
@@ -41,19 +37,9 @@ export default React.memo(function SessionChangesScreen() {
 
     return (
         <View style={{ flex: 1, backgroundColor: theme.colors.surface }}>
-            <Stack.Screen
-                options={{
-                    headerRight: () => (
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                            {headerRight}
-                        </View>
-                    ),
-                }}
-            />
             <AllFilesDiffView
                 sessionId={sessionId!}
                 scrollToFile={file ? decodeURIComponent(file) : null}
-                onHeaderRightSlotChange={setHeaderRight}
             />
         </View>
     );

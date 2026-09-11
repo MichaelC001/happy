@@ -20,8 +20,8 @@ interface AllFilesDiffViewProps {
     sessionId: string;
     /** When set, auto-scroll to this file */
     scrollToFile?: string | null;
-    /** Publishes the right-side controls (file count + diff style toggle) into the chat header. */
-    onHeaderRightSlotChange: (slot: React.ReactNode) => void;
+    /** Optional toolbar for the desktop overlay. The standalone route has none. */
+    onHeaderRightSlotChange?: (slot: React.ReactNode) => void;
 }
 
 type DiffContent =
@@ -286,6 +286,7 @@ const LegacyAllFilesDiffView = React.memo(function LegacyAllFilesDiffView({
 
     // Publish header right-slot controls (file count + diff style toggle) into the chat header.
     React.useEffect(() => {
+        if (!onHeaderRightSlotChange) return;
         onHeaderRightSlotChange(
             <DiffHeaderRight
                 fileCount={files.length}

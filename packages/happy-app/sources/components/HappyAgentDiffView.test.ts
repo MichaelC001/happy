@@ -101,6 +101,21 @@ afterEach(async () => {
 });
 
 describe('Happy Agent Changes view', () => {
+    it('loads without publishing a toolbar on the standalone route', async () => {
+        await render({ onHeaderRightSlotChange: undefined });
+        expect(header).toBeNull();
+        expect(list().items).toHaveLength(1);
+    });
+
+    it('keeps inline retry available without a header refresh button', async () => {
+        mocks.getGit.mockRejectedValueOnce(new Error('Computer did not respond'));
+        await render({ onHeaderRightSlotChange: undefined });
+        expect(text()).toContain('Computer did not respond');
+        await act(async () => renderer!.root.findByType('Pressable').props.onPress());
+        expect(list().items).toHaveLength(1);
+        expect(header).toBeNull();
+    });
+
     it('shows committed branch changes without shell calls and reads contents only on expansion', async () => {
         await act(async () => {
             renderer = create(React.createElement(AllFilesDiffView, { sessionId: 'session', onHeaderRightSlotChange: publishHeader }));

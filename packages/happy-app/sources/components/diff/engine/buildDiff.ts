@@ -19,6 +19,7 @@ import {
     type RawLine,
 } from './parsePatch';
 import type { DiffDocument, DiffFile, DiffRow, DiffSpan, SpanKind } from './types';
+import { LruCache } from './lru';
 
 export interface BuildOptions {
     /** Context lines when diffing two blobs. Ignored for pre-made patches. */
@@ -49,9 +50,9 @@ type ResolvedBuildOptions = Omit<Required<BuildOptions>, 'diffBudget'> & { diffB
 const DEFAULTS: Omit<ResolvedBuildOptions, 'diffBudget'> = {
     contextLines: 3,
     ignoreWhitespace: false,
-    // Off while highlight colors don't actually render in chat: Prism
-    // tokenization is ~10x of the whole build (see benchmark.spec.ts), and
-    // right now it buys nothing. Flip back once highlighting works.
+    // Keep Prism off React's synchronous render path. DiffFileView prepares
+    // syntax on a dedicated runtime and bounds the first-paint wait. Explicit
+    // syntax:true is reserved for engine tests / the synchronous benchmark.
     syntax: false,
     intraline: true,
     tabWidth: 4,
@@ -352,25 +353,14 @@ function expandTabs(text: string, width: number): string {
 // ────────────────────────────────────────────────────────────────────────────
 
 const CACHE_LIMIT = 48;
-const cache = new Map<string, DiffDocument>();
+const cache = new LruCache<DiffDocument>(CACHE_LIMIT);
 
 function cacheGet(key: string): DiffDocument | undefined {
-    const hit = cache.get(key);
-    if (hit) {
-        // Refresh recency.
-        cache.delete(key);
-        cache.set(key, hit);
-    }
-    return hit;
+    return cache.get(key);
 }
 
 function cacheSet(key: string, doc: DiffDocument): void {
     cache.set(key, doc);
-    while (cache.size > CACHE_LIMIT) {
-        const oldest = cache.keys().next().value as string | undefined;
-        if (oldest === undefined) break;
-        cache.delete(oldest);
-    }
 }
 
 function cacheKey(prefix: string, input: string, opts: ResolvedBuildOptions): string {

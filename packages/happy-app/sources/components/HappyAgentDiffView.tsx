@@ -30,7 +30,7 @@ export const HappyAgentDiffView = React.memo(function HappyAgentDiffView({
     sessionId: string;
     metadata: Metadata;
     scrollToFile?: string | null;
-    onHeaderRightSlotChange: (slot: React.ReactNode) => void;
+    onHeaderRightSlotChange?: (slot: React.ReactNode) => void;
 }) {
     const { theme } = useUnistyles();
     const supported = supportsHappyAgentGit(metadata);
@@ -66,6 +66,7 @@ export const HappyAgentDiffView = React.memo(function HappyAgentDiffView({
         ? state.git.changedFiles : null;
     const refreshing = supported && state.status === 'loading';
     React.useEffect(() => {
+        if (!onHeaderRightSlotChange) return;
         onHeaderRightSlotChange(
             <DiffHeaderRight
                 fileCount={fileCount}
