@@ -33,6 +33,8 @@ export interface DiffFileItem extends DiffFileSummary {
     /** Set instead of `source` for files that are pictures rather than text. */
     image?: { before: string | null; after: string | null };
     error?: string | null;
+    /** Informational copy for files with no text body (for example empty or conflicting files). */
+    message?: string;
 }
 
 export interface DiffFilesListProps {
@@ -59,6 +61,8 @@ export interface DiffFilesListProps {
      * file it belongs to. Callers that can re-fetch a wider diff pass this.
      */
     onExpandContext?: (path: string) => void;
+    /** Requests the body for an expanded file whose source has not arrived yet. */
+    onRequestContent?: (path: string) => void | Promise<void>;
 }
 
 export const DiffFilesList = React.memo(function DiffFilesList({
@@ -73,6 +77,7 @@ export const DiffFilesList = React.memo(function DiffFilesList({
     defaultCollapsed = false,
     emptyText,
     onExpandContext,
+    onRequestContent,
 }: DiffFilesListProps) {
     const palette = useDiffPalette();
     const listRef = React.useRef<FlashListRef<DiffFileItem>>(null);
@@ -82,11 +87,22 @@ export const DiffFilesList = React.memo(function DiffFilesList({
         setOverrides((prev) => ({ ...prev, [path]: !current }));
     }, []);
 
+    // Scroll to the requested file once, when it first appears in the list.
+    // Items change identity every time a lazily loaded body arrives, and
+    // re-scrolling on each of those would yank the reader back to the target
+    // after they had moved on to another file. The target is marked consumed
+    // only when the frame actually fires, so a cancelled frame retries.
+    const consumedScrollTargetRef = React.useRef<string | null>(null);
     React.useEffect(() => {
-        if (!scrollToPath) return;
+        if (!scrollToPath) {
+            consumedScrollTargetRef.current = null;
+            return;
+        }
+        if (consumedScrollTargetRef.current === scrollToPath) return;
         const index = items.findIndex((f) => f.path === scrollToPath);
         if (index < 0) return;
         const id = requestAnimationFrame(() => {
+            consumedScrollTargetRef.current = scrollToPath;
             listRef.current?.scrollToIndex({ index, animated: true });
         });
         return () => cancelAnimationFrame(id);
@@ -110,9 +126,10 @@ export const DiffFilesList = React.memo(function DiffFilesList({
                 fontSize={fontSize}
                 highlighted={scrollToPath === item.path}
                 onExpandContext={onExpandContext}
+                onRequestContent={onRequestContent}
             />
         );
-    }, [overrides, autoCollapseAbove, defaultCollapsed, toggle, showLineNumbers, wrap, split, fontSize, scrollToPath, onExpandContext]);
+    }, [overrides, autoCollapseAbove, defaultCollapsed, toggle, showLineNumbers, wrap, split, fontSize, scrollToPath, onExpandContext, onRequestContent]);
 
     return (
         <View style={{ flex: 1, backgroundColor: palette.surface }}>
@@ -145,6 +162,7 @@ const FileSection = React.memo(function FileSection({
     fontSize,
     highlighted,
     onExpandContext,
+    onRequestContent,
 }: {
     item: DiffFileItem;
     collapsed: boolean;
@@ -156,10 +174,36 @@ const FileSection = React.memo(function FileSection({
     fontSize?: number;
     highlighted: boolean;
     onExpandContext?: (path: string) => void;
+    onRequestContent?: (path: string) => void | Promise<void>;
 }) {
     const palette = useDiffPalette();
+    const requestedContentRef = React.useRef<string | null>(null);
+
+    React.useEffect(() => {
+        const unavailable = !item.source && !item.image && item.error == null && item.message == null;
+        if (collapsed || !unavailable || !onRequestContent) {
+            // A collapse or a fulfilled/error/message result makes a later
+            // expansion eligible for a fresh request if the body is still
+            // unavailable.
+            if (collapsed || !unavailable) requestedContentRef.current = null;
+            return;
+        }
+
+        if (requestedContentRef.current === item.path) return;
+        requestedContentRef.current = item.path;
+        try {
+            // The parent owns loading/error state. Catch a rejected async
+            // callback here so a transport failure cannot become an
+            // unhandled promise rejection in the renderer.
+            void Promise.resolve(onRequestContent(item.path)).catch(() => undefined);
+        } catch {
+            // A synchronous callback failure is likewise parent-owned.
+        }
+    }, [collapsed, item.path, item.source, item.image, item.error, item.message, onRequestContent]);
+
     // Building only happens for expanded sections FlashList decided to mount.
-    const doc = useDiffDocument(collapsed ? null : item.source);
+    const doc = useDiffDocument(collapsed || item.error != null || item.message != null || item.image ? null : item.source);
+    const hasTextRows = doc.files.some((file) => file.rows.some((row) => row.kind === 'line'));
 
     return (
         <View
@@ -181,15 +225,19 @@ const FileSection = React.memo(function FileSection({
                         </Text>
                     </Pressable>
                 ) : null
-            ) : item.error ? (
+            ) : item.error != null ? (
                 <Message text={item.error} />
+            ) : item.message != null ? (
+                <Message text={item.message} />
             ) : item.image ? (
                 <DiffImageView before={item.image.before} after={item.image.after} />
             ) : !item.source ? (
                 <View style={{ paddingVertical: 16, alignItems: 'center' }}>
                     <ActivityIndicator size="small" color={palette.textSecondary} />
                 </View>
-            ) : doc.files.length === 0 ? (
+            ) : doc.error != null ? (
+                <Message text={doc.error} />
+            ) : doc.files.length === 0 || (item.source.kind === 'contents' && !hasTextRows) ? (
                 <Message text={t('diff.noChanges')} />
             ) : (
                 doc.files.map((file, i) => (

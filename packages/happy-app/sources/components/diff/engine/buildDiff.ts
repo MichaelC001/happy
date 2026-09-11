@@ -10,12 +10,23 @@
 import { highlightLines, type SyntaxRun } from './highlight';
 import { computeEmphasis, type Range } from './intraline';
 import { detectLanguage } from './language';
-import { hunksFromContents, parsePatch, type RawFile, type RawHunk, type RawLine } from './parsePatch';
+import {
+    DiffBudgetExceededError,
+    hunksFromContents,
+    parsePatch,
+    type RawFile,
+    type RawHunk,
+    type RawLine,
+} from './parsePatch';
 import type { DiffDocument, DiffFile, DiffRow, DiffSpan, SpanKind } from './types';
 
 export interface BuildOptions {
     /** Context lines when diffing two blobs. Ignored for pre-made patches. */
     contextLines?: number;
+    /** Fold away changes made only of whitespace when diffing two blobs. */
+    ignoreWhitespace?: boolean;
+    /** Abort an expensive full-content diff before it can block the UI. */
+    diffBudget?: DiffBudget;
     /** Syntax highlighting. Turn off to measure or for huge files. */
     syntax?: boolean;
     /** Word-level emphasis inside changed lines. */
@@ -26,8 +37,18 @@ export interface BuildOptions {
     maxHighlightLines?: number;
 }
 
-const DEFAULTS: Required<BuildOptions> = {
+export interface DiffBudget {
+    /** Maximum wall-clock time passed to the underlying line diff. */
+    timeoutMs: number;
+    /** Maximum edit distance passed to the underlying line diff. */
+    maxEditLength: number;
+}
+
+type ResolvedBuildOptions = Omit<Required<BuildOptions>, 'diffBudget'> & { diffBudget?: DiffBudget };
+
+const DEFAULTS: Omit<ResolvedBuildOptions, 'diffBudget'> = {
     contextLines: 3,
+    ignoreWhitespace: false,
     // Off while highlight colors don't actually render in chat: Prism
     // tokenization is ~10x of the whole build (see benchmark.spec.ts), and
     // right now it buys nothing. Flip back once highlighting works.
@@ -43,9 +64,11 @@ const DEFAULTS: Required<BuildOptions> = {
  * overwrite the defaults (which is how syntax highlighting once went missing
  * everywhere except the one call site that passed booleans).
  */
-function resolve(options?: BuildOptions): Required<BuildOptions> {
+function resolve(options?: BuildOptions): ResolvedBuildOptions {
     return {
         contextLines: options?.contextLines ?? DEFAULTS.contextLines,
+        ignoreWhitespace: options?.ignoreWhitespace ?? DEFAULTS.ignoreWhitespace,
+        diffBudget: options?.diffBudget,
         syntax: options?.syntax ?? DEFAULTS.syntax,
         intraline: options?.intraline ?? DEFAULTS.intraline,
         tabWidth: options?.tabWidth ?? DEFAULTS.tabWidth,
@@ -82,12 +105,26 @@ export function buildDiffFromContents(
     if (hit) return hit;
 
     const started = now();
+    const emphasisDeadline = opts.diffBudget ? Date.now() + opts.diffBudget.timeoutMs : undefined;
+    let hunks: RawHunk[];
+    try {
+        hunks = hunksFromContents(oldText, newText, opts.contextLines, opts.ignoreWhitespace, opts.diffBudget);
+    } catch (error) {
+        if (!(error instanceof DiffBudgetExceededError)) throw error;
+        return {
+            files: [],
+            additions: 0,
+            deletions: 0,
+            buildMs: now() - started,
+            error: 'Diff is too large to render on this device.',
+        };
+    }
     const raw: RawFile = {
         path,
         kind: oldText === '' && newText !== '' ? 'added' : newText === '' && oldText !== '' ? 'deleted' : 'modified',
-        hunks: hunksFromContents(oldText, newText, opts.contextLines),
+        hunks,
     };
-    const doc = finish([buildFile(raw, opts)], started);
+    const doc = finish([buildFile(raw, opts, emphasisDeadline)], started);
     cacheSet(key, doc);
     return doc;
 }
@@ -119,7 +156,7 @@ function finish(files: DiffFile[], started: number): DiffDocument {
     return doc;
 }
 
-function buildFile(raw: RawFile, opts: Required<BuildOptions>): DiffFile {
+function buildFile(raw: RawFile, opts: ResolvedBuildOptions, emphasisDeadline?: number): DiffFile {
     const language = detectLanguage(raw.path);
     const totalLines = raw.hunks.reduce((n, h) => n + h.lines.length, 0);
     const rich = totalLines <= opts.maxHighlightLines;
@@ -147,7 +184,10 @@ function buildFile(raw: RawFile, opts: Required<BuildOptions>): DiffFile {
         previousOldEnd = hunk.oldStart + hunk.oldLines;
 
         const syntax = rich && opts.syntax ? highlightHunk(lines, language) : null;
-        const emphasis = rich && opts.intraline ? computeEmphasis(lines) : null;
+        // Word-level emphasis is optional. A budgeted native build receives a
+        // deadline so whole-line coloring remains accurate if decoration runs
+        // out of time across many separated edit pairs.
+        const emphasis = rich && opts.intraline ? computeEmphasis(lines, emphasisDeadline) : null;
 
         lines.forEach((line, lineIndex) => {
             if (line.type === 'add') additions++;
@@ -333,9 +373,12 @@ function cacheSet(key: string, doc: DiffDocument): void {
     }
 }
 
-function cacheKey(prefix: string, input: string, opts: Required<BuildOptions>): string {
-    const flags = `${opts.contextLines}${opts.syntax ? 1 : 0}${opts.intraline ? 1 : 0}${opts.tabWidth}${opts.maxHighlightLines}`;
-    return `${prefix}:${flags}:${input.length}:${fnv1a(input)}`;
+function cacheKey(prefix: string, input: string, opts: ResolvedBuildOptions): string {
+    const flags = `${opts.contextLines}:${opts.ignoreWhitespace ? 1 : 0}:${opts.syntax ? 1 : 0}:${opts.intraline ? 1 : 0}:${opts.tabWidth}:${opts.maxHighlightLines}`;
+    const budget = opts.diffBudget
+        ? `:budget:${opts.diffBudget.timeoutMs}:${opts.diffBudget.maxEditLength}`
+        : '';
+    return `${prefix}:${flags}${budget}:${input.length}:${fnv1a(input)}`;
 }
 
 /** FNV-1a over the input string — fast enough for megabyte patches. */
