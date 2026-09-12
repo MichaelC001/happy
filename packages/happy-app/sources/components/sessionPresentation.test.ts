@@ -6,6 +6,7 @@ import type { Session } from '@/sync/storageTypes';
 
 const state = vi.hoisted(() => ({
     platform: 'ios',
+    tablet: false,
     session: null as Session | null,
     push: vi.fn(),
 }));
@@ -28,9 +29,8 @@ vi.mock('react-native', async () => {
 });
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0 }) }));
 vi.mock('@/utils/platform', () => ({ isRunningOnMac: () => false }));
-vi.mock('@/utils/responsive', () => ({ useHeaderHeight: () => 52, useIsTablet: () => false }));
+vi.mock('@/utils/responsive', () => ({ useHeaderHeight: () => 52, useIsTablet: () => state.tablet }));
 vi.mock('@/components/layout', () => ({ layout: { maxWidth: 800, headerMaxWidth: 800 } }));
-vi.mock('@/constants/Typography', () => ({ Typography: { default: () => ({}), mono: () => ({}) } }));
 vi.mock('react-native-unistyles', () => {
     const theme = {
         dark: false,
@@ -45,7 +45,7 @@ vi.mock('react-native-unistyles', () => {
     };
     return {
         useUnistyles: () => ({ theme }),
-        StyleSheet: { create: (factory: any) => factory(theme, { insets: { top: 0 } }), hairlineWidth: 1 },
+        StyleSheet: { create: (factory: any) => typeof factory === 'function' ? factory(theme, { insets: { top: 0 } }) : factory, hairlineWidth: 1 },
     };
 });
 vi.mock('@expo/vector-icons', async () => {
@@ -114,6 +114,8 @@ vi.mock('@/utils/versionUtils', () => ({ isVersionSupported: () => true, MINIMUM
 
 import { ChatHeaderView } from './ChatHeaderView';
 import { Header, createPlainHeader } from './navigation/Header';
+import { GitLineChanges } from './GitLineChanges';
+import { RigGitLineChanges } from './RigGitLineChanges';
 import SessionInfo from '@/app/(app)/session/[id]/info';
 
 const renderers: ReturnType<typeof create>[] = [];
@@ -129,6 +131,7 @@ beforeAll(() => {
 afterEach(() => {
     act(() => renderers.splice(0).forEach((renderer) => renderer.unmount()));
     state.platform = 'ios';
+    state.tablet = false;
     state.push.mockClear();
 });
 afterAll(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -196,7 +199,8 @@ describe('session details', () => {
         expect(texts(renderer)).toEqual(['5 changed files', '+120', '-34']);
         expect(items.some((item: any) => item.props.title === 'sessionInfo.connectionStatus')).toBe(true);
         expect(renderer.root.findAllByType('Glass')).toHaveLength(0);
-        expect(renderer.root.findByType('StackScreen').props.options.headerTitleAlign).toBe('left');
+        expect(renderer.root.findByType('StackScreen').props.options.headerTitleAlign).toBe('center');
+        expectCountTypography(renderer);
         act(() => items[0].props.onPress());
         expect(state.push).toHaveBeenCalledWith('/session/session-id/changes');
     });
@@ -213,6 +217,25 @@ describe('session details', () => {
         expect(texts(renderer)).toEqual(['Long session title']);
     });
 
+    it.each(['ios', 'android', 'web', 'ipad'])('centers the detail title between symmetric insets on %s', (platform) => {
+        state.platform = platform === 'ipad' ? 'ios' : platform;
+        state.tablet = platform === 'ipad';
+        const renderer = render(createPlainHeader({
+            options: { headerTitle: 'Long session title', headerTitleAlign: 'center' },
+            route: { name: 'session/[id]/info' }, back: { title: 'Chat' },
+            navigation: { goBack: vi.fn() },
+        } as any)!);
+        const header = renderer.root.findByType((Header as any).type);
+        expect(header.props.mobileTitleAlignment).toBe('center');
+        expect(header.props.titleAlignment).toBe('center');
+        const centered = renderer.root.findAllByType('View').map((node: any) => flattenStyle(node.props.style))
+            .find((style: any) => style.position === 'absolute' && style.alignItems === 'center');
+        expect(centered.left).toBe(centered.right);
+        const title = renderer.root.findByType('Text');
+        expect(flattenStyle(title.props.style).textAlign).toBe('center');
+        expect(title.props.numberOfLines).toBe(1);
+    });
+
     it('keeps Changes available for a legacy session without cached statistics', () => {
         state.session = {
             id: 'session-id', createdAt: 1, updatedAt: 1, seq: 1,
@@ -225,5 +248,36 @@ describe('session details', () => {
         expect(firstItem.props.disabled).not.toBe(true);
         act(() => firstItem.props.onPress());
         expect(state.push).toHaveBeenCalledWith('/session/session-id/changes');
+    });
+});
+
+function flattenStyle(style: any): Record<string, unknown> {
+    return Array.isArray(style) ? Object.assign({}, ...style.map(flattenStyle)) : style || {};
+}
+
+function expectCountTypography(renderer: ReturnType<typeof create>) {
+    const counts = renderer.root.findAllByType('Text').filter((node: any) => /^[+\-]\d/.test(node.children.join('')));
+    expect(counts.length).toBeGreaterThan(0);
+    for (const count of counts) {
+        expect(flattenStyle(count.props.style)).toMatchObject({
+            fontFamily: 'IBMPlexSans-Regular', fontSize: 11, fontWeight: '600',
+        });
+    }
+}
+
+describe('shared git-count typography', () => {
+    const changes = { approximate: false, insertions: 120, deletions: 34 };
+
+    it('uses the grouped project font in the shared counts and flat-list adapter', () => {
+        expectCountTypography(render(React.createElement(GitLineChanges, { changes })));
+        expectCountTypography(render(React.createElement(RigGitLineChanges, {
+            changedFiles: 2, countsExact: true, insertions: 120, deletions: 34,
+        })));
+    });
+
+    it('keeps the same font in the chat subtitle', () => {
+        expectCountTypography(render(React.createElement(ChatHeaderView, {
+            title: 'Session', subtitle: 'main', gitChanges: changes,
+        })));
     });
 });

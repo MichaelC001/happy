@@ -141,7 +141,9 @@ export default function RootLayout() {
                 name="session/[id]/changes"
                 options={{
                     headerShown: true,
+                    header: createPlainHeader,
                     headerTitle: t('sessionInfo.viewChanges'),
+                    headerTitleAlign: 'center',
                     headerBackTitle: t('common.back'),
                 }}
             />

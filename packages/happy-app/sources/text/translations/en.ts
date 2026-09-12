@@ -899,7 +899,7 @@ export const en: TranslationStructure = {
     machine: {
         launchNewSessionInDirectory: 'Launch New Session in Directory',
         offlineUnableToSpawn: 'Launcher disabled while machine is offline',
-        offlineHelp: '• Make sure your computer is online\n• Run `happy daemon status` to diagnose\n• Are you running the latest CLI version? Upgrade with `npm install -g happy@latest`',
+        offlineHelp: '• Run `happy daemon start` on your computer\n• Make sure your computer is online\n• Run `happy daemon status` to diagnose\n• Are you running the latest CLI version? Upgrade with `npm install -g happy@latest`',
         daemon: 'Daemon',
         status: 'Status',
         stopDaemon: 'Stop Daemon',
