@@ -72,6 +72,9 @@ describe('isolated Prism worker', () => {
         ['rust', 'fn main() { let count = 42; }'],
         ['go', 'func main() { value := "hello" }'],
         ['ruby', 'def greet; "hello"; end'],
+        ['bash', 'echo "$USER" | head -n 3'],
+        ['powershell', 'Write-Output "$env:USER"'],
+        ['shell-session', '$ echo "hello"\nhello\n'],
     ])('loads %s grammar in a cold isolated runtime', (language, text) => {
         const isolated = runInNewContext(`(${createDiffSyntax.toString()})()`, { performance });
         const result = isolated({ language, lines: [{ type: 'add', text }] });

@@ -20,7 +20,9 @@ export function tokenize(input: SyntaxInput): SyntaxResult {
     // budget, not interrupting a regex already running. The RN deadline is
     // independent, and the queue never spawns replacement native runtimes.
     if (performance.now() - started >= SYNTAX_REVEAL_MS) return finish('limited');
-    const newRuns = newLines.length ? highlightLines(newLines.join('\n'), input.language) : [];
+    // Plain code/terminal blocks have identical sides. Tokenize only once.
+    const unchanged = input.lines.every((line) => line.type === 'ctx');
+    const newRuns = unchanged ? oldRuns : newLines.length ? highlightLines(newLines.join('\n'), input.language) : [];
     if (performance.now() - started >= SYNTAX_REVEAL_MS) return finish('limited');
     let oldIndex = 0;
     let newIndex = 0;

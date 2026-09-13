@@ -31,7 +31,8 @@
             "packages/happy-server",
             "packages/happy-server-self-host",
             "packages/happy-wire",
-            "packages/happy-app-logs"
+            "packages/happy-app-logs",
+            "packages/expo-tailcat"
         ]
     },
     "pnpm": {

@@ -91,6 +91,11 @@ export default function RootLayout() {
                 name="session/[id]/message/[messageId]"
                 options={{
                     headerShown: true,
+                    // Use the shared plain title from the first frame, even
+                    // before the message has loaded. Never swap UIKit chrome
+                    // for a differently measured tool header after hydration.
+                    header: createPlainHeader,
+                    headerTitleAlign: 'center',
                     headerBackTitle: t('common.back'),
                     headerTitle: t('common.message')
                 }}

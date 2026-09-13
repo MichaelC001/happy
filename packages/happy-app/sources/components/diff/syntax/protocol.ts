@@ -7,7 +7,7 @@ export const MAX_SYNTAX_LINE = 2000;
 export const MAX_SYNTAX_LINES = 2000;
 export const MAX_SYNTAX_RUNS = 20_000;
 
-/** One contiguous hunk, never isolated viewport lines with lost lexer context. */
+/** A contiguous hunk or code block (all ctx), never disconnected viewport lines. */
 export interface SyntaxInput {
     language: string;
     lines: { text: string; type: DiffRowType }[];

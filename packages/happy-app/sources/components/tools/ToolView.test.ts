@@ -4,7 +4,7 @@ import { act, create } from 'react-test-renderer';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ToolCall } from '@/sync/typesMessage';
 
-const settings = vi.hoisted(() => ({ compact: false, platform: 'ios' }));
+const settings = vi.hoisted(() => ({ compact: false, platform: 'ios', width: 390 }));
 vi.mock('react-native', async () => {
     const React = await import('react');
     const host = (name: string) => (props: any) => React.createElement(name, props, props.children);
@@ -12,19 +12,22 @@ vi.mock('react-native', async () => {
         View: host('View'), Text: host('Text'), ScrollView: host('ScrollView'), Pressable: host('Pressable'),
         TouchableOpacity: host('TouchableOpacity'), ActivityIndicator: host('ActivityIndicator'),
         Platform: { get OS() { return settings.platform; }, select: (value: any) => value[settings.platform] ?? value.default },
-        StyleSheet: { create: (styles: any) => styles }, useWindowDimensions: () => ({ width: 390 }),
+        StyleSheet: { create: (styles: any) => styles }, useWindowDimensions: () => ({ width: settings.width }),
     };
 });
-vi.mock('react-native-unistyles', () => ({
-    StyleSheet: { create: () => ({}) },
-    useUnistyles: () => ({ theme: { colors: { text: 'black', textSecondary: 'gray', warning: 'orange', header: { tint: 'black' } } } }),
-}));
+vi.mock('react-native-unistyles', async () => {
+    const { lightTheme } = await import('@/theme');
+    return {
+        StyleSheet: { create: (styles: any) => typeof styles === 'function' ? styles(lightTheme) : styles },
+        useUnistyles: () => ({ theme: lightTheme }),
+    };
+});
 vi.mock('@expo/vector-icons', () => ({ Ionicons: () => null, Octicons: () => null }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock('@/sync/storage', () => ({ useSetting: () => settings.compact, useLocalSetting: () => false }));
 vi.mock('@/hooks/useElapsedTime', () => ({ useElapsedTime: () => 0 }));
 vi.mock('@/text', () => ({ t: (key: string) => key }));
-vi.mock('../layout', () => ({ layout: { maxWidth: 800 } }));
+vi.mock('../layout', () => ({ layout: { maxWidth: 1200 } }));
 vi.mock('../CodeView', async () => {
     const React = await import('react');
     return { CodeView: (props: any) => React.createElement('CodeView', props) };
@@ -102,6 +105,8 @@ afterAll(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 afterEach(() => {
     act(() => renderers.splice(0).forEach(renderer => renderer.unmount()));
     settings.compact = false;
+    settings.platform = 'ios';
+    settings.width = 390;
 });
 
 describe('tool rendering on mobile and web', () => {
@@ -171,6 +176,27 @@ describe('tool rendering on mobile and web', () => {
         expect(JSON.stringify(header.toJSON())).not.toContain('future_tool');
     });
 
+    it('uses a single bounded title for loading and loaded tool details', () => {
+        const loading = render(React.createElement(ToolHeader));
+        expect(loading.root.findAllByType('Text')).toHaveLength(1);
+        expect(loading.root.findByType('Text').props.numberOfLines).toBe(1);
+        const patch = render(React.createElement(ToolHeader, {
+            tool: tool('apply_patch', { patch: '*** Begin Patch\n*** Update File: /repo/a.ts\n@@\n-old\n+new\n*** End Patch' }),
+        }));
+        expect(patch.root.findAllByType('Text')).toHaveLength(1);
+        expect(patch.root.findByType('Text').props.ellipsizeMode).toBe('middle');
+    });
+
+    it('resolves file titles relative to the session and preserves explicit provider titles', () => {
+        const metadata = { path: '/repo', host: 'machine' };
+        const relative = render(React.createElement(ToolHeader, { tool: tool('Edit', { file_path: '/repo/src/a.ts' }), metadata }));
+        expect(relative.root.findByType('Text').children.join('')).toBe('src/a.ts');
+        const named = render(React.createElement(ToolHeader, {
+            tool: { ...tool('Edit', { file_path: '/repo/src/a.ts' }), title: 'Update component' }, metadata,
+        }));
+        expect(named.root.findByType('Text').children.join('')).toBe('Update component');
+    });
+
     it('uses the same readable labels for tools inside a task', () => {
         const children = [
             { ...tool('CodexBash', { command: 'git status' }), description: 'Running CodexBash' },
@@ -192,6 +218,7 @@ describe('tool rendering on mobile and web', () => {
     it.each(['Bash', 'CodexBash', 'exec_command', 'run_terminal_command', 'write_stdin', 'BashOutput'])('keeps %s output visible on the detail screen', name => {
         const full = render(React.createElement(ToolFullView, { tool: { ...tool(name, { command: 'echo hello' }), result: 'hello' } }));
         expect(full.root.findByType('CommandView').props.stdout).toBe('hello');
+        expect(full.root.findByType('CommandView').props.syntaxHighlighting).toBe(true);
     });
 
     it('renders shell input distinctly from its output and keeps failures visible', () => {
@@ -199,9 +226,25 @@ describe('tool rendering on mobile and web', () => {
             tool: { ...tool('write_stdin', { session_id: 1, chars: 'yes\n' }), state: 'error', result: 'process exited' },
         }));
         expect(full.root.findByType('CommandView').props).toMatchObject({
-            command: 'Sending input to shell (1)', prompt: '', error: 'process exited',
+            command: 'Sending input to shell (1)', prompt: '', error: 'process exited', commandLanguage: null,
         });
         expect(full.root.findByType('CodeView').props.code).toBe('yes\n');
+    });
+
+    it.each([390, 1024, 1600])('centers generic/terminal detail at width %s, retaining wide diffs', width => {
+        settings.width = width;
+        for (const name of ['read_file', 'future_tool', 'Bash', 'apply_patch']) {
+            const full = render(React.createElement(ToolFullView, { tool: tool(name, { command: 'echo hello' }) }));
+            const wrappers = full.root.findAllByType('View').map((node: any) => Object.assign({}, ...[node.props.style].flat().filter(Boolean)));
+            const content = wrappers.find((style: any) => style.alignSelf === 'center' && style.width === '100%');
+            expect(content).toMatchObject({
+                maxWidth: name === 'apply_patch' ? 1200 : 800,
+                paddingHorizontal: name === 'apply_patch' && width <= 700 ? 0 : 16,
+            });
+            // No nested horizontal scroller or terminal-only vertical offset.
+            expect(full.root.findAllByType('ScrollView')).toHaveLength(1);
+            expect(full.root.findByType('ScrollView').props.contentContainerStyle).toMatchObject({ paddingTop: 12, paddingBottom: 32 });
+        }
     });
 
     it('renders raw apply_patch as a diff and retains execution failures', () => {
