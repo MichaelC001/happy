@@ -61,14 +61,14 @@ import { fetchFeed } from './apiFeed';
 import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
 import { resolveControlHandoffDirection } from './controlHandoff';
-import { resolveMessageModeMeta, UnsupportedPermissionModeError } from './messageMeta';
+import { resolveMessageDeliveryMeta, resolveMessageModeMeta, UnsupportedPermissionModeError } from './messageMeta';
 import type { AttachmentPreview, UploadedAttachment } from './attachmentTypes';
 import { requestAttachmentUpload, uploadEncryptedBlob } from './apiAttachments';
 import { encryptBlob } from '@/encryption/blob';
 import { readFileBytes } from '@/utils/readFileBytes';
 import { Modal } from '@/modal';
 import { t } from '@/text';
-import { isRigMetadataV1, rigCanUseAttachments, rigSendsMessageReceipts, usesControlledSessionUi } from './rig';
+import { isRigMetadataV1, rigCanUseAttachments, usesControlledSessionUi } from './rig';
 import { fetchProjects as fetchProjectRecords } from './apiProjects';
 import { decryptProjectRecord, loadProjectAvatar, type DecryptedProjectRecord } from './projects';
 import type { Project, ProjectAvatar } from './projectTypes';
@@ -149,6 +149,7 @@ class Sync {
     private messagePreloader = new SessionMessagePreloader((sessionId, signal) => this.preloadLatestPage(sessionId, signal));
     private historyPrefetchSessions = new Set<string>();
     private olderMessagesPrefetching = new Set<string>();
+    private olderMessagesPrefetchAttempts = new Map<string, number>();
     private preloadedPlanModes = new Map<string, Session['permissionMode']>();
     private sendSync = new Map<string, InvalidateSync>();
     private sendAbortControllers = new Map<string, AbortController>();
@@ -851,6 +852,15 @@ class Sync {
             sentFrom = 'web'; // fallback
         }
 
+        // Capture after attachment uploads: the previous turn may have finished
+        // while uploading. Persist this so echoes and remounts keep the same UI.
+        const sendingSession = storage.getState().sessions[sessionId];
+        if (!canSend() || !sendingSession) return false;
+        const hasPendingUserMessage = this.pendingOutbox.get(sessionId)?.some(message => message.kind === 'user') === true
+            || storage.getState().sessionMessages[sessionId]?.messages.some(
+                message => message.kind === 'user-text' && message.pending === true,
+            ) === true;
+
         // Create user message content with metadata
         const content: RawRecord = {
             role: 'user',
@@ -860,7 +870,7 @@ class Sync {
             },
             meta: {
                 sentFrom,
-                ...(rigSendsMessageReceipts(session.metadata) ? { expectsAcceptance: true } : {}),
+                ...resolveMessageDeliveryMeta(sendingSession, source === 'new_session', hasPendingUserMessage),
                 appendSystemPrompt: systemPrompt,
                 ...(modeMeta.permissionMode !== undefined ? { permissionMode: modeMeta.permissionMode } : {}),
                 ...(modeMeta.model !== undefined ? { model: modeMeta.model } : {}),
@@ -2283,16 +2293,19 @@ class Sync {
 
     private fetchOlderMessagesInBackground = async (sessionId: string) => {
         const SLEEP_BETWEEN_PAGES_MS = 250;
+        // Budget background work across visits/reconnects, not just this run.
+        // Scroll-back can still load older pages on demand without this cap.
+        const MAX_PREFETCH_ATTEMPTS = 5;
         // While loadOlderMessages handles the actual work, this loop is what
         // keeps it going without user input. We keep stepping until either:
+        //   - we hit the prefetch attempt budget (see above), or
         //   - the server says there is no more older history, or
-        //   - the session is no longer present in the store (user navigated
-        //     away and the session was unloaded), or
+        //   - the session's messages are no longer present in the store, or
         //   - we hit seq = 1 (the very first message), or
-        //   - the encryption key is gone (logged out).
+        //   - the encryption key is gone.
         // The loop yields between pages to keep the UI thread responsive
         // and to spread out server load.
-        while (true) {
+        while ((this.olderMessagesPrefetchAttempts.get(sessionId) ?? 0) < MAX_PREFETCH_ATTEMPTS) {
             const sessionMessages = storage.getState().sessionMessages[sessionId];
             if (!sessionMessages || !sessionMessages.hasMoreOlder) {
                 return;
@@ -2306,6 +2319,9 @@ class Sync {
             }
 
             try {
+                // Reserve attempts even on failure so repeated invalidations
+                // cannot restart unlimited speculative work.
+                this.olderMessagesPrefetchAttempts.set(sessionId, (this.olderMessagesPrefetchAttempts.get(sessionId) ?? 0) + 1);
                 await this.loadOlderMessages(sessionId);
             } catch (error) {
                 log.log(`💬 prefetchOlderMessagesInBackground: error for ${sessionId}, stopping: ${String(error)}`);
@@ -2652,6 +2668,7 @@ class Sync {
             gitStatusSync.clearForSession(sessionId);
             this.messagePreloader.cancel(sessionId);
             this.historyPrefetchSessions.delete(sessionId);
+            this.olderMessagesPrefetchAttempts.delete(sessionId);
             this.preloadedPlanModes.delete(sessionId);
             this.messagesSync.delete(sessionId);
             this.sendSync.delete(sessionId);
