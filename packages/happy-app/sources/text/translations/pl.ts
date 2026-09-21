@@ -234,6 +234,7 @@ export const pl: TranslationStructure = {
         flatList: 'Płaska lista',
         groupByProject: 'Grupuj według projektu',
         appearanceSettings: 'Ustawienia wyglądu',
+        worktreeTabs: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'karta', few: 'karty', many: 'kart' })}`,
     },
 
     settingsFeatures: {
@@ -347,6 +348,9 @@ export const pl: TranslationStructure = {
         forkErrorMissingMetadata: 'Brak metadanych sesji wymaganych do rozwidlenia.',
         forkErrorGeneric: 'Nie udało się rozwidlić sesji.',
         forkClaudeOnly: 'Rozwidlenie jest obecnie obsługiwane tylko dla sesji Claude.',
+        archiveAction: 'Zarchiwizuj',
+        startingChat: 'Uruchamianie nowego czatu…',
+        actionsTitle: 'Sesja',
     },
 
     commandPalette: {
@@ -573,6 +577,9 @@ export const pl: TranslationStructure = {
         hideArchived: 'Ukryj zarchiwizowane',
         newSession: 'Nowa sesja',
         projects: "Projekty",
+        bots: 'Boty',
+        showAllWorkspaces: ({ count }: { count: number }) => `Pokaż wszystkie przestrzenie (${count})`,
+        showFewerWorkspaces: 'Pokaż mniej',
     },
 
     zen: {
@@ -885,6 +892,10 @@ export const pl: TranslationStructure = {
         ...en.onboarding,
     },
 
+    troubleshoot: {
+        ...en.troubleshoot,
+    },
+
     welcome: {
         // Main welcome screen for unauthenticated users
         title: 'Mobilny klient Codex i Claude Code',
@@ -1110,6 +1121,11 @@ export const pl: TranslationStructure = {
             : `Nie udało się przesłać ${count} zdjęć i nie zostały wysłane.`,
         notSupportedTitle: 'Obrazy nieobsługiwane',
         notSupportedMessage: 'Ten agent nie obsługuje załączników obrazów. Obrazy nie zostały wysłane.',
+        attachTitle: 'Dodaj obraz',
+        pasteFromClipboard: 'Wklej ze schowka',
+        chooseFromLibrary: 'Biblioteka zdjęć',
+        nothingToPasteTitle: 'Nie ma czego wkleić',
+        nothingToPasteMessage: 'Najpierw skopiuj obraz, a potem spróbuj ponownie.',
     },
 
     feed: {

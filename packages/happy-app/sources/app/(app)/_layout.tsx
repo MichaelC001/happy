@@ -183,10 +183,19 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
-                name="onboarding/scan"
+                name="onboarding/settings"
                 options={{
                     headerShown: true,
-                    headerTitle: t('onboarding.step', { step: 3, total: 3 }),
+                    headerTitle: t('onboarding.settingsTitle'),
+                    headerTitleAlign: 'center',
+                    headerBackTitle: t('common.back'),
+                }}
+            />
+            <Stack.Screen
+                name="troubleshoot"
+                options={{
+                    headerShown: true,
+                    headerTitle: t('troubleshoot.title'),
                     headerTitleAlign: 'center',
                     headerBackTitle: t('common.back'),
                 }}
@@ -380,6 +389,12 @@ export default function RootLayout() {
                 name="dev/rig-preview"
                 options={{
                     headerTitle: 'Rig Preview',
+                }}
+            />
+            <Stack.Screen
+                name="dev/project-home"
+                options={{
+                    headerTitle: 'Project Home',
                 }}
             />
             <Stack.Screen

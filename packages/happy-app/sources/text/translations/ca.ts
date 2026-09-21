@@ -217,6 +217,7 @@ export const ca: TranslationStructure = {
         flatList: 'Llista plana',
         groupByProject: 'Agrupa per projecte',
         appearanceSettings: 'Configuració d\'aparença',
+        worktreeTabs: ({ count }: { count: number }) => count === 1 ? '1 pestanya' : `${count} pestanyes`,
     },
 
     settingsFeatures: {
@@ -330,6 +331,9 @@ export const ca: TranslationStructure = {
         forkErrorMissingMetadata: 'Falten metadades de la sessió necessàries per bifurcar.',
         forkErrorGeneric: 'No s\'ha pogut bifurcar la sessió.',
         forkClaudeOnly: 'La bifurcació només està disponible per a sessions de Claude.',
+        archiveAction: 'Arxiva',
+        startingChat: 'Iniciant un xat nou…',
+        actionsTitle: 'Sessió',
     },
 
     commandPalette: {
@@ -557,6 +561,9 @@ export const ca: TranslationStructure = {
         hideArchived: 'Amaga arxivades',
         newSession: 'Nova sessió',
         projects: "Projectes",
+        bots: 'Bots',
+        showAllWorkspaces: ({ count }: { count: number }) => `Mostra els ${count} espais de treball`,
+        showFewerWorkspaces: 'Mostra\u2019n menys',
     },
 
     zen: {
@@ -869,6 +876,10 @@ export const ca: TranslationStructure = {
         ...en.onboarding,
     },
 
+    troubleshoot: {
+        ...en.troubleshoot,
+    },
+
     welcome: {
         // Main welcome screen for unauthenticated users
         title: 'Client mòbil de Codex i Claude Code',
@@ -1080,6 +1091,11 @@ export const ca: TranslationStructure = {
             : `No s'han pogut pujar ${count} imatges i no s'han enviat.`,
         notSupportedTitle: 'Imatges no compatibles',
         notSupportedMessage: 'Aquest agent no admet fitxers adjunts d\'imatge. Les imatges no s\'han enviat.',
+        attachTitle: 'Afegeix una imatge',
+        pasteFromClipboard: 'Enganxa del porta-retalls',
+        chooseFromLibrary: 'Biblioteca de fotos',
+        nothingToPasteTitle: 'Res per enganxar',
+        nothingToPasteMessage: 'Copia una imatge primer i torna-ho a provar.',
     },
 
     feed: {

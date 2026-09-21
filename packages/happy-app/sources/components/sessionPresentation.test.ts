@@ -131,6 +131,7 @@ vi.mock('@/sync/ops', () => ({ sessionArchive: vi.fn(), sessionKill: vi.fn(), se
 vi.mock('@/hooks/useWorktreeCleanup', () => ({ maybeCleanupWorktree: vi.fn() }));
 vi.mock('@/hooks/useHappyAction', () => ({ useHappyAction: (action: unknown) => [false, action] }));
 vi.mock('@/hooks/useSessionQuickActions', () => ({ useSessionQuickActions: () => ({}) }));
+vi.mock('@/hooks/useProjectWorktree', () => ({ useWorktreeTabSuccessor: () => null }));
 vi.mock('@/utils/copySessionMetadataToClipboard', () => ({
     copySessionMetadataToClipboard: vi.fn(), copySessionMetadataAndLogsToClipboard: vi.fn(),
 }));
@@ -271,8 +272,8 @@ describe('session details', () => {
         state.platform = 'android';
         state.tablet = true;
         const renderer = render(createHeader({
-            options: { headerTitle: 'Step 3 of 3', headerTitleAlign: 'center' },
-            route: { name: 'onboarding/scan' }, back: { title: 'Back' },
+            options: { headerTitle: 'Settings', headerTitleAlign: 'center' },
+            route: { name: 'onboarding/settings' }, back: { title: 'Back' },
             navigation: { goBack: state.back },
         } as any)!);
         const header = renderer.root.findByType((Header as any).type);

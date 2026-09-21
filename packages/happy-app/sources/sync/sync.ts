@@ -9,6 +9,7 @@ import { storage } from './storage';
 // Circular at module level (ops.ts imports sync) but safe: both sides only
 // touch each other's exports at runtime, never during module initialization.
 import { sessionSetAgentModes } from './ops';
+import { rigComposerClear } from './rigComposer';
 import { getImageAttachmentSendPlan, isAttachmentAllowedByPolicy } from './attachmentSupport';
 import {
     errorMessageFromUnknown,
@@ -695,6 +696,22 @@ class Sync {
         return { uploaded, failed };
     }
 
+    /**
+     * Puts one in-memory blob in a session's attachment store, encrypted with the
+     * session's blob key, and returns the ref the agent can download it by. This is
+     * the message-attachment path without the file read: a bot face painted on the
+     * phone travels the same way as a picture attached to a message.
+     */
+    async uploadSessionBlob(sessionId: string, name: string, bytes: Uint8Array): Promise<{ ref: string; size: number }> {
+        if (!this.credentials) throw new Error('Not signed in.');
+        const blobKey = this.encryption.getSessionBlobKey(sessionId);
+        if (!blobKey) throw new Error(`No blob key for session ${sessionId}`);
+        const encrypted = encryptBlob(bytes, blobKey);
+        const upload = await requestAttachmentUpload(this.credentials, sessionId, name, encrypted.length);
+        await uploadEncryptedBlob(upload, encrypted, this.credentials);
+        return { ref: upload.ref, size: bytes.length };
+    }
+
     /** A visible row alone is not enough to place a message safely. */
     async ensureSessionReady(sessionId: string): Promise<void> {
         const isReady = () => !!(storage.getState().sessions[sessionId]?.metadata
@@ -876,6 +893,7 @@ class Sync {
                 ...(modeMeta.model !== undefined ? { model: modeMeta.model } : {}),
                 ...(modeMeta.modelProviderId !== undefined ? { modelProviderId: modeMeta.modelProviderId } : {}),
                 ...(modeMeta.effort !== undefined ? { effort: modeMeta.effort } : {}),
+                ...(modeMeta.serviceTier !== undefined ? { serviceTier: modeMeta.serviceTier } : {}),
                 ...(displayText && { displayText }) // Add displayText if provided
             }
         };
@@ -909,6 +927,15 @@ class Sync {
             content: encryptedRawRecord
         });
         releaseSpawnedSession(sessionId);
+        // The synced Happy Agent draft is spent once its text is accepted. The
+        // mode was captured above, before the clear. Text typed since (a newer
+        // local edit) stays; the composer clears itself only when unchanged.
+        const latestSession = storage.getState().sessions[sessionId];
+        if (isRigMetadataV1(latestSession?.metadata) && source !== 'voice'
+            && latestSession.draftUpdatedAt === session.draftUpdatedAt
+            && (!latestSession.draft || latestSession.draft === text)) {
+            rigComposerClear(sessionId);
+        }
         options?.onAccepted?.();
         trackMessageSent(source, session.metadata);
 

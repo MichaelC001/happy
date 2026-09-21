@@ -217,6 +217,7 @@ export const es: TranslationStructure = {
         flatList: 'Lista plana',
         groupByProject: 'Agrupar por proyecto',
         appearanceSettings: 'Configuración de apariencia',
+        worktreeTabs: ({ count }: { count: number }) => count === 1 ? '1 pestaña' : `${count} pestañas`,
     },
 
     settingsFeatures: {
@@ -330,6 +331,9 @@ export const es: TranslationStructure = {
         forkErrorMissingMetadata: 'Faltan metadatos de la sesión necesarios para bifurcar.',
         forkErrorGeneric: 'No se pudo bifurcar la sesión.',
         forkClaudeOnly: 'La bifurcación actualmente solo se admite para sesiones de Claude.',
+        archiveAction: 'Archivar',
+        startingChat: 'Iniciando un chat nuevo…',
+        actionsTitle: 'Sesión',
     },
 
     commandPalette: {
@@ -557,6 +561,9 @@ export const es: TranslationStructure = {
         hideArchived: 'Ocultar archivadas',
         newSession: 'Nueva sesión',
         projects: "Proyectos",
+        bots: 'Bots',
+        showAllWorkspaces: ({ count }: { count: number }) => `Mostrar los ${count} espacios de trabajo`,
+        showFewerWorkspaces: 'Mostrar menos',
     },
 
     zen: {
@@ -869,6 +876,10 @@ export const es: TranslationStructure = {
         ...en.onboarding,
     },
 
+    troubleshoot: {
+        ...en.troubleshoot,
+    },
+
     welcome: {
         // Main welcome screen for unauthenticated users
         title: 'Cliente móvil de Codex y Claude Code',
@@ -1081,6 +1092,11 @@ export const es: TranslationStructure = {
             : `No se pudieron subir ${count} imágenes y no se enviaron.`,
         notSupportedTitle: 'Imágenes no compatibles',
         notSupportedMessage: 'Este agente no admite archivos adjuntos de imagen. Las imágenes no se enviaron.',
+        attachTitle: 'Añadir imagen',
+        pasteFromClipboard: 'Pegar del portapapeles',
+        chooseFromLibrary: 'Biblioteca de fotos',
+        nothingToPasteTitle: 'Nada que pegar',
+        nothingToPasteMessage: 'Copia una imagen primero e inténtalo de nuevo.',
     },
 
     feed: {

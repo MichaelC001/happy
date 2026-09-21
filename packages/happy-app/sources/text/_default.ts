@@ -215,6 +215,7 @@ export const en = {
         flatList: 'Flat List',
         groupByProject: 'Group by Project',
         appearanceSettings: 'Appearance Settings',
+        worktreeTabs: ({ count }: { count: number }) => count === 1 ? '1 tab' : `${count} tabs`,
     },
 
     settingsFeatures: {
@@ -251,6 +252,11 @@ export const en = {
             : `${count} images could not be uploaded and were not sent.`,
         notSupportedTitle: 'Images Not Supported',
         notSupportedMessage: 'This agent does not support image attachments. Images were not sent.',
+        attachTitle: 'Add Image',
+        pasteFromClipboard: 'Paste from Clipboard',
+        chooseFromLibrary: 'Photo Library',
+        nothingToPasteTitle: 'Nothing to Paste',
+        nothingToPasteMessage: 'Copy an image first, then try again.',
     },
 
     errors: {
@@ -344,6 +350,9 @@ export const en = {
         forkErrorMissingMetadata: 'Missing session metadata required to fork.',
         forkErrorGeneric: 'Failed to fork the session.',
         forkClaudeOnly: 'Fork is currently only supported for Claude sessions.',
+        archiveAction: 'Archive',
+        startingChat: 'Starting a new chat…',
+        actionsTitle: 'Session',
     },
 
     commandPalette: {
@@ -586,6 +595,9 @@ export const en = {
         hideArchived: 'Hide archived',
         newSession: 'New session',
         projects: 'Projects',
+        bots: 'Bots',
+        showAllWorkspaces: ({ count }: { count: number }) => `Show all ${count} workspaces`,
+        showFewerWorkspaces: 'Show fewer',
     },
 
     zen: {
@@ -907,27 +919,55 @@ export const en = {
     },
 
     onboarding: {
-        // Three-step first run on phones: welcome, install, scan.
-        step: ({ step, total }: { step: number; total: number }) => `Step ${step} of ${total}`,
+        // First run on phones: create an account, then link a computer from
+        // one checklist. The same checklist is the home empty state whenever
+        // no computer is reachable.
         headline: 'Run Claude Code and Codex from your phone',
         tagline: 'End-to-end encrypted. No email, no password.',
-        getStarted: 'Get Started',
+        createAccount: 'Create account',
         restoreExisting: 'Restore an existing account',
-        installTitle: 'Install Happy Desktop',
-        installBodyPrefix: 'On your computer, download it from ',
+        linkTitle: 'Link your computer',
+        installStep: 'Install Happy on your computer',
+        installBodyPrefix: 'Download Happy Desktop from ',
         installBodyLink: 'happy.engineering',
-        installBodySuffix: '.',
-        installedDesktop: 'Desktop app installed',
-        useTerminal: 'Use the terminal instead',
-        useDesktop: 'Use the desktop app instead',
-        continue: 'Continue',
-        scanTitle: 'Scan the QR code',
-        scanBody: 'Point your camera at the code on your computer.',
-        scanButton: 'Scan QR Code',
-        pasteLink: 'Paste the link instead',
-        pasteLinkTitle: 'Paste Link',
-        pasteLinkMessage: 'Paste the link shown on your computer.',
+        installBodySuffix: '. We recommend it.',
+        terminalComment: '# Prefer the terminal?',
+        terminalInstall: 'npm install -g happy',
+        terminalRun: 'happy',
+        openStep: 'Open Happy and choose Connect phone',
+        openBody: 'During onboarding on your computer, choose Connect phone and a QR code appears. In the terminal it shows as soon as happy starts.',
+        scanStep: 'Scan the QR code',
+        scanButton: 'Scan QR code',
+        pasteLink: 'Paste link instead',
+        pasteLinkTitle: 'Paste link',
+        pasteLinkMessage: 'On your computer, choose Copy auth link, then paste it here.',
+        pasteLinkConfirm: 'Connect',
         connecting: 'Connecting…',
+        connected: 'Connected. Opening your sessions…',
+        // Same checklist when every linked computer is offline.
+        offlineTitleOne: ({ name }: { name: string }) => `${name} is offline`,
+        offlineTitleMany: 'Your computers are offline',
+        offlineLinkedStep: ({ name }: { name: string }) => `Linked ${name}`,
+        offlineLinkedStepMany: ({ count }: { count: number }) => `Linked ${count} computers`,
+        offlineOpenStep: 'Open Happy on your computer',
+        offlineOpenBody: 'Open Happy Desktop, or run happy in a terminal. This screen updates as soon as it connects.',
+        offlineTroubleshoot: 'Troubleshoot',
+        linkAnother: 'Link another computer',
+        // Get help, bottom right of the link screen.
+        getHelp: 'Get help',
+        helpMessage: 'Stuck? Come ask us.',
+        helpDiscord: 'Ask on Discord',
+        helpBra1nDump: 'DM @bra1n_dump on X',
+        helpEx3ndr: 'DM @Ex3NDR on X',
+        helpIssues: 'Browse known issues',
+        // Gear on the link screen.
+        settingsTitle: 'Settings',
+        settingsServer: 'Server',
+        settingsServerDefault: 'Default',
+        logoutStartOver: 'Log out and start over',
+        logoutFooter: 'This account has nothing in it yet, so nothing is lost.',
+        logoutConfirmTitle: 'Log out and start over?',
+        logoutConfirmBody: 'You will go back to Create account. Nothing on your computer changes.',
         restoreTitle: 'Restore Account',
         restoreScan: 'Scan this code with your other phone.',
         restoreScanPath: 'Happy › Settings › Account › Link New Device',
@@ -935,6 +975,32 @@ export const en = {
         secretKeyTitle: 'Secret Key',
         secretKeyBody: 'Paste your secret key. It is in Happy › Settings › Account on your other device.',
         restoreButton: 'Restore',
+    },
+
+    troubleshoot: {
+        // Plaque at the top of the session list when every computer is
+        // offline, and the screen it opens.
+        bannerTitleOne: ({ name }: { name: string }) => `${name} is offline`,
+        bannerTitleMany: 'All machines offline',
+        bannerSubtitle: 'Troubleshoot',
+        title: 'Troubleshoot',
+        heading: 'Happy is not running on your computer',
+        intro: 'Your phone talks to Happy on your computer. When nothing is running there, everything here is offline.',
+        awakeStep: 'Is the computer awake and online?',
+        awakeBody: 'Sleep and a dropped connection are the usual causes.',
+        desktopStep: 'Is Happy Desktop open?',
+        desktopBodyPrefix: 'Open it, or download it from ',
+        desktopBodyLink: 'happy.engineering',
+        desktopBodySuffix: '. We recommend it.',
+        terminalStep: 'Using the terminal?',
+        terminalBody: 'Run happy again. The computer comes back online as soon as it starts.',
+        terminalComment: '# Not using Happy Desktop?',
+        machines: 'Machines',
+        machineOffline: 'Offline',
+        copyAiPrompt: 'Copy AI prompt',
+        copyAiPromptHint: 'Paste it into Claude Code or Codex on your computer to diagnose from the logs.',
+        copied: 'Copied',
+        copyFailed: 'Could not copy the AI prompt.',
     },
 
     review: {

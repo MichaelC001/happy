@@ -216,6 +216,7 @@ export const pt: TranslationStructure = {
         flatList: 'Lista simples',
         groupByProject: 'Agrupar por projeto',
         appearanceSettings: 'Configurações de aparência',
+        worktreeTabs: ({ count }: { count: number }) => count === 1 ? '1 aba' : `${count} abas`,
     },
 
     settingsFeatures: {
@@ -329,6 +330,9 @@ export const pt: TranslationStructure = {
         forkErrorMissingMetadata: 'Faltam metadados da sessão necessários para bifurcar.',
         forkErrorGeneric: 'Não foi possível bifurcar a sessão.',
         forkClaudeOnly: 'A bifurcação atualmente só é suportada para sessões Claude.',
+        archiveAction: 'Arquivar',
+        startingChat: 'Iniciando um novo chat…',
+        actionsTitle: 'Sessão',
     },
 
     commandPalette: {
@@ -556,6 +560,9 @@ export const pt: TranslationStructure = {
         hideArchived: 'Ocultar arquivadas',
         newSession: 'Nova sessão',
         projects: "Projetos",
+        bots: 'Bots',
+        showAllWorkspaces: ({ count }: { count: number }) => `Mostrar todos os ${count} espaços de trabalho`,
+        showFewerWorkspaces: 'Mostrar menos',
     },
 
     zen: {
@@ -868,6 +875,10 @@ export const pt: TranslationStructure = {
         ...en.onboarding,
     },
 
+    troubleshoot: {
+        ...en.troubleshoot,
+    },
+
     welcome: {
         // Main welcome screen for unauthenticated users
         title: 'Cliente móvel Codex e Claude Code',
@@ -1079,6 +1090,11 @@ export const pt: TranslationStructure = {
             : `Não foi possível enviar ${count} imagens e não foram enviadas.`,
         notSupportedTitle: 'Imagens não suportadas',
         notSupportedMessage: 'Este agente não suporta anexos de imagem. As imagens não foram enviadas.',
+        attachTitle: 'Adicionar imagem',
+        pasteFromClipboard: 'Colar da área de transferência',
+        chooseFromLibrary: 'Biblioteca de fotos',
+        nothingToPasteTitle: 'Nada para colar',
+        nothingToPasteMessage: 'Copie uma imagem primeiro e tente novamente.',
     },
 
     feed: {
