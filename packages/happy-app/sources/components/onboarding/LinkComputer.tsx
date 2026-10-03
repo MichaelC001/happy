@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ActivityIndicator, Linking, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { Linking, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -23,12 +23,18 @@ const DESKTOP_URL = 'https://happy.engineering';
  * Where somebody stuck on this screen can turn, and to whom. The same list
  * the desktop app offers during its own setup.
  */
-const HELP_LINKS: readonly { label: () => string; url: string }[] = [
-    { label: () => t('onboarding.helpDiscord'), url: 'https://discord.gg/fX9WBAhyfD' },
-    { label: () => t('onboarding.helpBra1nDump'), url: 'https://x.com/bra1n_dump' },
-    { label: () => t('onboarding.helpEx3ndr'), url: 'https://x.com/Ex3NDR' },
-    { label: () => t('onboarding.helpIssues'), url: 'https://github.com/slopus/happy/issues' },
-];
+const HELP_ISSUES = { label: () => t('onboarding.helpIssues'), url: 'https://github.com/slopus/happy/issues' };
+const HELP_DISCORD = { label: () => t('onboarding.helpDiscord'), url: 'https://discord.gg/fX9WBAhyfD' };
+const HELP_LINKS: readonly { label: () => string; url: string }[] = Platform.OS === 'android'
+    // Android's native alert shows at most three buttons and drops the rest,
+    // Cancel included, so it gets the two public places plus Cancel.
+    ? [HELP_DISCORD, HELP_ISSUES]
+    : [
+        HELP_DISCORD,
+        { label: () => t('onboarding.helpBra1nDump'), url: 'https://x.com/bra1n_dump' },
+        { label: () => t('onboarding.helpEx3ndr'), url: 'https://x.com/Ex3NDR' },
+        HELP_ISSUES,
+    ];
 
 /**
  * How long to keep saying "connected" after a successful scan while the linked
@@ -44,32 +50,24 @@ const SCROLL_BOTTOM_PADDING = 48;
 
 type ChecklistRowProps = {
     checked: boolean;
-    title: string;
+    title: React.ReactNode;
     /** Tapping the row toggles it. Rows without this are read-only. */
     onToggle?: () => void;
-    /** Shown under the title while the row is unchecked. */
+    /** Stays visible when the completion checkbox changes. */
     children?: React.ReactNode;
-    busy?: boolean;
-    dimmed?: boolean;
 };
 
 /**
- * One box on the list. A checked row folds its body away so the list gets
- * shorter as the person works down it; the unchecked rows are the ones with
- * something left to read.
+ * Completion changes only the checkbox; instructions and layout stay put.
  */
 const ChecklistRow = React.memo(function ChecklistRow({
     checked,
     title,
     onToggle,
     children,
-    busy,
-    dimmed,
 }: ChecklistRowProps) {
     const { theme } = useUnistyles();
-    const box = busy ? (
-        <ActivityIndicator size="small" color={theme.colors.textSecondary} />
-    ) : (
+    const box = (
         <Ionicons
             name={checked ? 'checkmark-circle' : 'ellipse-outline'}
             size={26}
@@ -84,12 +82,12 @@ const ChecklistRow = React.memo(function ChecklistRow({
                 accessibilityRole={onToggle ? 'checkbox' : undefined}
                 accessibilityState={onToggle ? { checked } : undefined}
                 hitSlop={8}
-                style={({ pressed }) => [styles.rowHead, pressed && onToggle && styles.rowHeadPressed]}
+                style={styles.rowHead}
             >
                 <View style={styles.box}>{box}</View>
-                <Text style={[styles.rowTitle, (checked || dimmed) && styles.rowTitleDone]}>{title}</Text>
+                <Text style={styles.rowTitle}>{title}</Text>
             </Pressable>
-            {!checked && children ? (
+            {children ? (
                 <View style={styles.rowBody}>{children}</View>
             ) : null}
         </View>
@@ -125,9 +123,9 @@ function useScanActions(onSuccess: () => void) {
 
 /**
  * The link-your-computer checklist. `link` is the first run: nothing is
- * linked yet, three boxes to tick. `offline` is the same list once a computer
- * is linked but none can be reached: the install box is already ticked and
- * the job is to get Happy running again.
+ * linked yet, two preparation boxes and the pairing actions. `offline` is
+ * the list once a computer is linked but none can be reached: the install
+ * box is already ticked and the job is to get Happy running again.
  */
 export const LinkComputerChecklist = React.memo(function LinkComputerChecklist({
     variant,
@@ -177,7 +175,7 @@ export const LinkComputerChecklist = React.memo(function LinkComputerChecklist({
     );
 
     const scanActions = (
-        <View style={styles.actions}>
+        <View style={[styles.actions, styles.scanActions]}>
             {canScan ? (
                 <View style={styles.button}>
                     <RoundButton
@@ -253,7 +251,7 @@ export const LinkComputerChecklist = React.memo(function LinkComputerChecklist({
     }
 
     return (
-        <ScrollView contentContainerStyle={[styles.scroll, { paddingBottom: SCROLL_BOTTOM_PADDING + bottomInset }]} keyboardShouldPersistTaps="handled">
+        <ScrollView contentContainerStyle={[styles.scroll, styles.scrollCentered, { paddingBottom: SCROLL_BOTTOM_PADDING + bottomInset }]} keyboardShouldPersistTaps="handled">
             <View style={styles.content}>
                 <ChecklistRow
                     checked={!!ticked.install}
@@ -261,14 +259,6 @@ export const LinkComputerChecklist = React.memo(function LinkComputerChecklist({
                     onToggle={() => toggle('install')}
                 >
                     {downloadLine}
-                    <TerminalBlock
-                        style={styles.terminal}
-                        lines={[
-                            { kind: 'comment', text: t('onboarding.terminalComment') },
-                            { kind: 'command', text: t('onboarding.terminalInstall') },
-                            { kind: 'command', text: t('onboarding.terminalRun') },
-                        ]}
-                    />
                 </ChecklistRow>
                 <ChecklistRow
                     checked={!!ticked.open}
@@ -277,13 +267,7 @@ export const LinkComputerChecklist = React.memo(function LinkComputerChecklist({
                 >
                     <Text style={styles.body}>{t('onboarding.openBody')}</Text>
                 </ChecklistRow>
-                <ChecklistRow
-                    checked={approved}
-                    title={t('onboarding.scanStep')}
-                    busy={isLoading}
-                >
-                    {scanActions}
-                </ChecklistRow>
+                {scanActions}
                 {approved ? (
                     <Text style={[styles.body, styles.connected]}>{t('onboarding.connected')}</Text>
                 ) : null}
@@ -301,16 +285,17 @@ export const GetHelpButton = React.memo(function GetHelpButton() {
     const { theme } = useUnistyles();
 
     const openHelp = React.useCallback(() => {
+        const links = HELP_LINKS.map((link) => ({
+            text: link.label(),
+            onPress: () => { void openExternalUrl(link.url); },
+        }));
+        const cancel = { text: t('common.cancel'), style: 'cancel' as const };
         Modal.alert(
             t('onboarding.getHelp'),
             t('onboarding.helpMessage'),
-            [
-                ...HELP_LINKS.map((link) => ({
-                    text: link.label(),
-                    onPress: () => { void openExternalUrl(link.url); },
-                })),
-                { text: t('common.cancel'), style: 'cancel' as const },
-            ],
+            // Android fills its slots by position (neutral, negative,
+            // positive), so Cancel goes in the middle to land on negative.
+            Platform.OS === 'android' ? [links[0], cancel, links[1]] : [...links, cancel],
         );
     }, []);
 
@@ -378,6 +363,12 @@ const styles = StyleSheet.create((theme) => ({
         alignItems: 'center',
         paddingTop: 16,
     },
+    // The checklist and its actions sit together mid-screen; when they
+    // outgrow the screen the list scrolls from the top as usual.
+    scrollCentered: {
+        flexGrow: 1,
+        justifyContent: 'center',
+    },
     // Sits over the checklist rather than under it, so a short list keeps the
     // button at the bottom of the screen instead of floating mid-page.
     getHelpCorner: {
@@ -423,9 +414,6 @@ const styles = StyleSheet.create((theme) => ({
         gap: 12,
         minHeight: 32,
     },
-    rowHeadPressed: {
-        opacity: 0.6,
-    },
     box: {
         width: 26,
         height: 26,
@@ -438,9 +426,6 @@ const styles = StyleSheet.create((theme) => ({
         fontSize: 17,
         lineHeight: 22,
         color: theme.colors.text,
-    },
-    rowTitleDone: {
-        color: theme.colors.textSecondary,
     },
     rowBody: {
         paddingLeft: 38,
@@ -463,13 +448,17 @@ const styles = StyleSheet.create((theme) => ({
         alignItems: 'flex-start',
         marginTop: 6,
     },
+    scanActions: {
+        alignItems: 'center',
+        marginTop: 36,
+    },
     button: {
         width: 260,
         maxWidth: '100%',
         marginBottom: 8,
     },
     connected: {
-        paddingLeft: 38,
+        textAlign: 'center',
         color: theme.colors.success,
     },
 }));
