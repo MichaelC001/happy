@@ -13,8 +13,8 @@ or stretched phone UI. Five images per target fit Play's eight-image limit.
 
 ## Reproduce
 
-See [native setup](../../scripts/app-store/ANDROID.md) and
-[capture/composition instructions](../../scripts/app-store/README.md).
+See [native setup](../../../../scripts/app-store/ANDROID.md) and
+[capture/composition instructions](../../../../scripts/app-store/README.md).
 The explicit navigation plans live in `scripts/app-store/plans/`. After the
 local native setup and scenario are ready, run the matching capture plan, then
 `pnpm screenshots:compose` with its generated manifest and a fresh output path.
@@ -38,7 +38,7 @@ small-tablet landscape header. These were fixed in the actual app and the Androi
 sets retaken. The latest tablet set also uses the real width-aware layout: wide
 windows show the sidebar, while narrow windows use one column. Rotation and
 keyboard behavior were verified on the native 7-inch target without reloading.
-See [the product observations and fixes](../../scripts/app-store/OBSERVATIONS.md).
+See [the product observations and fixes](../../../../scripts/app-store/OBSERVATIONS.md).
 The capture does not patch app rendering or edit screenshot pixels to conceal bugs.
 
 The isolated debug harness supplies fictional projects and scripted Agent
@@ -64,8 +64,8 @@ Use these descriptions (each under 140 characters):
 | ---------------------------- | ------------------------------------------------------------------------ |
 | `01-models.png`              | Happy's Android model picker with OpenAI, Claude and Grok providers.     |
 | `02-sessions.png`            | Happy's Android session list organized across projects.                  |
-| `03-desktop.png` (phone)     | Happy's desktop companion showing a workspace and conversation.          |
-| `03-companion.png` (tablets) | Project changes available through Happy's connected desktop companion.   |
+| `03-desktop.png` (phone)     | The Happy desktop app showing a workspace and conversation.              |
+| `03-companion.png` (tablets) | Project changes available through the connected Happy desktop app.       |
 | `04-multiplayer.png`         | A Happy conversation with fictional participant contributions.           |
 | `05-source.png`              | A public source file displayed in Happy's native Android changes viewer. |
 
