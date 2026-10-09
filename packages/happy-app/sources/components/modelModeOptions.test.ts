@@ -124,6 +124,9 @@ describe('modelModeOptions', () => {
         const models = getCodexModelModes();
         expect(models.map((model) => model.key)).toEqual([
             'gpt-6-astra',
+            'gpt-6.1-sol',
+            'gpt-6-sol',
+            'gpt-6-luna',
             'gpt-5.6-sol',
             'gpt-5.6-terra',
             'gpt-5.6-luna',
@@ -137,12 +140,15 @@ describe('modelModeOptions', () => {
 
         expect(withCustom.map((model) => model.key)).toEqual([
             'gpt-6-astra',
+            'gpt-6.1-sol',
+            'gpt-6-sol',
+            'gpt-6-luna',
             'gpt-5.6-sol',
             'gpt-5.6-terra',
             'gpt-5.6-luna',
             'my-workspace-model',
         ]);
-        expect(models).toHaveLength(4);
+        expect(models).toHaveLength(7);
         expect(includeConfiguredModel('claude', models, 'my-workspace-model')).toBe(models);
     });
 
@@ -151,15 +157,23 @@ describe('modelModeOptions', () => {
         expect(models.map((model) => model.key)).toEqual([
             'claude-fable-5-1',
             'claude-fable-5',
+            'claude-opus-5-5',
+            'claude-opus-5-5[1m]',
             'claude-opus-5',
             'claude-opus-5[1m]',
+            'claude-sonnet-5-5',
+            'claude-sonnet-5-5[1m]',
             'claude-sonnet-5',
         ]);
         expect(models.map((model) => model.name)).toEqual([
             'Fable 5.1',
             'Fable 5',
+            'Opus 5.5',
+            'Opus 5.5 [1M]',
             'Opus 5',
             'Opus 5 [1M]',
+            'Sonnet 5.5',
+            'Sonnet 5.5 [1M]',
             'Sonnet 5',
         ]);
         // No `default model` row, and no alias keys: an alias would silently
@@ -169,11 +183,17 @@ describe('modelModeOptions', () => {
     });
 
     it('offers every codex model the levels its own registry publishes', () => {
-        // Straight from Codex's model registry: astra, sol, and terra publish
-        // ultra, luna does not. The difference is the whole point of asking
+        // Straight from Codex's model registry: astra, every sol, and terra publish
+        // ultra, neither luna does. The difference is the whole point of asking
         // per model rather than per flavor.
         expect(getEffortLevelsForModel('codex', 'gpt-6-astra').map((level) => level.key))
             .toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+        expect(getEffortLevelsForModel('codex', 'gpt-6.1-sol').map((level) => level.key))
+            .toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+        expect(getEffortLevelsForModel('codex', 'gpt-6-sol').map((level) => level.key))
+            .toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+        expect(getEffortLevelsForModel('codex', 'gpt-6-luna').map((level) => level.key))
+            .toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
         expect(getEffortLevelsForModel('codex', 'gpt-5.6-sol').map((level) => level.key))
             .toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
         expect(getEffortLevelsForModel('codex', 'gpt-5.6-terra').map((level) => level.key))
@@ -190,7 +210,7 @@ describe('modelModeOptions', () => {
     it('offers claude the SDK effort union for every model', () => {
         // Claude's scale belongs to the SDK, not the model: an unreachable level
         // is silently downgraded, so every model gets the same list.
-        for (const model of ['claude-fable-5-1', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5']) {
+        for (const model of ['claude-fable-5-1', 'claude-fable-5', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-sonnet-5']) {
             const keys = getEffortLevelsForModel('claude', model).map((level) => level.key);
             expect(keys).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
             // Claude's floor is `low`; there is no off.
