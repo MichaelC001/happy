@@ -22,9 +22,11 @@ public final class LocalStore: Sendable {
     let homeObservation: SharedValueObservation<HomeSnapshot>
     let settingsObservation: SharedValueObservation<SettingsSnapshot>
     let machinesObservation: SharedValueObservation<MachinesSnapshot>
+    let draftSessionsObservation: SharedValueObservation<Set<String>>
     let homeHub: SnapshotHub<HomeSnapshot>
     let machinesHub: SnapshotHub<MachinesSnapshot>
     let troubleshootingHub: SnapshotHub<TroubleshootingSnapshot>
+    let draftSessionsHub: SnapshotHub<Set<String>>
     let presenceOverlay: PresenceOverlay
 
     /// Opens (creating if needed) the store at `url`, in WAL mode so the UI
@@ -51,10 +53,11 @@ public final class LocalStore: Sendable {
         ThreadRules.assertOffMain()
         self.writer = writer
         let delivery = DispatchQueue(label: "HappyStore.observations", qos: .userInitiated)
-        // Ciphertexts, versions and message cursors do not render on home.
+        // Ciphertexts, versions, message cursors and updatedAt do not render
+        // on home. Ordinary incoming messages only change those fields.
         // Scope invalidation to the columns its consumers actually use.
         let homeSessionRegion = SQLRequest<Row>(sql: """
-            SELECT id, createdAt, updatedAt, lastMessageSentAt, active, activeAt, projectId,
+            SELECT id, createdAt, lastMessageSentAt, active, activeAt, projectId,
                    metadata, agentState, decryptable, thinking, unread, archiving
             FROM session
             """)
@@ -74,6 +77,13 @@ public final class LocalStore: Sendable {
         machinesObservation = ValueObservation.trackingConstantRegion { db in
             try Self.fetchMachinesSnapshot(db)
         }.removeDuplicates().shared(in: writer, scheduling: .async(onQueue: delivery))
+        // Existing draft saves update only text and updatedAt. Tracking the
+        // primary key observes membership changes without reading on each edit.
+        let draftRegion = SQLRequest<Row>(sql: "SELECT sessionId FROM draft")
+        draftSessionsObservation = ValueObservation.tracking(region: draftRegion,
+            fetch: { db in try Self.fetchDraftSessionIds(db) }
+        ).removeDuplicates().shared(in: writer, scheduling: .async(onQueue: delivery))
+        draftSessionsHub = SnapshotHub(observation: draftSessionsObservation, project: { $0 })
         let overlay = PresenceOverlay()
         presenceOverlay = overlay
         homeHub = SnapshotHub(observation: homeObservation, project: { overlay.home($0) })
@@ -804,7 +814,7 @@ public final class LocalStore: Sendable {
     public func eraseAll() throws {
         try performWrite { db in
             for table in [
-                "message", "outbox", "session", "machine", "project", "accountSettings", "pendingSettings",
+                "message", "outbox", "chatHistory", "session", "machine", "project", "accountSettings", "pendingSettings",
                 "accountProfile", "syncState", "attachment", "draft", "composerState",
             ] {
                 try db.execute(sql: "DELETE FROM \(table)")
@@ -812,24 +822,9 @@ public final class LocalStore: Sendable {
         }
     }
 
-    // MARK: Observation
-
-    /// Calls `onChange` on the main actor with a fresh value now and after
-    /// every commit that touches the tables `fetch` reads.
-    @MainActor
-    public func observe<Value: Sendable>(
-        _ fetch: @escaping @Sendable (Database) throws -> Value,
-        onError: @escaping @MainActor (Error) -> Void = { _ in },
-        onChange: @escaping @MainActor (Value) -> Void
-    ) -> AnyDatabaseCancellable {
-        ValueObservation
-            .tracking(fetch)
-            .start(in: writer, scheduling: .mainActor, onError: onError, onChange: onChange)
-    }
-
     // MARK: Merge rules
 
-    private static func insertMessage(_ message: MessageRecord, _ db: Database) throws {
+    static func insertMessage(_ message: MessageRecord, _ db: Database) throws {
         try message.insert(db, onConflict: .ignore)
         if let localId = message.localId {
             // The server has it now: the pending send is done.

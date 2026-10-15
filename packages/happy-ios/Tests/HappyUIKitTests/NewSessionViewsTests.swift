@@ -12,8 +12,11 @@ final class NewSessionViewsTests: XCTestCase {
         Fonts.registerBundledFonts()
     }
 
-    func testNoSessionsOffersStartNewSessionAcrossTheScreen() {
+    func testNoSessionsOffersStartNewSessionAcrossTheScreen() async {
         let view = NoSessionsView(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+        view.layoutIfNeeded()
+        // Measured off the main thread, then laid out.
+        await view.measured()
         view.layoutIfNeeded()
         XCTAssertEqual(view.startNewSession.title, "Start New Session")
         XCTAssertEqual(view.startNewSession.frame.width, 393, "alignSelf: 'stretch'")
@@ -38,7 +41,7 @@ final class NewSessionViewsTests: XCTestCase {
         XCTAssertEqual(composer.sendButton.alpha, 1)
     }
 
-    func testThePromptReportsEachEditAndAGrownLine() {
+    func testThePromptReportsEachEditAndAGrownLine() async {
         let composer = NewSessionComposerView(frame: CGRect(x: 0, y: 0, width: 369, height: 98))
         composer.layoutIfNeeded()
         var reported: [String] = []
@@ -51,6 +54,8 @@ final class NewSessionViewsTests: XCTestCase {
         composer.textView.text = "one\ntwo"
         composer.textViewDidChange(composer.textView)
         XCTAssertEqual(reported, ["one", "one\ntwo"])
+        // Measured off the main thread.
+        await composer.textMeasured()
         XCTAssertGreaterThan(grew, 0, "a second line grows the composer")
 
         composer.setText("from the dock")

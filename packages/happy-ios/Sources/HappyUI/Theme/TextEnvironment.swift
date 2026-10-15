@@ -75,6 +75,15 @@ extension UIMutableTraits {
     }
 }
 
+extension UITraitOverrides {
+    /// As above. An override never set reads as off, where reading it
+    /// would raise.
+    public var followsTextSize: Bool {
+        get { contains(FollowsTextSize.self) && self[FollowsTextSize.self] }
+        set { self[FollowsTextSize.self] = newValue }
+    }
+}
+
 extension UIViewController {
     /// Draws this screen's text at the person's text size, as React Native
     /// does. Only for a screen whose every height is measured from its text
@@ -140,6 +149,15 @@ extension TextStyle {
     /// `lineHeightValue` at the environment's text size. Safe off main.
     public func lineHeightValue(in environment: TextEnvironment) -> CGFloat {
         scaled(environment.scale).lineHeight ?? font(in: environment).lineHeight.rounded(.up)
+    }
+
+    /// One line of this style as a one-line `StyledLabel` measures it in
+    /// the environment: the line height, or the font's own, unrounded, up
+    /// to the screen's next pixel. Safe off main.
+    public func oneLine(in environment: TextEnvironment) -> CGFloat {
+        let height = scaled(environment.scale).lineHeight ?? font(in: environment).lineHeight
+        let pixels = environment.displayScale
+        return pixels > 0 ? (height * pixels).rounded(.up) / pixels : height
     }
 }
 

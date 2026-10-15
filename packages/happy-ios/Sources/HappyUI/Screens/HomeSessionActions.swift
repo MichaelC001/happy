@@ -16,6 +16,10 @@ final class HomeSessionActions {
     private var running: Set<String> = []
     /// The session whose alert is being read from the store.
     private var opening: String?
+    /// useSessionQuickActions' `onBeforeArchive`: on the press, before the
+    /// machine is asked anything, so a screen showing the chat can leave it
+    /// while it is still whole (the worktree tab strip).
+    var onBeforeArchive: ((String) -> Void)?
 
     init(context: AppContext, session: AccountSession, host: UIViewController) {
         self.context = context
@@ -96,7 +100,10 @@ final class HomeSessionActions {
         case .copyMetadataAndLogs:
             copy(SessionQuickActions.metadataAndLogsText(record))
         case .archive:
-            archive(record.id)
+            // Taken before the hook, which may swap this screen out.
+            let window = host?.view.window
+            onBeforeArchive?(record.id)
+            archive(record.id, in: window)
         }
     }
 
@@ -183,18 +190,32 @@ final class HomeSessionActions {
         alert(Strings.Common.success, Strings.Home.metadataCopied)
     }
 
-    func archive(_ sessionId: String) {
+    /// A failure is shown in front of the window the press came from, not on
+    /// the screen that asked: archiving the open tab moves the chat to its
+    /// neighbour, and that screen and these actions are gone by the time
+    /// the machine answers. Nothing is shown once another account is open.
+    func archive(_ sessionId: String, in window: UIWindow? = nil) {
         let actions = session.actions
-        Task { @MainActor [weak self] in
+        let context = context
+        let window = window ?? host?.view.window
+        Task { @MainActor [weak window, weak account = self.session] in
             do {
                 try await actions.archive(sessionId: sessionId)
             } catch {
+                guard let account, context.account.session === account, let front = Self.front(of: window) else { return }
                 let message = (error as? SessionActionError) == .botNeedsMachine
                     ? Strings.SessionInfo.botNeedsMachine
                     : Strings.SessionInfo.failedToArchiveSession
-                self?.alert(Strings.Common.error, message)
+                Alerts.show(Strings.Common.error, message, on: front)
             }
         }
+    }
+
+    /// The screen in front of `window`: the last one its root presented.
+    static func front(of window: UIWindow?) -> UIViewController? {
+        guard var front = window?.rootViewController else { return nil }
+        while let presented = front.presentedViewController, !presented.isBeingDismissed { front = presented }
+        return front
     }
 
     private func open(_ sessionId: String) {

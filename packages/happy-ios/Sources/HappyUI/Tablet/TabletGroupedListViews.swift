@@ -6,7 +6,10 @@ import UIKit
 // The cells of the sidebar's list grouped by project (TabletGroupedList):
 // SessionsList.tsx's headings, MachineHeader, ProjectGroup.tsx's checkout
 // headings, CompactSessionRow and SessionItem. Each measures its content
-// and applies its HappyLayout frames.
+// and applies its HappyLayout frames. Each draws its text at the person's
+// text size (`FollowsTextSize`): the headings' heights are measured at it
+// off the main thread (`TabletGroupedHeights`); the chats' 56 and the
+// archived cards' 88 are fixed, as RN's are.
 
 /// "Bots", or a day over the archive (SessionsList.tsx `headerSection`).
 final class TabletSectionHeaderCell: UITableViewCell {
@@ -16,6 +19,7 @@ final class TabletSectionHeaderCell: UITableViewCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
+        traitOverrides.followsTextSize = true
         backgroundColor = UIColor(Palette.groupedBackground)
         selectionStyle = .none
         label.accessibilityTraits = .header
@@ -54,6 +58,7 @@ final class TabletMachineRuleCell: UITableViewCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
+        traitOverrides.followsTextSize = true
         backgroundColor = UIColor(Palette.groupedBackground)
         selectionStyle = .none
         for line in [leading, trailing] {
@@ -111,6 +116,7 @@ final class TabletWorkspaceHeaderCell: UITableViewCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
+        traitOverrides.followsTextSize = true
         backgroundColor = UIColor(Palette.groupedBackground)
         selectionStyle = .none
         addButton.hitSlop = TabletWorkspaceHeaderLayout.Metrics.addHitSlop
@@ -210,11 +216,16 @@ final class TabletCardSegmentView: UIView {
 }
 
 /// A chat in its checkout's card (CompactSessionRow): its title, up to two
-/// lines, and the activity dot.
+/// lines, and the activity dot. The row is 56 at every text size, as RN's
+/// is; a title taller than that is centred on it and cut at the row's
+/// edges, where RN's Swipeable cuts it (its container's
+/// `overflow: 'hidden'`).
 final class TabletChatCell: UITableViewCell {
     static let reuseIdentifier = "tablet-chat"
 
     let card = TabletCardSegmentView()
+    /// The row's own box, which clips what is in it.
+    private let rowClip = UIView()
     let titleLabel = StyledLabel(style: TextStyles.tabletChatTitle, color: Palette.text, lines: 2)
     let dot = StatusDotView()
     let divider = UIView()
@@ -222,13 +233,18 @@ final class TabletChatCell: UITableViewCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
+        traitOverrides.followsTextSize = true
         backgroundColor = UIColor(Palette.groupedBackground)
         selectionStyle = .none
         clipsToBounds = true
         contentView.clipsToBounds = true
         card.layer.cornerRadius = TabletChatRowLayout.Metrics.cardRadius
         divider.backgroundColor = UIColor(Palette.divider)
-        for view in [card, titleLabel, dot, divider] { contentView.addSubview(view) }
+        rowClip.clipsToBounds = true
+        rowClip.isUserInteractionEnabled = false
+        rowClip.addSubview(titleLabel)
+        rowClip.addSubview(dot)
+        for view in [card, rowClip, divider] { contentView.addSubview(view) }
         isAccessibilityElement = true
         accessibilityTraits = .button
     }
@@ -277,8 +293,9 @@ final class TabletChatCell: UITableViewCell {
         let layout = layout(width: contentView.bounds.width)
         card.setLayoutFrame(layout.card)
         card.fill.setLayoutFrame(layout.row.offsetBy(dx: -layout.card.minX, dy: -layout.card.minY))
-        titleLabel.setLayoutFrame(layout.title)
-        dot.setLayoutFrame(layout.dot)
+        rowClip.setLayoutFrame(layout.row)
+        titleLabel.setLayoutFrame(layout.title.offsetBy(dx: -layout.row.minX, dy: -layout.row.minY))
+        dot.setLayoutFrame(layout.dot.offsetBy(dx: -layout.row.minX, dy: -layout.row.minY))
         if let frame = layout.divider { divider.setLayoutFrame(frame) }
     }
 
@@ -290,7 +307,10 @@ final class TabletChatCell: UITableViewCell {
 }
 
 /// An archived chat as its own card (SessionsList.tsx `SessionItem`): the
-/// avatar, the title, where it ran, and its status line.
+/// avatar, the title, where it ran, and its status line. The card is 88 at
+/// every text size, as RN's is; lines taller than that are centred and cut
+/// at the card's edge, as `sessionItemContainer`'s `overflow: 'hidden'`
+/// cuts them.
 final class TabletArchivedCell: UITableViewCell {
     static let reuseIdentifier = "tablet-archived"
 
@@ -307,12 +327,16 @@ final class TabletArchivedCell: UITableViewCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
+        traitOverrides.followsTextSize = true
         backgroundColor = UIColor(Palette.groupedBackground)
         selectionStyle = .none
         card.layer.cornerRadius = TabletArchivedRowLayout.Metrics.radius
         card.fill.layer.cornerRadius = TabletArchivedRowLayout.Metrics.radius
-        for view in [card, avatar, titleLabel, providerIcon, subtitleLabel, dot, statusLabel] as [UIView] {
-            contentView.addSubview(view)
+        contentView.addSubview(card)
+        // Inside the card, which clips them; over its selected fill.
+        for view in [avatar, titleLabel, providerIcon, subtitleLabel, dot, statusLabel] as [UIView] {
+            view.isUserInteractionEnabled = false
+            card.addSubview(view)
         }
         isAccessibilityElement = true
         accessibilityTraits = .button
@@ -376,13 +400,15 @@ final class TabletArchivedCell: UITableViewCell {
         super.layoutSubviews()
         let layout = layout(width: contentView.bounds.width)
         card.setLayoutFrame(layout.card)
-        card.fill.setLayoutFrame(layout.row.offsetBy(dx: -layout.card.minX, dy: -layout.card.minY))
-        avatar.setLayoutFrame(layout.avatar)
-        titleLabel.setLayoutFrame(layout.title)
-        subtitleLabel.setLayoutFrame(layout.subtitle)
-        if let frame = layout.subtitleIcon { providerIcon.setLayoutFrame(frame) }
-        dot.setLayoutFrame(layout.dot)
-        statusLabel.setLayoutFrame(layout.status)
+        // The card's own coordinates.
+        func inCard(_ frame: CGRect) -> CGRect { frame.offsetBy(dx: -layout.card.minX, dy: -layout.card.minY) }
+        card.fill.setLayoutFrame(inCard(layout.row))
+        avatar.setLayoutFrame(inCard(layout.avatar))
+        titleLabel.setLayoutFrame(inCard(layout.title))
+        subtitleLabel.setLayoutFrame(inCard(layout.subtitle))
+        if let frame = layout.subtitleIcon { providerIcon.setLayoutFrame(inCard(frame)) }
+        dot.setLayoutFrame(inCard(layout.dot))
+        statusLabel.setLayoutFrame(inCard(layout.status))
     }
 
     override func setSelected(_ selected: Bool, animated: Bool) {

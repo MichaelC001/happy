@@ -14,12 +14,20 @@ public final class AccountSession: Sendable {
     /// without a store directory (in-memory, tests) get a temporary one.
     public let filesDirectory: URL
     public let sync: SyncEngine
+    /// The New Session draft's last height, for reopening it in this account.
+    public let newSessionDraftHeight = MeasuredDraftMemo()
+    /// Private render payload belongs to this account, including work that
+    /// screens finish after a switch. Screens cancel work; stop closes owners.
+    public let diffDocuments = DiffDocumentCache()
+    public let diffSyntax = DiffSyntaxService()
+    public let codeSyntax = CodeSyntaxService()
     /// Retry keys and abandoned starts belong to this account session alone.
     public let spawnRequests = SpawnRequests()
     /// Sends chat messages through the outbox.
     public let sender: OutboxSender
     /// The chat of any session, from this account's store.
     public let chatFeed: LocalChatFeed
+    public let chatHistory: ChatHistory
     public let homeFeed: HomeFeed
     public let settingsFeed: SettingsFeed
     public let machinesFeed: MachinesFeed
@@ -42,11 +50,13 @@ public final class AccountSession: Sendable {
     /// The session pictures the chat has decoded, this account's alone.
     public let attachmentPictures = AttachmentPictures()
     /// What each file looked like when last read (the store's
-    /// `sessionFileCache`), this account's alone.
-    public let fileCache = SessionFileCache()
+    /// `sessionFileCache`), this account's alone. Disk reads stay under the
+    /// prepared account directory; a nil directory keeps it in memory.
+    public let fileCache: SessionFileCache
     /// One session's record, computer, settings and composer, for the
     /// session's own screens.
     public let sessionDetails: SessionDetailFeed
+    public let machineDetails: MachineDetailFeed
     /// Socket status for the UI (connection dot in settings).
     public let statusUpdates: AsyncStream<RealtimeStatus>
 
@@ -81,13 +91,15 @@ public final class AccountSession: Sendable {
         }
     }
 
-    public init(credentials: Credentials, store: LocalStore, dependencies: Dependencies, filesDirectory: URL? = nil) throws {
+    public init(credentials: Credentials, store: LocalStore, dependencies: Dependencies,
+                filesDirectory: URL? = nil, fileCacheDirectory: URL? = nil) throws {
         guard let secret = credentials.secretData else { throw CryptoError.invalidInput("credentials secret") }
         self.credentials = credentials
         self.keys = try AccountKeys(secret: secret)
         self.store = store
         self.filesDirectory = filesDirectory ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("happy-files-\(keys.anonID)", isDirectory: true)
+        self.fileCache = SessionFileCache(directory: fileCacheDirectory)
         self.api = HappyAPI(serverURL: dependencies.serverURL, clientID: dependencies.clientID, transport: dependencies.transport)
             .authenticated(token: credentials.token)
         var syncOptions = SyncEngine.Options()
@@ -95,10 +107,12 @@ public final class AccountSession: Sendable {
         self.sync = SyncEngine(api: api, store: store, keys: keys, options: syncOptions)
         self.sender = OutboxSender(store: store, sync: sync, filesDirectory: self.filesDirectory, spawnRequests: spawnRequests)
         self.chatFeed = LocalChatFeed(store: store)
+        self.chatHistory = ChatHistory(api: api, store: store, keys: keys)
         self.homeFeed = HomeFeed(store: store)
         self.settingsFeed = SettingsFeed(store: store)
         self.machinesFeed = MachinesFeed(store: store)
         self.sessionDetails = SessionDetailFeed(store: store)
+        self.machineDetails = MachineDetailFeed(store: store)
         self.troubleshootingFeed = TroubleshootingFeed(store: store)
         self.pairing = PairingService(api: api, keys: keys)
 
@@ -158,9 +172,13 @@ public final class AccountSession: Sendable {
     /// Move sidecars before the database, which is the migration's commit
     /// marker. Retrying an interrupted migration completes the remaining moves.
     public static func prepareDirectory(directory: URL, id: String) throws {
+        try AccountStorageDirectory.prepare(directory)
         let manager = FileManager.default
         let target = accountDirectory(directory: directory, id: id)
         try manager.createDirectory(at: target.appendingPathComponent("files", isDirectory: true), withIntermediateDirectories: true)
+        // The viewer's optional cache must not prevent the primary store from
+        // opening. An unprepared directory keeps all reads in memory only.
+        try? SessionFileCache.prepare(directory: SessionFileCache.directory(inAccount: target))
         let old = directory.appendingPathComponent("happy-\(id).sqlite")
         let new = target.appendingPathComponent("store.sqlite")
         guard manager.fileExists(atPath: old.path), !manager.fileExists(atPath: new.path) else { return }
@@ -183,20 +201,28 @@ public final class AccountSession: Sendable {
         let statusContinuation = self.statusContinuation
         let gitStatus = self.gitStatus
         let rigComposer = self.rigComposer
+        let fileCache = self.fileCache
         pump.set(Task {
             for await event in realtime.events {
-                await Self.route(event, sync: sync, status: statusContinuation, gitStatus: gitStatus, rigComposer: rigComposer)
+                await Self.route(event, sync: sync, status: statusContinuation, gitStatus: gitStatus, rigComposer: rigComposer, fileCache: fileCache)
             }
         })
         await realtime.connect()
     }
 
     public func stop() async {
+        newSessionDraftHeight.close()
+        diffDocuments.close()
+        diffSyntax.close()
+        codeSyntax.close()
         await spawnRequests.close()
+        await chatHistory.stop()
         homeFeed.stop()
         settingsFeed.stop()
         machinesFeed.stop()
         sessionDetails.stop()
+        machineDetails.stop()
+        await fileCache.close()
         await troubleshootingFeed.stop()
         let task = pump.cancel()
         await gitStatus.stop()
@@ -218,7 +244,8 @@ public final class AccountSession: Sendable {
     }
 
     static func route(_ event: RealtimeEvent, sync: SyncEngine, status: AsyncStream<RealtimeStatus>.Continuation,
-                      gitStatus: GitStatusSync? = nil, rigComposer: RigComposerSync? = nil) async {
+                      gitStatus: GitStatusSync? = nil, rigComposer: RigComposerSync? = nil,
+                      fileCache: SessionFileCache? = nil) async {
         switch event {
         case .status(let value):
             status.yield(value)
@@ -232,7 +259,9 @@ public final class AccountSession: Sendable {
                 switch update.body {
                 case .newMessage(let id, _): await gitStatus?.invalidate(sessionId: id)
                 case .updateSession(let body): await gitStatus?.invalidate(sessionId: body.id)
-                case .deleteSession(let id): await gitStatus?.clearForSession(sessionId: id)
+                case .deleteSession(let id):
+                    await gitStatus?.clearForSession(sessionId: id)
+                    fileCache?.removeSession(sessionId: id)
                 default: break
                 }
             }

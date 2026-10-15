@@ -34,17 +34,26 @@ final class ComposerTextSizeTests: XCTestCase {
         return card
     }
 
-    func testAFollowingCardDrawsAndMeasuresAtTheTextSize() throws {
+    func testAFollowingCardDrawsAndMeasuresAtTheTextSize() async throws {
         let (window, host) = host(follows: true)
         let card = card()
         host.addSubview(card)
         card.updateTraitsIfNeeded()
         let font = try XCTUnwrap(card.textView.font)
         XCTAssertEqual(font.pointSize, 16 * largest.multiplier, accuracy: 0.001)
+        _ = card.layoutInput(width: 377)
+        await card.textMeasured()
         let input = card.layoutInput(width: 377)
         XCTAssertEqual(input.lineHeight ?? 0, 22 * largest.multiplier, accuracy: 0.001)
-        // The text is measured at the size it is drawn at.
-        XCTAssertGreaterThan(input.textContentHeight, 22 * largest.multiplier)
+        // The text is measured at the size it is drawn at: one line and
+        // the 4 + 4, as a TextKit 1 twin of the text view sizes itself
+        // (Fabric's measure); the TextKit 2 view's own line fits that.
+        XCTAssertEqual(input.textContentHeight, ceil(22 * largest.multiplier + 8))
+        let textWidth = card.layout(width: 377).text.width
+        let twin = ComposerEditorGeometry.textKit1Twin(of: card.textView)
+        XCTAssertEqual(input.textContentHeight, ComposerEditorGeometry.ownHeight(twin, width: textWidth))
+        XCTAssertNotNil(card.textView.textLayoutManager)
+        XCTAssertLessThanOrEqual(ComposerEditorGeometry.ownHeight(card.textView, width: textWidth), input.textContentHeight)
         XCTAssertEqual(card.height(fitting: 377), AgentInputCardLayout(input).size.height)
         withExtendedLifetime(window) {}
     }

@@ -6,8 +6,10 @@ import HappyStore
 import UIKit
 
 extension SessionStarter {
-    /// A starter on this account's machines, sessions and sender.
-    static func make(for session: AccountSession) -> SessionStarter {
+    /// A starter on this account's machines, sessions and sender. Its spawn
+    /// requests are the account's own unless a caller hands it a scope of
+    /// that account's (a child scope, say).
+    static func make(for session: AccountSession, spawnRequests: SpawnRequests? = nil) -> SessionStarter {
         let sync = session.sync
         return SessionStarter(environment: .init(
             ops: session.homeOps,
@@ -19,7 +21,7 @@ extension SessionStarter {
             attachmentPlan: { [sender = session.sender] message, sessionId in
                 try await sender.attachmentPlan(for: message, sessionId: sessionId)
             },
-            spawnRequests: session.spawnRequests
+            spawnRequests: spawnRequests ?? session.spawnRequests
         ))
     }
 }
@@ -125,6 +127,9 @@ final class NewSessionViewController: UIViewController {
         view.backgroundColor = UIColor(Palette.groupedBackground)
         setUpHeader()
 
+        // Before the draft is set (`render`): its height, if this account
+        // measured it last.
+        composerView.heights = session.newSessionDraftHeight
         composerView.onTextChange = { [weak self] text in
             self?.composer.drafts.setInput(text)
         }

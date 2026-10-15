@@ -50,20 +50,20 @@ public struct DiffFileItem: Equatable, Sendable {
 
     public var id: String { key ?? path }
 
-    /// useDiffDocument: the built document for a source (cached by the
-    /// engine), or the empty document.
-    public static func document(_ source: Source?) -> DiffDocument {
+    /// Builds through the account's document owner. A stopped owner returns
+    /// empty; callers must discard its plans rather than show "no changes".
+    public static func document(_ source: Source?, cache: DiffDocumentCache) -> DiffDocument {
         switch source {
         case nil:
             return .empty
         case .patch(let patch):
-            return DiffEngine.build(patch: patch)
+            return cache.build(patch: patch)
         case .contents(let path, let oldText, let newText, let contextLines, let ignoreWhitespace, let budget):
             var options = DiffEngine.Options()
             if let contextLines { options.contextLines = contextLines }
             if let ignoreWhitespace { options.ignoreWhitespace = ignoreWhitespace }
             options.budget = budget
-            return DiffEngine.build(path: path, oldText: oldText, newText: newText, options: options)
+            return cache.build(path: path, oldText: oldText, newText: newText, options: options)
         }
     }
 
