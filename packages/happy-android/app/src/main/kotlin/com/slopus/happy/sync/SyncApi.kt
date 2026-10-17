@@ -3,6 +3,7 @@ package com.slopus.happy.sync
 import com.slopus.happy.net.HappyHttp
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 // Wire shapes of the happy-server routes the sync reads, as they are today
@@ -25,6 +26,9 @@ data class ApiSession(
     /** Null only on sessions from the retired protocol, which this app does not read. */
     val dataEncryptionKey: String? = null,
     val projectId: String? = null,
+    /** The session avatar's descriptor, validated by [com.slopus.happy.model.SessionAvatarDescriptor.parse]. */
+    val avatar: JsonElement? = null,
+    val avatarVersion: JsonElement? = null,
 )
 
 @Serializable
@@ -45,6 +49,19 @@ data class ApiMessage(
 
 @Serializable
 data class ApiMessagePage(val messages: List<ApiMessage>, val hasMore: Boolean = false)
+
+/** POST /v3/sessions/:id/messages: one entry per message, encrypted content as base64. */
+@Serializable
+data class ApiOutgoingMessage(val localId: String, val content: String)
+
+@Serializable
+data class ApiOutgoingMessages(val messages: List<ApiOutgoingMessage>)
+
+@Serializable
+data class ApiStoredMessage(val id: String, val seq: Long, val localId: String? = null, val createdAt: Long = 0, val updatedAt: Long = 0)
+
+@Serializable
+data class ApiStoredMessages(val messages: List<ApiStoredMessage> = emptyList())
 
 @Serializable
 data class ApiMachine(
@@ -99,6 +116,35 @@ class SyncApi(private val http: HappyHttp, private val token: String) {
         token = token,
         query = mapOf("after_seq" to afterSeq.toString(), "limit" to limit.toString()),
     )
+
+    /** Messages with seq < [beforeSeq], newest first (backward paging). */
+    suspend fun messagesBefore(sessionId: String, beforeSeq: Long, limit: Int): ApiMessagePage = http.get(
+        path = "/v3/sessions/$sessionId/messages",
+        response = ApiMessagePage.serializer(),
+        token = token,
+        query = mapOf("before_seq" to beforeSeq.toString(), "limit" to limit.toString()),
+    )
+
+    /** Stores messages; the server dedupes on localId, so a retry is safe. */
+    suspend fun sendMessages(sessionId: String, messages: List<ApiOutgoingMessage>): ApiStoredMessages = http.post(
+        path = "/v3/sessions/$sessionId/messages",
+        body = ApiOutgoingMessages(messages),
+        bodySerializer = ApiOutgoingMessages.serializer(),
+        response = ApiStoredMessages.serializer(),
+        token = token,
+    )
+
+    suspend fun archiveSession(sessionId: String) {
+        http.send("POST", "/v1/sessions/$sessionId/archive", token)
+    }
+
+    suspend fun deleteSession(sessionId: String) {
+        http.send("DELETE", "/v1/sessions/$sessionId", token)
+    }
+
+    suspend fun deleteMachine(machineId: String) {
+        http.send("DELETE", "/v1/machines/$machineId", token)
+    }
 
     suspend fun machines(): List<ApiMachine> = http.get(
         path = "/v1/machines",

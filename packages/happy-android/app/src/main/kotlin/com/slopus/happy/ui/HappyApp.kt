@@ -5,12 +5,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
@@ -18,30 +16,33 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.slopus.happy.AppGraph
-import com.slopus.happy.BuildConfig
 import com.slopus.happy.R
 import com.slopus.happy.auth.AuthState
+import com.slopus.happy.push.PushRegistrationEffect
+import com.slopus.happy.ui.chat.SessionRoute
+import com.slopus.happy.ui.chat.chatRoutes
 import com.slopus.happy.ui.components.Alert
 import com.slopus.happy.ui.components.AlertButton
 import com.slopus.happy.ui.components.HappyAlert
-import com.slopus.happy.ui.home.HomeScreen
+import com.slopus.happy.ui.connect.DeepLinkEffect
+import com.slopus.happy.ui.tablet.TabletShell
+import com.slopus.happy.ui.connect.connectRoutes
+import com.slopus.happy.ui.files.filesRoutes
+import com.slopus.happy.ui.home.homeRoutes
 import com.slopus.happy.ui.onboarding.RestoreManualScreen
-import com.slopus.happy.ui.onboarding.RestoreScreen
+import com.slopus.happy.ui.onboarding.TroubleshootRoute
+import com.slopus.happy.ui.machine.MachineRoute
+import com.slopus.happy.ui.onboarding.onboardingRoutes
+import com.slopus.happy.ui.session.SessionInfoRoute
 import com.slopus.happy.ui.onboarding.WelcomeScreen
 import com.slopus.happy.ui.server.ServerScreen
-import com.slopus.happy.ui.settings.AccountScreen
-import com.slopus.happy.ui.settings.AppearanceScreen
-import com.slopus.happy.ui.settings.SettingsScreen
+import com.slopus.happy.ui.settings.LocalizedContent
+import com.slopus.happy.ui.home.ProvideAvatarSettings
+import com.slopus.happy.ui.settings.settingsRoutes
 import com.slopus.happy.ui.theme.HappyTheme
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.jsonPrimitive
 
 @Serializable data object WelcomeRoute
 @Serializable data object ServerRoute
@@ -49,8 +50,6 @@ import kotlinx.serialization.json.jsonPrimitive
 @Serializable data object RestoreManualRoute
 @Serializable data object HomeRoute
 @Serializable data object SettingsRoute
-@Serializable data object AccountRoute
-@Serializable data object AppearanceRoute
 
 /**
  * The whole UI. Signed out and signed in are separate back stacks: when the
@@ -61,41 +60,49 @@ import kotlinx.serialization.json.jsonPrimitive
 fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
     val theme by graph.localSettings.themePreference.collectAsStateWithLifecycle()
     val auth by graph.auth.state.collectAsStateWithLifecycle()
+    val language by graph.language.language.collectAsStateWithLifecycle()
+    val settings by graph.settings.settings.collectAsStateWithLifecycle()
 
-    HappyTheme(preference = theme) {
+    // Avatar.tsx reads the avatar settings everywhere: the chat header and Settings as well as Home.
+    LocalizedContent(language.locale) { HappyTheme(preference = theme) { ProvideAvatarSettings(settings) {
         val dark = HappyTheme.colors.dark
         LaunchedEffect(dark) { onDarkThemeChange(dark) }
 
         val signedIn = auth as? AuthState.SignedIn
         key(signedIn != null) {
             val nav = rememberNavController()
-            NavHost(navController = nav, startDestination = if (signedIn != null) HomeRoute else WelcomeRoute) {
-                composable<WelcomeRoute> { Welcome(graph, nav) }
-                composable<ServerRoute> { Server(graph, nav) }
-                composable<RestoreRoute> {
-                    RestoreScreen(onBack = { nav.popBackStack() }, onUseSecretKey = { nav.navigate(RestoreManualRoute) })
-                }
-                composable<RestoreManualRoute> { RestoreManual(graph, nav) }
-                composable<HomeRoute> { HomeScreen(onSettings = { nav.navigate(SettingsRoute) }) }
-                composable<SettingsRoute> {
-                    val uriHandler = LocalUriHandler.current
-                    SettingsScreen(
-                        versionName = BuildConfig.VERSION_NAME,
-                        onBack = { nav.popBackStack() },
-                        onAccount = { nav.navigate(AccountRoute) },
-                        onAppearance = { nav.navigate(AppearanceRoute) },
-                        onOpenUrl = uriHandler::openUri,
+            val openSession = { id: String -> nav.navigate(SessionRoute(id)) }
+            val troubleshoot = { nav.navigate(TroubleshootRoute) }
+            // The tablet shell (sidebar beside the stack) or, on a phone, just the stack.
+            TabletShell(graph, nav, signedIn = signedIn != null, onOpenSession = openSession, onTroubleshoot = troubleshoot) {
+                NavHost(navController = nav, startDestination = if (signedIn != null) HomeRoute else WelcomeRoute) {
+                    composable<WelcomeRoute> { Welcome(graph, nav) }
+                    composable<ServerRoute> { Server(graph, nav) }
+                    composable<RestoreManualRoute> { RestoreManual(graph, nav) }
+                    homeRoutes(
+                        graph,
+                        nav,
+                        onOpenSession = openSession,
+                        onTroubleshoot = troubleshoot,
                     )
-                }
-                composable<AccountRoute> { signedIn?.let { Account(graph, it, nav) } }
-                composable<AppearanceRoute> {
-                    AppearanceScreen(theme = theme, onThemeChange = graph.localSettings::setThemePreference, onBack = { nav.popBackStack() })
+                    settingsRoutes(graph, nav)
+                    onboardingRoutes(graph, nav, onOpenMachine = { id -> nav.navigate(MachineRoute(id)) })
+                    connectRoutes(graph, nav)
+                    chatRoutes(graph, nav, onInfo = { id -> nav.navigate(SessionInfoRoute(id)) })
+                    filesRoutes(graph, nav)
                 }
             }
+            DeepLinkEffect(nav, signedIn = signedIn != null, onOpenSession = { id -> nav.navigate(SessionRoute(id)) })
+            PushRegistrationEffect(graph)
         }
-    }
+    } } }
 }
 
+/**
+ * The signed-out start (index.tsx NotAuthenticated). A failed "Create
+ * account" shows "Error / Authentication failed"; happy-app only logs it and
+ * the button stops spinning, which leaves the user with no word of why.
+ */
 @Composable
 private fun Welcome(graph: AppGraph, nav: NavHostController) {
     val scope = rememberCoroutineScope()
@@ -181,32 +188,4 @@ private fun RestoreManual(graph: AppGraph, nav: NavHostController) {
         onBack = { nav.popBackStack() },
     )
     alert?.let { HappyAlert(it, onDismiss = { alert = null }) }
-}
-
-@Composable
-private fun Account(graph: AppGraph, account: AuthState.SignedIn, nav: NavHostController) {
-    val scope = rememberCoroutineScope()
-    val changes by graph.store.changes.collectAsStateWithLifecycle()
-    val analyticsOptOut by produceState(initialValue = false, changes) {
-        value = withContext(Dispatchers.IO) {
-            graph.store.effectiveSettings()["analyticsOptOut"]?.jsonPrimitive?.booleanOrNull ?: false
-        }
-    }
-
-    AccountScreen(
-        anonId = account.encryption.anonId,
-        publicId = account.publicId,
-        formattedSecretKey = account.formattedSecretKey,
-        analyticsOptOut = analyticsOptOut,
-        onAnalyticsOptOutChange = { optOut ->
-            scope.launch {
-                withContext(Dispatchers.IO) {
-                    graph.store.changeSettings(JsonObject(mapOf("analyticsOptOut" to JsonPrimitive(optOut))))
-                }
-                graph.requestSync()
-            }
-        },
-        onLogout = { graph.logout() },
-        onBack = { nav.popBackStack() },
-    )
 }

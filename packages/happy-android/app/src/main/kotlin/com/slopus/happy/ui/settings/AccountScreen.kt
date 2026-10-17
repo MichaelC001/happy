@@ -1,14 +1,25 @@
 package com.slopus.happy.ui.settings
 
 import android.content.ClipData
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import com.slopus.happy.model.Profile
+import com.slopus.happy.model.settings.PushPermission
+import com.slopus.happy.model.settings.PushPermissionStatus
+import com.slopus.happy.model.settings.PushText
+import com.slopus.happy.model.settings.PushToken
+import com.slopus.happy.ui.components.HappySwitch
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -25,6 +36,7 @@ import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.R
@@ -36,11 +48,13 @@ import com.slopus.happy.ui.components.Ionicon
 import com.slopus.happy.ui.components.Item
 import com.slopus.happy.ui.components.ItemGroup
 import com.slopus.happy.ui.components.ItemList
+import com.slopus.happy.ui.components.RemoteImage
 import com.slopus.happy.ui.components.Screen
 import com.slopus.happy.ui.components.StackHeader
 import com.slopus.happy.ui.theme.HappyTheme
 import com.slopus.happy.ui.theme.PlexMono
 import com.slopus.happy.ui.theme.happyTextStyle
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -48,6 +62,7 @@ object AccountTags {
     const val SECRET_KEY = "account.secretKey"
     const val SECRET_KEY_TEXT = "account.secretKeyText"
     const val ANALYTICS_SWITCH = "account.analyticsSwitch"
+    const val GITHUB_AVATAR = "account.githubAvatar"
 }
 
 /** settings/account.tsx */
@@ -61,13 +76,44 @@ object AccountSpec {
     val copiedGreen = Color(0xFF34C759)
 }
 
+/** What the push rows show (account.tsx's push state). */
+data class PushState(
+    val permission: PushPermission? = null,
+    val loading: Boolean = false,
+    val requesting: Boolean = false,
+    val refreshing: Boolean = false,
+    val currentToken: String? = null,
+    val tokens: List<PushToken> = emptyList(),
+    val deletingToken: String? = null,
+    val deviceLabel: String = "android device",
+    val appLabel: String? = null,
+)
+
+/** account.tsx `knownServices`: id, name, icon, and whether the icon takes the text colour. */
+private data class KnownService(val id: String, val name: String, val icon: Int, val tinted: Boolean)
+
+private val knownServices = listOf(
+    KnownService("anthropic", "Claude Code", R.drawable.icon_claude, tinted = false),
+    KnownService("gemini", "Google Gemini", R.drawable.icon_gemini, tinted = false),
+    KnownService("openai", "OpenAI Codex", R.drawable.icon_gpt, tinted = true),
+)
+
 /**
- * Settings > Account, the parts that exist without push, GitHub and service
- * connections: account information, the secret key backup, analytics
- * opt-out, logout.
+ * Settings > Account (settings/account.tsx, native rows): account
+ * information, the profile (name, GitHub with disconnect), connected
+ * services with disconnect, the secret key backup, analytics, push
+ * notifications and registered tokens, logout.
  *
- * "Link New Device" scans the new device's QR code in happy-app. STUB: there
- * is no scanner here, so it explains that and points to the secret key.
+ * Spec: standard [ItemGroup]s of [Item]s with 29 icons. The profile group
+ * shows when there is a name or GitHub login; connected services only those
+ * account.tsx knows (Claude Code, Google Gemini, OpenAI Codex) with "Active"
+ * as detail. The revealed secret key is a block with 16/14 padding: an 11
+ * semibold uppercase label and an 18 copy icon 10 above the 13/20 mono key.
+ * Registered tokens list every token with an unlimited subtitle; another
+ * device's token deletes on tap after a confirm.
+ *
+ * "Link New Device" scans the new device's QR code ([onLinkNewDevice]); while
+ * [linkingDevice] it reads "Scanning..." and takes no taps.
  */
 @Composable
 fun AccountScreen(
@@ -78,6 +124,17 @@ fun AccountScreen(
     onAnalyticsOptOutChange: (Boolean) -> Unit,
     onLogout: () -> Unit,
     onBack: () -> Unit,
+    profile: Profile = Profile.Defaults,
+    gitHubBusy: Boolean = false,
+    onDisconnectGitHub: () -> Unit = {},
+    disconnectingService: String? = null,
+    onDisconnectService: (service: String, name: String) -> Unit = { _, _ -> },
+    push: PushState = PushState(),
+    onRequestPush: () -> Unit = {},
+    onRefreshPush: () -> Unit = {},
+    onDeletePushToken: (PushToken) -> Unit = {},
+    linkingDevice: Boolean = false,
+    onLinkNewDevice: () -> Unit = {},
 ) {
     val colors = HappyTheme.colors
     val clipboard = LocalClipboard.current
@@ -94,9 +151,20 @@ fun AccountScreen(
     val resources = LocalResources.current
     fun copiedMessage(label: String): String = resources.getString(R.string.items_copied_to_clipboard, label)
 
-    fun copy(text: String, then: () -> Unit) {
+    val errorTitle = stringResource(R.string.common_error)
+    val secretCopyFailed = stringResource(R.string.settings_account_secret_key_copy_failed)
+
+    /** Copies [text]; a clipboard that refuses calls [failed] instead of crashing. */
+    fun copy(text: String, failed: () -> Unit = {}, then: () -> Unit) {
         scope.launch {
-            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(text, text)))
+            try {
+                clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(text, text)))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                failed()
+                return@launch
+            }
             then()
         }
     }
@@ -122,15 +190,86 @@ fun AccountScreen(
                 CopyableItem(stringResource(R.string.settings_account_public_id), publicId, notAvailable) { title, value ->
                     copy(value) { alert = Alert(copiedTitle, copiedMessage(title), listOf(AlertButton(ok))) }
                 }
-                val linkTitle = stringResource(R.string.settings_account_link_new_device)
-                val linkUnavailable = stringResource(R.string.settings_account_link_new_device_unavailable)
                 Item(
-                    title = linkTitle,
-                    subtitle = stringResource(R.string.settings_account_link_new_device_subtitle),
+                    title = stringResource(R.string.settings_account_link_new_device),
+                    subtitle = stringResource(
+                        if (linkingDevice) R.string.common_scanning else R.string.settings_account_link_new_device_subtitle,
+                    ),
                     icon = { ItemIcon(Ionicon.QrCodeOutline, SettingsSpec.blue) },
-                    onClick = { alert = Alert(linkTitle, linkUnavailable, listOf(AlertButton(ok))) },
+                    onClick = onLinkNewDevice,
+                    enabled = !linkingDevice,
                     showChevron = false,
                 )
+            }
+
+            val cancel = stringResource(R.string.common_cancel)
+            val disconnect = stringResource(R.string.modals_disconnect)
+            val resourcesForConfirm = LocalResources.current
+            fun confirmDisconnect(title: String, message: String, action: () -> Unit) {
+                alert = Alert(title, message, listOf(AlertButton(cancel), AlertButton(disconnect, destructive = true, onClick = action)), cancelable = false)
+            }
+
+            val displayName = profile.displayName
+            val gitHubLogin = profile.github?.login
+            if (displayName != null || gitHubLogin != null || profile.avatar != null) {
+                ItemGroup(title = stringResource(R.string.settings_account_profile)) {
+                    if (displayName != null) {
+                        Item(title = stringResource(R.string.settings_account_name), detail = displayName, showChevron = false)
+                    }
+                    if (gitHubLogin != null) {
+                        val title = stringResource(R.string.modals_disconnect_github)
+                        val message = stringResource(R.string.modals_disconnect_github_confirm)
+                        Item(
+                            title = stringResource(R.string.settings_account_github),
+                            detail = "@$gitHubLogin",
+                            subtitle = stringResource(R.string.settings_account_tap_to_disconnect),
+                            // The uploaded avatar when there is one (no thumbhash placeholder), else the logo.
+                            icon = {
+                                val url = profile.avatar?.url?.takeIf { it.isNotEmpty() }
+                                if (url != null) {
+                                    RemoteImage(url, contentDescription = null, modifier = Modifier.size(SettingsSpec.itemIcon).clip(CircleShape).testTag(AccountTags.GITHUB_AVATAR))
+                                } else {
+                                    ItemIcon(Ionicon.LogoGithub, colors.textSecondary)
+                                }
+                            },
+                            onClick = { confirmDisconnect(title, message, onDisconnectGitHub) },
+                            loading = gitHubBusy,
+                            showChevron = false,
+                        )
+                    }
+                }
+            }
+
+            val services = knownServices.filter { it.id in profile.connectedServices }
+            if (services.isNotEmpty()) {
+                ItemGroup(title = stringResource(R.string.settings_connected_accounts)) {
+                    for (service in services) {
+                        val busy = disconnectingService == service.id
+                        Item(
+                            title = service.name,
+                            detail = stringResource(R.string.settings_account_status_active),
+                            subtitle = stringResource(R.string.settings_account_tap_to_disconnect),
+                            icon = {
+                                Image(
+                                    painter = painterResource(service.icon),
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Fit,
+                                    colorFilter = if (service.tinted) ColorFilter.tint(colors.text) else null,
+                                    modifier = Modifier.size(SettingsSpec.itemIcon),
+                                )
+                            },
+                            onClick = {
+                                confirmDisconnect(
+                                    resourcesForConfirm.getString(R.string.modals_disconnect_service, service.name),
+                                    resourcesForConfirm.getString(R.string.modals_disconnect_service_confirm, service.name),
+                                ) { onDisconnectService(service.id, service.name) }
+                            },
+                            loading = busy,
+                            enabled = !busy,
+                            showChevron = false,
+                        )
+                    }
+                }
             }
 
             ItemGroup(
@@ -151,8 +290,8 @@ fun AccountScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
-                                copy(formattedSecretKey) {
+                            .clickable(role = Role.Button) {
+                                copy(formattedSecretKey, failed = { alert = Alert(errorTitle, secretCopyFailed, listOf(AlertButton(ok))) }) {
                                     copiedRecently = true
                                     alert = Alert(successTitle, secretCopied, listOf(AlertButton(ok)))
                                 }
@@ -190,33 +329,110 @@ fun AccountScreen(
                 title = stringResource(R.string.settings_account_privacy),
                 footer = stringResource(R.string.settings_account_privacy_description),
             ) {
+                val analytics = stringResource(R.string.settings_account_analytics)
                 Item(
-                    title = stringResource(R.string.settings_account_analytics),
+                    title = analytics,
                     subtitle = stringResource(
                         if (analyticsOptOut) R.string.settings_account_analytics_disabled else R.string.settings_account_analytics_enabled,
                     ),
                     rightElement = {
-                        Switch(
+                        HappySwitch(
                             checked = !analyticsOptOut,
                             onCheckedChange = { enabled -> onAnalyticsOptOutChange(!enabled) },
-                            colors = SwitchDefaults.colors(
-                                checkedTrackColor = colors.switch.trackActive,
-                                checkedThumbColor = colors.switch.thumbActive,
-                                checkedBorderColor = Color.Transparent,
-                                uncheckedTrackColor = colors.switch.trackInactive,
-                                uncheckedThumbColor = colors.switch.thumbActive,
-                                uncheckedBorderColor = Color.Transparent,
-                            ),
                             modifier = Modifier.testTag(AccountTags.ANALYTICS_SWITCH),
+                            label = analytics,
                         )
                     },
                     showChevron = false,
                 )
             }
 
+            ItemGroup(
+                title = "Push Notifications",
+                footer = "Shows every push token registered on your account. Tap an old token to delete it.",
+            ) {
+                val unsupported = push.permission?.status == PushPermissionStatus.Unsupported
+                Item(
+                    title = "Permission",
+                    detail = PushText.label(push.permission),
+                    subtitle = PushText.subtitle(push.permission),
+                    icon = { ItemIcon(Ionicon.NotificationsOutline, SettingsSpec.blue) },
+                    loading = push.loading,
+                    showChevron = false,
+                )
+                Item(
+                    title = "Request Permission Again",
+                    subtitle = PushText.requestSubtitle(push.permission),
+                    icon = { ItemIcon(Ionicon.ShieldCheckmarkOutline, AccountSpec.copiedGreen) },
+                    onClick = onRequestPush,
+                    loading = push.requesting,
+                    enabled = !(push.requesting || push.loading || unsupported),
+                    showChevron = false,
+                )
+                Item(
+                    title = "Re-register This Device",
+                    subtitle = push.currentToken?.let { "Current token ${PushText.fingerprint(it)}" }
+                        ?: "Fetches the current Expo token and registers it again.",
+                    icon = { ItemIcon(Ionicon.RefreshOutline, SettingsSpec.orange) },
+                    onClick = onRefreshPush,
+                    loading = push.refreshing,
+                    enabled = !(push.refreshing || push.loading),
+                    showChevron = false,
+                )
+            }
+
+            ItemGroup(
+                title = "Registered Tokens (${push.tokens.size})",
+                footer = "Current-device metadata comes from this phone. Older tokens use their token fingerprint plus server timestamps.",
+            ) {
+                if (push.tokens.isEmpty()) {
+                    Item(
+                        title = "No registered push tokens",
+                        subtitle = "Once this device is registered, it will appear here.",
+                        showChevron = false,
+                    )
+                }
+                val delete = stringResource(R.string.common_delete)
+                for (token in push.tokens) {
+                    val current = push.currentToken == token.token
+                    val fingerprint = PushText.fingerprint(token.token)
+                    Item(
+                        title = fingerprint,
+                        detail = if (current) "This device" else null,
+                        subtitle = PushText.tokenSubtitle(token, current, push.deviceLabel, push.appLabel),
+                        subtitleLines = 0,
+                        icon = {
+                            ItemIcon(
+                                if (current) Ionicon.PhonePortraitOutline else Ionicon.TrashOutline,
+                                if (current) colors.textSecondary else SettingsSpec.red,
+                            )
+                        },
+                        onClick = if (current) {
+                            null
+                        } else {
+                            {
+                                alert = Alert(
+                                    "Delete Push Token",
+                                    "Remove $fingerprint from your account?",
+                                    listOf(AlertButton(cancel), AlertButton(delete, destructive = true) { onDeletePushToken(token) }),
+                                    cancelable = false,
+                                )
+                            }
+                        },
+                        onLongClick = if (current) {
+                            { copy(token.token) { alert = Alert(copiedTitle, copiedMessage(fingerprint), listOf(AlertButton(ok))) } }
+                        } else {
+                            null
+                        },
+                        loading = push.deletingToken == token.token,
+                        enabled = push.deletingToken == null,
+                        showChevron = false,
+                    )
+                }
+            }
+
             val logoutTitle = stringResource(R.string.common_logout)
             val logoutConfirm = stringResource(R.string.settings_account_logout_confirm)
-            val cancel = stringResource(R.string.common_cancel)
             ItemGroup(title = stringResource(R.string.settings_account_danger_zone)) {
                 Item(
                     title = stringResource(R.string.settings_account_logout),
@@ -228,6 +444,7 @@ fun AccountScreen(
                             logoutTitle,
                             logoutConfirm,
                             listOf(AlertButton(cancel), AlertButton(logoutTitle, destructive = true, onClick = onLogout)),
+                            cancelable = false,
                         )
                     },
                 )

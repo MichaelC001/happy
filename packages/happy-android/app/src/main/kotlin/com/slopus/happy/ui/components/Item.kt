@@ -19,8 +19,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.takeOrElse
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.ui.theme.HappyTheme
@@ -62,6 +66,8 @@ object ItemSpec {
  * detail 17 (tracking -0.41) with 6 before the chevron, a 20 spinner while
  * loading, then a 24 chevron 4 after. Dividers are 0 high on Android, so there
  * are none. Pressing shows a ripple; disabled rows are at 50% opacity.
+ * TalkBack reads a row as one stop, title then subtitle and detail; a
+ * control in [rightElement] (a switch) stays a stop of its own.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -79,6 +85,12 @@ fun Item(
     loading: Boolean = false,
     destructive: Boolean = false,
     showChevron: Boolean = true,
+    /** `titleStyle={{ color }}`; unspecified keeps the text (or destructive) colour. */
+    titleColor: Color = Color.Unspecified,
+    /** `detailStyle={{ color }}` */
+    detailColor: Color = Color.Unspecified,
+    /** `subtitleStyle`, e.g. the monospaced ids on the machine screen. */
+    subtitleStyle: TextStyle? = null,
 ) {
     val colors = HappyTheme.colors
     val interactive = onClick != null || onLongClick != null
@@ -95,7 +107,7 @@ fun Item(
             onLongClick = onLongClick,
         )
     } else {
-        Modifier
+        Modifier.semantics(mergeDescendants = true) {}
     }
 
     Row(
@@ -122,7 +134,7 @@ fun Item(
             Text(
                 text = title,
                 style = ItemSpec.title,
-                color = if (destructive) colors.textDestructive else colors.text,
+                color = titleColor.takeOrElse { if (destructive) colors.textDestructive else colors.text },
                 maxLines = if (subtitle != null) 1 else 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.testTag(ItemTags.TITLE),
@@ -130,7 +142,7 @@ fun Item(
             if (subtitle != null) {
                 Text(
                     text = subtitle,
-                    style = ItemSpec.subtitle,
+                    style = subtitleStyle ?: ItemSpec.subtitle,
                     color = colors.textSecondary,
                     maxLines = if (subtitleLines <= 0) Int.MAX_VALUE else subtitleLines,
                     overflow = TextOverflow.Ellipsis,
@@ -147,7 +159,7 @@ fun Item(
                 Text(
                     text = detail,
                     style = ItemSpec.detail,
-                    color = colors.textSecondary,
+                    color = detailColor.takeOrElse { colors.textSecondary },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
