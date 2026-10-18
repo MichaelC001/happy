@@ -1,6 +1,7 @@
 #if canImport(UIKit)
 import HappyCore
 import HappyLayout
+import QuartzCore
 import UIKit
 
 /// Every screen a signed-in account can push, after happy-app's
@@ -29,6 +30,9 @@ enum Route: Hashable {
     case settingsLanguage
     case settingsAgents
     case settingsConnectClaude
+    case settingsVoice
+    case settingsVoiceLanguage
+    case supportUs
     case changelog
     case developer
     case server
@@ -75,6 +79,12 @@ enum Screens {
             return SettingsAgentsViewController(context: context, session: session)
         case .settingsConnectClaude:
             return SettingsConnectClaudeViewController()
+        case .settingsVoice:
+            return VoiceSettingsViewController(context: context, session: session)
+        case .settingsVoiceLanguage:
+            return VoiceLanguageViewController(session: session)
+        case .supportUs:
+            return SupportUsViewController()
         case .changelog:
             return ChangelogViewController()
         case .developer:
@@ -87,6 +97,9 @@ extension UIViewController {
     /// Pushes a route on this screen's navigation stack. Needs a signed-in
     /// account; does nothing while signed out.
     ///
+    /// Chats push a lightweight shell immediately. Their content is prepared
+    /// during the transition, without a readiness gate on navigation.
+    ///
     /// The tablet sidebar has no stack of its own: it pushes onto the one
     /// beside it, as SidebarNavigator.tsx's single stack does, and not
     /// again onto the chat already on top. The route is recorded so the
@@ -96,7 +109,13 @@ extension UIViewController {
               let stack = navigationController ?? tabletDetailNavigation,
               navigationController != nil || !TabletRoutes.isShowing(route, in: stack)
         else { return }
+        #if DEBUG || HAPPY_FIXTURES
+        let constructionStarted = CACurrentMediaTime()
+        #endif
         let controller = Screens.make(route, context: context, session: session)
+        #if DEBUG || HAPPY_FIXTURES
+        (controller as? ChatViewController)?.constructionSeconds = CACurrentMediaTime() - constructionStarted
+        #endif
         TabletRoutes.record(route, for: controller)
         stack.pushViewController(controller, animated: animated)
     }

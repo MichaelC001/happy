@@ -40,6 +40,7 @@ public final class HomeViewController: UIViewController {
     /// The home filter's choice, as last derived.
     private var grouping: SessionListGrouping = .flat
     private var content: UIViewController?
+    private var preparesArchives = false
 
     public init(context: AppContext, session: AccountSession) {
         self.context = context
@@ -109,6 +110,7 @@ public final class HomeViewController: UIViewController {
         // Midnight, a new time zone, a clock set by hand: the stamps are
         // written again, off the main thread.
         NotificationCenter.default.addObserver(self, selector: #selector(clockChanged), name: UIApplication.significantTimeChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(rendererChanged), name: HomeRendererPreference.didChange, object: nil)
     }
 
     deinit {
@@ -132,6 +134,7 @@ public final class HomeViewController: UIViewController {
 
     public override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        rendererChanged()
         // The server may have changed on a screen pushed from here.
         updateNavigation(animated: animated)
     }
@@ -175,8 +178,17 @@ public final class HomeViewController: UIViewController {
                 view.setNeedsLayout()
             }
         }
-        guard update.contentChanged else { return 0 }
-        return show(update)
+        let touched = update.contentChanged ? show(update) : 0
+        (content as? SessionListViewController)?.setArchiveModels(update.archiveModels, settings: update.archiveSettings)
+        prepareArchivesIfNeeded()
+        return touched
+    }
+
+    private func prepareArchivesIfNeeded() {
+        let wanted = state?.kind == .list && context.account.localSettings.homeListRenderer == .ultraList && !traitCollection.isTabletLayout
+        guard wanted != preparesArchives else { return }
+        preparesArchives = wanted
+        pipeline?.update { $0.preparesArchives = wanted }
     }
 
     /// The list's projects were opened or closed: derive the rows again.
@@ -250,8 +262,17 @@ public final class HomeViewController: UIViewController {
         return controller
     }
 
+    @objc private func rendererChanged() {
+        prepareArchivesIfNeeded()
+        guard isCurrentAccount, let list = content as? SessionListViewController,
+              list.rendererPreference != context.account.localSettings.homeListRenderer else { return }
+        embed(makeList(list.model, changeset: RowChangeset()), animated: false)
+        updateNavigation(animated: false)
+    }
+
     private func embed(_ next: UIViewController, animated: Bool) {
         let previous = content
+        (previous as? SessionListViewController)?.deactivateRenderer()
         content = next
         previous?.willMove(toParent: nil)
         addChild(next)

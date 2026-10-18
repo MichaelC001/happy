@@ -1,6 +1,8 @@
 package com.slopus.happy.ui
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import com.slopus.happy.ui.voice.LocalVoiceController
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -19,6 +21,7 @@ import com.slopus.happy.AppGraph
 import com.slopus.happy.R
 import com.slopus.happy.auth.AuthState
 import com.slopus.happy.push.PushRegistrationEffect
+import com.slopus.happy.payments.PaywallHost
 import com.slopus.happy.ui.chat.SessionRoute
 import com.slopus.happy.ui.chat.chatRoutes
 import com.slopus.happy.ui.components.Alert
@@ -64,11 +67,12 @@ fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
     val settings by graph.settings.settings.collectAsStateWithLifecycle()
 
     // Avatar.tsx reads the avatar settings everywhere: the chat header and Settings as well as Home.
-    LocalizedContent(language.locale) { HappyTheme(preference = theme) { ProvideAvatarSettings(settings) {
+    LocalizedContent(language.locale) { HappyTheme(preference = theme) { ProvideAvatarSettings(settings) { CompositionLocalProvider(LocalVoiceController provides graph.voice) {
         val dark = HappyTheme.colors.dark
         LaunchedEffect(dark) { onDarkThemeChange(dark) }
 
         val signedIn = auth as? AuthState.SignedIn
+        PaywallHost(graph.purchases)
         key(signedIn != null) {
             val nav = rememberNavController()
             val openSession = { id: String -> nav.navigate(SessionRoute(id)) }
@@ -95,7 +99,7 @@ fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
             DeepLinkEffect(nav, signedIn = signedIn != null, onOpenSession = { id -> nav.navigate(SessionRoute(id)) })
             PushRegistrationEffect(graph)
         }
-    } } }
+    } } } }
 }
 
 /**

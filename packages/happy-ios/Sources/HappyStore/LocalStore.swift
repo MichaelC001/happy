@@ -59,7 +59,7 @@ public final class LocalStore: Sendable {
         // Scope invalidation to the columns its consumers actually use.
         let homeSessionRegion = SQLRequest<Row>(sql: """
             SELECT id, createdAt, lastMessageSentAt, active, activeAt, projectId,
-                   metadata, agentState, decryptable, thinking, unread, archiving
+                   metadata, agentState, decryptable, thinking, unread, archiving, avatar, dataKeyCipher
             FROM session
             """)
         // Async consumers must use SharedObservationBridge: GRDB invokes
@@ -135,6 +135,15 @@ public final class LocalStore: Sendable {
         return try performRead { db in try SessionRecord.filter(ids.contains(Column("id"))).fetchAll(db) }
     }
 
+    /// A tiny checkpoint captured before an HTTP listing. Old servers have
+    /// no deletion revision, so an in-flight fetch must not undo live art.
+    public func avatarUpdateSequences() throws -> [String: Int] {
+        try performRead { db in
+            try Dictionary(uniqueKeysWithValues: Row.fetchAll(db, sql: "SELECT id, avatarUpdateSeq FROM session WHERE avatarUpdateSeq IS NOT NULL")
+                .map { ($0["id"] as String, $0["avatarUpdateSeq"] as Int) })
+        }
+    }
+
     /// Merges sessions from a list fetch or a `new-session` update.
     public func upsertSessions(_ incoming: [SessionRecord], reconcileComposer: SessionComposerReconciliation? = nil) throws {
         try applySessionListBatch(incoming, reconcileComposer: reconcileComposer)
@@ -188,6 +197,7 @@ public final class LocalStore: Sendable {
         metadata: VersionedPayload?,
         agentState: VersionedPayload?,
         projectId: String??,
+        avatar: AvatarDescriptor?? = nil, avatarVersion: Int? = nil, avatarUpdateSeq: Int? = nil,
         reconcileComposer: SessionComposerReconciliation? = nil
     ) throws -> Bool {
         try performWrite { db in
@@ -205,6 +215,17 @@ public final class LocalStore: Sendable {
             }
             if let projectId {
                 record.projectId = projectId
+            }
+            if let avatar {
+                let revision = avatarVersion ?? avatar?.version
+                let newer: Bool
+                if let avatarVersion, let previous = record.avatarVersion { newer = avatarVersion > previous }
+                else { newer = (avatarUpdateSeq ?? 0) > (record.avatarUpdateSeq ?? -1) }
+                if newer {
+                    record.avatar = avatar
+                    if let revision { record.avatarVersion = max(revision, record.avatarVersion ?? -1) }
+                    record.avatarUpdateSeq = avatarUpdateSeq
+                }
             }
             Self.settle(old: old, &record)
             if record != old { _ = try record.updateChanges(db, from: old) }
@@ -459,7 +480,14 @@ public final class LocalStore: Sendable {
     /// Project ids the stored sessions point at, which is the set to fetch.
     public func referencedProjectIds() throws -> [String] {
         try performRead { db in
-            try String.fetchAll(db, sql: "SELECT DISTINCT projectId FROM session WHERE projectId IS NOT NULL AND projectId != '' ORDER BY projectId")
+            try String.fetchAll(db, sql: """
+                SELECT DISTINCT linkedId FROM (
+                    SELECT COALESCE(NULLIF(TRIM(projectId), ''),
+                        CASE WHEN json_type(metadata, '$.project.id') = 'text'
+                            THEN NULLIF(TRIM(json_extract(metadata, '$.project.id')), '') END) AS linkedId
+                    FROM session
+                ) WHERE linkedId IS NOT NULL ORDER BY linkedId
+                """)
         }
     }
 
@@ -473,7 +501,7 @@ public final class LocalStore: Sendable {
             }
             for record in incoming {
                 if let existing = try ProjectRecord.fetchOne(db, key: record.id) {
-                    guard existing.metadataVersion <= record.metadataVersion else { continue }
+                    guard existing.metadataVersion <= record.metadataVersion, existing.updatedAt <= record.updatedAt else { continue }
                     if record != existing { _ = try record.updateChanges(db, from: existing) }
                 } else {
                     try record.insert(db)
@@ -843,6 +871,7 @@ public final class LocalStore: Sendable {
             fresh.thinking = false
             fresh.unread = false
             fresh.archiving = false
+            fresh.avatarVersion = incoming.avatarVersion ?? incoming.avatar?.version
             try fresh.insert(db)
             return (nil, fresh)
         }
@@ -853,6 +882,23 @@ public final class LocalStore: Sendable {
             record.active = incoming.active
             record.activeAt = incoming.activeAt
             record.projectId = incoming.projectId
+        }
+        // Revisions survive deletion, so a delayed fetch cannot resurrect art.
+        let sameAvatarCheckpoint = incoming.avatarUpdateSeq == record.avatarUpdateSeq
+        if let revision = incoming.avatarVersion,
+           revision > (record.avatarVersion ?? -1)
+            || (revision == record.avatarVersion && sameAvatarCheckpoint && incoming.updatedAt >= old.updatedAt) {
+            record.avatar = incoming.avatar
+            record.avatarVersion = revision
+        } else if incoming.avatarVersion == nil, sameAvatarCheckpoint, incoming.updatedAt >= old.updatedAt {
+            if let descriptor = incoming.avatar {
+                if descriptor.version >= (record.avatarVersion ?? -1) {
+                    record.avatar = descriptor
+                    record.avatarVersion = descriptor.version
+                }
+            } else {
+                record.avatar = nil
+            }
         }
         record.seq = max(record.seq, incoming.seq)
         if incoming.metadataVersion > record.metadataVersion

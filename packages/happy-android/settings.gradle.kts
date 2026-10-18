@@ -23,6 +23,10 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // LiveKit's audio routing dependency is published through JitPack.
+        maven("https://jitpack.io") {
+            content { includeModule("com.github.davidliu", "audioswitch") }
+        }
     }
 }
 
@@ -30,3 +34,5 @@ rootProject.name = "happy-android"
 
 include(":app")
 include(":crypto")
+include(":elevenlabs")
+project(":elevenlabs").projectDir = file("vendor/elevenlabs")

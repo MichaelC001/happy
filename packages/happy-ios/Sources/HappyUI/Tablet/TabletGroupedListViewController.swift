@@ -20,19 +20,24 @@ import UIKit
 /// fixed, as in RN, with their text drawn scaled inside. The notices are
 /// home's header, measured off the main thread at that size as home's are
 /// (docs/DYNAMIC-TYPE.md).
-final class TabletGroupedListViewController: UIViewController, UITableViewDataSource, UITableViewDelegate {
+final class TabletGroupedListViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate {
     private typealias Row = TabletGroupedRow
 
     private let context: AppContext
     private let session: AccountSession
     private(set) var model = TabletGroupedList.empty
     private let tableView = UITableView(frame: .zero, style: .plain)
+    private var ultraList: HomeUltraListAdapter?
+    let rendererPreference: HomeListRenderer
+    private var ultraText: HomeTextEnvironment?
+    private var ultraTextRequested: TextEnvironment?
+    private var ultraTextTask: Task<Void, Never>?
     /// The table has asked for its rows once; from then on it only takes
     /// changesets.
     private var tableLoaded = false
     /// The headings' and bots' heights for `model`'s rows, measured off the
     /// main thread at this screen's text size and the list's width.
-    private var headings = TabletHeadingHeights<Row.ID>()
+    private(set) var headings = TabletHeadingHeights<TabletGroupedRow.ID>()
     private let banners = HomeListHeaderView()
     private var bannerState: HomeBanners?
     /// What the header was last measured for; its height lands only for
@@ -55,6 +60,7 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
     var bottomInset: CGFloat = 0 {
         didSet {
             if bottomInset != oldValue, isViewLoaded {
+                if let ultraList { ultraList.setInsets(top: 0, bottom: bottomInset); return }
                 tableView.contentInset.bottom = bottomInset
             }
         }
@@ -63,7 +69,9 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
     init(context: AppContext, session: AccountSession) {
         self.context = context
         self.session = session
+        rendererPreference = context.account.localSettings.homeListRenderer
         super.init(nibName: nil, bundle: nil)
+        followsTextSize()
     }
 
     @available(*, unavailable)
@@ -72,6 +80,25 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
     }
 
     override func loadView() {
+        if rendererPreference == .ultraList {
+            let rendered = HomeUltraListView()
+            let adapter = HomeUltraListAdapter(view: rendered, pictures: session.avatarPictures)
+            adapter.onSelect = { [weak self] id in self?.selectUltra(id) }
+            adapter.onLongPress = { [weak self] id in
+                guard let self, self.context.account.session === self.session, let sessionID = self.ultraRow(id)?.sessionId else { return }
+                self.actions.present(sessionId: sessionID)
+            }
+            adapter.onArchive = { [weak self] id in
+                guard let self, self.context.account.session === self.session, let row = self.ultraRow(id), let sessionID = row.sessionId else { return }
+                if case .chat = row { self.kill(sessionID) } else { self.actions.archive(sessionID) }
+            }
+            adapter.onCreateWorkspace = { [weak self] id in
+                guard let self, self.context.account.session === self.session, case .workspace(let header)? = self.ultraRow(id) else { return }
+                self.startSession(in: header.place)
+            }
+            adapter.setInsets(top: 0, bottom: bottomInset)
+            ultraList = adapter; view = rendered; return
+        }
         view = tableView
     }
 
@@ -95,6 +122,7 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
             tableView.register(type, forCellReuseIdentifier: identifier)
         }
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:)))
+        longPress.delegate = self
         tableView.addGestureRecognizer(longPress)
         // Home's notices, drawn here at the person's text size.
         banners.traitOverrides.followsTextSize = true
@@ -106,8 +134,10 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
         }
         // A new text size or screen: the notices are measured again.
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self, UITraitDisplayScale.self]) { (self: Self, _) in
+            self.updateUltraList()
             self.sizeHeader()
         }
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.updateUltraList() }
         tableView.reloadData()
         tableLoaded = true
         updateBanners()
@@ -122,6 +152,7 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        updateUltraList()
         sizeHeader()
     }
 
@@ -141,6 +172,11 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
         model = next
         // Before any insert asks for a height.
         self.headings = headings
+        if ultraList != nil {
+            updateUltraList()
+            if next.offline != previous.offline { updateBanners() }
+            return changeset.touchedRows
+        }
         guard isViewLoaded, tableLoaded else { return 0 }
         if changeset.isStructural {
             let rows = { (indexes: [Int]) in indexes.map { IndexPath(row: $0, section: 0) } }
@@ -183,6 +219,7 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
     func applyHeadings(_ headings: TabletHeadingHeights<TabletGroupedRow.ID>, moved: Set<TabletGroupedRow.ID>) -> Int {
         let previousMetrics = self.headings.metrics
         self.headings = headings
+        if ultraList != nil { updateUltraList(); return moved.count }
         guard isViewLoaded, tableLoaded else { return 0 }
         let bots = botsTakingLines(from: previousMetrics)
         guard !moved.isEmpty || !bots.isEmpty else { return 0 }
@@ -208,6 +245,7 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
     /// Selects the open chat's row, wherever it moved; nothing else stays
     /// selected.
     private func applySelection() {
+        if ultraList != nil { updateUltraList(); return }
         guard isViewLoaded, tableLoaded else { return }
         let index = selectedSessionId.flatMap { id in model.rows.firstIndex { $0.sessionId == id } }
         let path = index.map { IndexPath(row: $0, section: 0) }
@@ -254,6 +292,9 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
 
     /// One configuration for every live cell.
     private func configure(_ cell: UITableViewCell, _ row: Row) {
+        if let cell = cell as? SessionRowCell { cell.avatar.pictures = session.avatarPictures }
+        if let cell = cell as? TabletWorkspaceHeaderCell { cell.avatar.pictures = session.avatarPictures }
+        if let cell = cell as? TabletArchivedCell { cell.avatar.pictures = session.avatarPictures }
         switch row {
         case .botsHeader:
             (cell as? TabletSectionHeaderCell)?.configure(Strings.Tablet.bots)
@@ -340,11 +381,12 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
         guard !state.isEmpty else {
             headerRequested = nil
             if tableView.tableHeaderView != nil { tableView.tableHeaderView = nil }
+            ultraList?.setBanner(nil, height: 0)
             return
         }
         let key = HeaderKey(
             banners: state,
-            width: tableView.bounds.width,
+            width: view.bounds.width,
             maxWidth: ContentWidth.maxWidth,
             text: TextEnvironment(traitCollection)
         )
@@ -371,7 +413,40 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
         // The words the height was measured with.
         banners.content = key.banners
         banners.frame = CGRect(x: 0, y: 0, width: key.width, height: height)
+        if let ultraList { ultraList.setBanner(banners, height: height); return }
         tableView.tableHeaderView = banners
+    }
+
+    func deactivateRenderer() { ultraTextTask?.cancel(); ultraList?.deactivate() }
+
+    private func updateUltraList() {
+        guard isViewLoaded, let ultraList else { return }
+        let text = TextEnvironment(traitCollection)
+        if text != ultraTextRequested {
+            ultraTextRequested = text
+            ultraTextTask = Task { @MainActor [weak self] in
+                let environment = await HomeTextEnvironment.make(text)
+                guard let self, !Task.isCancelled, self.ultraTextRequested == text else { return }
+                self.ultraText = environment; self.updateUltraList()
+            }
+        }
+        guard let environment = ultraText, environment.text == text else { return }
+        let bridgeModel = HomeListModel(ids: [], rows: [], avatarStyle: model.avatarStyle, avatarMonochrome: model.avatarMonochrome, grouped: true, offline: model.offline)
+        ultraList.update(.init(model: bridgeModel, width: view.bounds.width, environment: environment, dark: traitCollection.userInterfaceStyle == .dark, selected: selectedSessionId, tablet: model))
+    }
+
+    private func ultraRow(_ id: HomeListRow.ID) -> Row? {
+        model.ids.firstIndex { $0.ultraBridgeID == id }.map { model.rows[$0] }
+    }
+
+    private func selectUltra(_ id: HomeListRow.ID) {
+        guard context.account.session === session, let row = ultraRow(id) else { return }
+        switch row {
+        case .archiveToggle(let hidden): session.updateSettings(["hideInactiveSessions": .bool(!hidden)])
+        case .machine(let id?, _) where !id.isEmpty: open(.machine(id: id))
+        default: if let sessionID = row.sessionId { open(.session(id: sessionID)) }
+        }
+        applySelection()
     }
 
     // MARK: Actions
@@ -502,6 +577,13 @@ final class TabletGroupedListViewController: UIViewController, UITableViewDataSo
               let sessionId = row(at: indexPath)?.sessionId
         else { return }
         actions.present(sessionId: sessionId)
+    }
+
+    /// Only a chat starts a long press; on a heading or the archive toggle a
+    /// held finger stays a tap.
+    func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+        guard let indexPath = tableView.indexPathForRow(at: gesture.location(in: tableView)) else { return false }
+        return row(at: indexPath)?.sessionId != nil
     }
 }
 #endif

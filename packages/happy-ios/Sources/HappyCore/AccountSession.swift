@@ -14,6 +14,7 @@ public final class AccountSession: Sendable {
     /// without a store directory (in-memory, tests) get a temporary one.
     public let filesDirectory: URL
     public let sync: SyncEngine
+    public let archiveVisibilityWriter: ArchiveVisibilityWriter
     /// The New Session draft's last height, for reopening it in this account.
     public let newSessionDraftHeight = MeasuredDraftMemo()
     /// Private render payload belongs to this account, including work that
@@ -49,6 +50,7 @@ public final class AccountSession: Sendable {
     public let pendingChats = PendingChats()
     /// The session pictures the chat has decoded, this account's alone.
     public let attachmentPictures = AttachmentPictures()
+    public let avatarPictures: AvatarPictures
     /// What each file looked like when last read (the store's
     /// `sessionFileCache`), this account's alone. Disk reads stay under the
     /// prepared account directory; a nil directory keeps it in memory.
@@ -107,9 +109,18 @@ public final class AccountSession: Sendable {
         self.fileCache = SessionFileCache(directory: fileCacheDirectory)
         self.api = HappyAPI(serverURL: dependencies.serverURL, clientID: dependencies.clientID, transport: dependencies.transport)
             .authenticated(token: credentials.token)
+        self.avatarPictures = AvatarPictures(owner: keys.anonID,
+            directory: filesDirectory.map { $0.deletingLastPathComponent().appendingPathComponent("avatars", isDirectory: true) },
+            api: api, keys: keys)
         var syncOptions = SyncEngine.Options()
         syncOptions.deliveryActivity = dependencies.deliveryActivity
         self.sync = SyncEngine(api: api, store: store, keys: keys, options: syncOptions)
+        let settingsSync = self.sync
+        self.archiveVisibilityWriter = ArchiveVisibilityWriter { hidden in
+            let baseline = try store.accountSettings()?.version ?? 0
+            try await settingsSync.updateSettings(["hideInactiveSessions": .bool(hidden)])
+            return baseline
+        }
         self.sender = OutboxSender(store: store, sync: sync, filesDirectory: self.filesDirectory, spawnRequests: spawnRequests)
         self.chatFeed = LocalChatFeed(store: store)
         self.chatHistory = ChatHistory(api: api, store: store, keys: keys)
@@ -216,6 +227,8 @@ public final class AccountSession: Sendable {
     }
 
     public func stop() async {
+        await archiveVisibilityWriter.close()
+        await avatarPictures.close()
         newSessionDraftHeight.close()
         diffDocuments.close()
         diffSyntax.close()

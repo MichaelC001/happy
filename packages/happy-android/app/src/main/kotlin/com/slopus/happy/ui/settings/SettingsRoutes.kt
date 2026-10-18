@@ -33,6 +33,7 @@ import com.slopus.happy.auth.AuthState
 import com.slopus.happy.model.Machine
 import com.slopus.happy.model.MachineChoice
 import com.slopus.happy.model.Profile
+import com.slopus.happy.payments.Paywall
 import com.slopus.happy.model.collectMachineChoices
 import kotlinx.coroutines.flow.MutableStateFlow
 import com.slopus.happy.model.settings.ConnectApi
@@ -51,6 +52,8 @@ import com.slopus.happy.ui.connect.rememberTerminalConnect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import com.slopus.happy.ui.voice.voiceRoutes
+import com.slopus.happy.ui.voice.VoiceSettingsRoute
 
 @Serializable data object AccountRoute
 @Serializable data object AppearanceRoute
@@ -61,6 +64,7 @@ import kotlinx.serialization.Serializable
 
 /** Settings and its screens. [SettingsRoute] is the entry point. */
 fun NavGraphBuilder.settingsRoutes(graph: AppGraph, nav: NavHostController) {
+    voiceRoutes(graph, nav)
     composable<SettingsRoute> { SettingsIndex(graph, nav) }
     composable<AccountRoute> { Account(graph, nav) }
     composable<AppearanceRoute> { Appearance(graph, nav) }
@@ -189,6 +193,16 @@ internal fun errorAlert(alerts: Alerts): (String?) -> Unit {
     return { message -> alerts.show(Alert(title, message ?: unknown, listOf(AlertButton(ok)))) }
 }
 
+/** Support us reports unavailable billing through the same localized alert as other settings actions. */
+@Composable
+internal fun rememberSupportAction(paywall: Paywall, onError: (String?) -> Unit): HappyAction {
+    val unavailable = stringResource(R.string.settings_support_unavailable)
+    return rememberHappyAction(onError) {
+        val result = paywall.present("voluntary_support")
+        if (!result.success) onError(unavailable)
+    }
+}
+
 @Composable
 private fun SettingsIndex(graph: AppGraph, nav: NavHostController) {
     val uriHandler = LocalUriHandler.current
@@ -196,6 +210,8 @@ private fun SettingsIndex(graph: AppGraph, nav: NavHostController) {
     val api = rememberConnectApi(graph)
     val alerts = remember { Alerts() }
     val onError = errorAlert(alerts)
+    val purchases by graph.purchases.purchases.collectAsStateWithLifecycle()
+    val support = rememberSupportAction(graph.purchases, onError)
 
     val cancel = stringResource(R.string.common_cancel)
     val disconnect = stringResource(R.string.modals_disconnect)
@@ -251,7 +267,10 @@ private fun SettingsIndex(graph: AppGraph, nav: NavHostController) {
         onAccount = { nav.navigate(AccountRoute) },
         onAppearance = { nav.navigate(AppearanceRoute) },
         onAgents = { nav.navigate(AgentsRoute) },
+        onVoice = { nav.navigate(VoiceSettingsRoute) },
         onWhatsNew = { nav.navigate(ChangelogRoute) },
+        isPro = BuildConfig.DEBUG || purchases.entitlements["pro"] == true,
+        onSupport = support::run,
         onOpenUrl = { url -> openExternalUrl(uriHandler, url) },
         onVersion = {
             if (versionClicks.click()) {

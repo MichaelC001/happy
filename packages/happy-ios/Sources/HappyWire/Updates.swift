@@ -44,6 +44,31 @@ public struct NewSessionUpdate: Codable, Hashable, Sendable {
     public var activeAt: Int64?
     public var createdAt: Int64
     public var updatedAt: Int64
+    public var avatar: AvatarDescriptor?
+    public var avatarVersion: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, seq, metadata, metadataVersion, agentState, agentStateVersion, dataEncryptionKey
+        case projectId, active, activeAt, createdAt, updatedAt, avatar, avatarVersion
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        seq = try c.decodeIfPresent(Int.self, forKey: .seq)
+        metadata = try c.decodeIfPresent(String.self, forKey: .metadata)
+        metadataVersion = try c.decodeIfPresent(Int.self, forKey: .metadataVersion)
+        agentState = try c.decodeIfPresent(String.self, forKey: .agentState)
+        agentStateVersion = try c.decodeIfPresent(Int.self, forKey: .agentStateVersion)
+        dataEncryptionKey = try c.decodeIfPresent(String.self, forKey: .dataEncryptionKey)
+        projectId = try c.decodeIfPresent(String.self, forKey: .projectId)
+        active = try c.decodeIfPresent(Bool.self, forKey: .active)
+        activeAt = try c.decodeIfPresent(Int64.self, forKey: .activeAt)
+        createdAt = try c.decode(Int64.self, forKey: .createdAt)
+        updatedAt = try c.decode(Int64.self, forKey: .updatedAt)
+        avatar = try? c.decodeIfPresent(AvatarDescriptor.self, forKey: .avatar)
+        avatarVersion = (try? c.decodeIfPresent(Int.self, forKey: .avatarVersion)).flatMap { $0 >= 0 ? $0 : nil }
+    }
 
     /// The server sends the full row; older servers sent only the id, in
     /// which case the session has to be fetched.
@@ -61,7 +86,7 @@ public struct NewSessionUpdate: Codable, Hashable, Sendable {
             agentState: agentState,
             agentStateVersion: agentStateVersion ?? 0,
             dataEncryptionKey: dataEncryptionKey,
-            projectId: projectId
+            projectId: projectId, avatar: avatar, avatarVersion: avatarVersion
         )
     }
 }
@@ -72,16 +97,20 @@ public struct UpdateSessionUpdate: Decodable, Hashable, Sendable {
     public var agentState: VersionedValue?
     /// `nil`: unchanged. `.some(nil)`: unlinked from its project.
     public var projectId: String??
+    public var avatar: AvatarDescriptor??
+    public var avatarVersion: Int?
 
-    public init(id: String, metadata: VersionedValue? = nil, agentState: VersionedValue? = nil, projectId: String?? = nil) {
+    public init(id: String, metadata: VersionedValue? = nil, agentState: VersionedValue? = nil, projectId: String?? = nil, avatar: AvatarDescriptor?? = nil, avatarVersion: Int? = nil) {
         self.id = id
         self.metadata = metadata
         self.agentState = agentState
         self.projectId = projectId
+        self.avatar = avatar
+        self.avatarVersion = avatarVersion
     }
 
     private enum Keys: String, CodingKey {
-        case id, metadata, agentState, projectId
+        case id, metadata, agentState, projectId, avatar, avatarVersion
     }
 
     public init(from decoder: Decoder) throws {
@@ -89,6 +118,14 @@ public struct UpdateSessionUpdate: Decodable, Hashable, Sendable {
         id = try container.decode(String.self, forKey: .id)
         metadata = try container.decodeIfPresent(VersionedValue.self, forKey: .metadata)
         agentState = try container.decodeIfPresent(VersionedValue.self, forKey: .agentState)
+        if container.contains(.avatar), (try? container.decodeNil(forKey: .avatar)) == true {
+            avatar = .some(nil)
+        } else if let descriptor = try? container.decode(AvatarDescriptor.self, forKey: .avatar) {
+            avatar = .some(descriptor)
+        } else {
+            avatar = nil // malformed patches leave current artwork unchanged
+        }
+        avatarVersion = (try? container.decodeIfPresent(Int.self, forKey: .avatarVersion)).flatMap { $0 >= 0 ? $0 : nil }
         if container.contains(.projectId) {
             projectId = .some(try container.decodeIfPresent(String.self, forKey: .projectId))
         } else {

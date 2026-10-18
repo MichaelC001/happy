@@ -32,6 +32,12 @@ val buildCommitSha = providers.environmentVariable("HAPPY_BUILD_COMMIT_SHA").orN
 val buildCommitTimestamp = providers.environmentVariable("HAPPY_BUILD_COMMIT_TIMESTAMP").orNull
     ?: git("show", "-s", "--format=%cI", buildCommitSha ?: "HEAD")
 
+// Same public SDK key as happy-app. Supply it at build time; local builds
+// without a key keep purchases unavailable, without configuring an anonymous user.
+val revenueCatGoogleKey = providers.environmentVariable("EXPO_PUBLIC_REVENUE_CAT_GOOGLE").orNull
+    ?.takeIf { it.isNotBlank() }
+    ?: providers.gradleProperty("happy.revenueCatGoogleKey").orNull.orEmpty()
+
 // Versions follow happy-app (app.config.js, eas.json): versionName is the
 // app's `version`, read from app.config.js so the two never drift; versionCode
 // is EAS's remote, auto-incremented build number, which a store build must
@@ -85,6 +91,12 @@ android {
         versionName = versionNameValue
 
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"https://api.cluster-fluster.com\"")
+        buildConfigField("String", "REVENUE_CAT_GOOGLE_KEY", groovy.json.JsonOutput.toJson(revenueCatGoogleKey))
+        // All three RN variants currently use productionElevenLabsAgentId.
+        val voiceAgentId = Regex("""const productionElevenLabsAgentId = ['"]([^'"]+)['"]""")
+            .find(providers.fileContents(layout.projectDirectory.file("../../happy-app/app.config.js")).asText.get())
+            ?.groupValues?.get(1) ?: error("app.config.js has no elevenLabsAgentId")
+        buildConfigField("String", "ELEVENLABS_AGENT_ID", "\"$voiceAgentId\"")
         buildConfigField("String", "BUILD_COMMIT_SHA", buildCommitSha?.let { "\"$it\"" } ?: "null")
         buildConfigField("String", "BUILD_COMMIT_TIMESTAMP", buildCommitTimestamp?.let { "\"$it\"" } ?: "null")
     }
@@ -327,6 +339,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
+    implementation(project(":elevenlabs"))
 
     // QR codes (AGENTS.md "QR codes"): Google Code Scanner reads them, as
     // expo-camera's launchScanner does on Android; ZXing's encoder draws them.
@@ -340,6 +353,8 @@ dependencies {
     implementation(libs.firebase.messaging)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
+    implementation(libs.revenuecat.purchases)
+    implementation(libs.revenuecat.ui)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

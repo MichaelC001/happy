@@ -11,12 +11,14 @@ import FoundationNetworking
 final class PictureDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private final class Download {
         let limit: Int
-        let continuation: CheckedContinuation<Data?, Never>
+        let denyRedirects: Bool
+        let continuation: CheckedContinuation<HTTPResponse?, Never>
         var data = Data()
         var tooLarge = false
 
-        init(limit: Int, continuation: CheckedContinuation<Data?, Never>) {
+        init(limit: Int, denyRedirects: Bool, continuation: CheckedContinuation<HTTPResponse?, Never>) {
             self.limit = limit
+            self.denyRedirects = denyRedirects
             self.continuation = continuation
         }
     }
@@ -52,12 +54,20 @@ final class PictureDownloader: NSObject, URLSessionDataDelegate, @unchecked Send
     /// The body of a 2xx answer for an http(s) `url`, or nil: any other
     /// answer, a failure, a body past `limit` bytes, or cancellation.
     func data(_ url: URL, limit: Int) async -> Data? {
-        guard AccountPictures.isFetchable(url) else { return nil }
-        let task = TaskBox(session.dataTask(with: URLRequest(url: url)))
+        await response(HTTPRequest(method: "GET", url: url), limit: limit, denyRedirects: false)?.body
+    }
+
+    func response(_ request: HTTPRequest, limit: Int, denyRedirects: Bool = true) async -> HTTPResponse? {
+        guard AccountPictures.isFetchable(request.url), request.url.user == nil, request.url.password == nil else { return nil }
+        var raw = URLRequest(url: request.url)
+        raw.httpMethod = request.method
+        raw.httpBody = request.body
+        for (key, value) in request.headers { raw.setValue(value, forHTTPHeaderField: key) }
+        let task = TaskBox(session.dataTask(with: raw))
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 lock.withLock {
-                    downloads[task.task.taskIdentifier] = Download(limit: limit, continuation: continuation)
+                    downloads[task.task.taskIdentifier] = Download(limit: limit, denyRedirects: denyRedirects, continuation: continuation)
                 }
                 task.task.resume()
             }
@@ -84,6 +94,12 @@ final class PictureDownloader: NSObject, URLSessionDataDelegate, @unchecked Send
         guard let download = lock.withLock({ downloads.removeValue(forKey: task.taskIdentifier) }) else { return }
         let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
         let delivered = error == nil && !download.tooLarge && (200..<300).contains(status)
-        download.continuation.resume(returning: delivered ? download.data : nil)
+        download.continuation.resume(returning: delivered ? HTTPResponse(status: status, body: download.data) : nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        let deny = lock.withLock { downloads[task.taskIdentifier]?.denyRedirects ?? true }
+        completionHandler(deny ? nil : request)
     }
 }

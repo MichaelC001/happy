@@ -17,10 +17,27 @@ import com.slopus.happy.model.settings.LanguageController
 import com.slopus.happy.model.settings.SettingsRepository
 import com.slopus.happy.net.ConnectionStatus
 import com.slopus.happy.net.HappyHttp
+import com.slopus.happy.payments.PreferencesPurchasesCache
+import com.slopus.happy.payments.PurchaseAccount
+import com.slopus.happy.payments.PurchasesRepository
+import com.slopus.happy.payments.RevenueCatPurchases
 import com.slopus.happy.sync.AccountSync
 import com.slopus.happy.ui.changelog.ChangelogReadMarker
 import com.slopus.happy.ui.home.NewSessionDraftStore
 import com.slopus.happy.ui.home.PrefsReviewStamps
+import com.slopus.happy.voice.ElevenLabsTransport
+import com.slopus.happy.voice.StoreVoiceContext
+import com.slopus.happy.voice.VoiceApi
+import com.slopus.happy.voice.VoiceEngine
+import com.slopus.happy.voice.VoiceLanguages
+import com.slopus.happy.voice.VoiceOptions
+import com.slopus.happy.voice.VoicePaywall
+import com.slopus.happy.voice.VoicePreferences
+import com.slopus.happy.voice.VoiceTools
+import com.slopus.happy.voice.VoiceUpsell
+import com.slopus.happy.chat.AgentState
+import com.slopus.happy.sync.SendOptions
+import com.slopus.happy.sync.SendResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -30,6 +47,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
@@ -84,6 +102,13 @@ class AppGraph(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    val purchases = PurchasesRepository(
+        scope,
+        RevenueCatPurchases(appContext, BuildConfig.REVENUE_CAT_GOOGLE_KEY, BuildConfig.DEBUG),
+        PreferencesPurchasesCache(context.getSharedPreferences(PreferencesPurchasesCache.PREFS_NAME, Context.MODE_PRIVATE)),
+        currentAccount = { purchaseAccount() },
+    )
+
     /** The account's synced settings; a change is uploaded by the next sync. */
     val settings = SettingsRepository(store, scope, onChanged = ::requestSync)
 
@@ -100,6 +125,52 @@ class AppGraph(
     /** The signed-in account's sync, or null when signed out. */
     val account: StateFlow<AccountSync?> = accountState.asStateFlow()
 
+    val voicePreferences = VoicePreferences(context.getSharedPreferences(VoicePreferences.PREFS_NAME, Context.MODE_PRIVATE))
+
+    /** The SDK is allocated only inside connect(), never while constructing the app graph. */
+    val voice: VoiceEngine = VoiceEngine(
+        scope = scope,
+        service = VoiceApi(okHttp, clientId, { serverConfig.url.value }, { serverConfig.voiceUrl }, BuildConfig.ELEVENLABS_AGENT_ID),
+        transport = ElevenLabsTransport(appContext),
+        credentials = { (auth.state.value as? AuthState.SignedIn)?.credentials },
+        options = {
+            val values = settings.settings.value
+            val local = localSettings.values.value
+            VoiceOptions(values.voiceBypassToken, values.voiceCustomAgentId,
+                VoiceLanguages.elevenLabsCode(values.voiceAssistantLanguage),
+                VoiceUpsell.resolve(override = local.voiceUpsellOverride, overrideEnabled = BuildConfig.DEBUG || local.devModeEnabled))
+        },
+        paywall = object : VoicePaywall {
+            override fun hasPro() = purchases.hasPro()
+            override suspend fun present(flow: String) = purchases.present(flow).purchased
+        },
+        preferences = voicePreferences,
+        contextFactory = {
+            StoreVoiceContext(store, checkNotNull(accountState.value).messages.stored, scope, onSessionDeleted = ::onVoiceSessionDeleted)
+        },
+        toolsFactory = { isCurrent, onSent ->
+            // Capture this call's account, never a later sign-in or whichever session UI is now open.
+            val bound = checkNotNull(accountState.value)
+            VoiceTools(
+                send = { id, message ->
+                    check(accountState.value === bound && isCurrent())
+                    val result = bound.sender.send(id, message, SendOptions(source = "voice", isCurrent = { accountState.value === bound && isCurrent() }))
+                    check(result is SendResult.Accepted) { "Voice message was not queued" }
+                },
+                permissionOwner = { requestId -> withContext(Dispatchers.IO) {
+                    check(accountState.value === bound && isCurrent())
+                    store.sessions().firstOrNull { AgentState.parse(it.agentStateJson)?.requests?.containsKey(requestId) == true }?.id
+                } },
+                decide = { id, requestId, allow ->
+                    check(accountState.value === bound && isCurrent())
+                    if (allow) bound.sessionOps.allow(id, requestId) else bound.sessionOps.deny(id, requestId)
+                },
+                sent = onSent,
+                isCurrent = { accountState.value === bound && isCurrent() },
+            )
+        },
+    )
+
     /** The updates socket's state; disconnected when signed out. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val connectionStatus: StateFlow<ConnectionStatus> = accountState
@@ -108,9 +179,18 @@ class AppGraph(
 
     init {
         scope.launch {
+            combine(auth.state, serverConfig.url) { _, _ -> purchaseAccount() }.collect(purchases::setAccount)
+        }
+        scope.launch {
+            foreground.collect { if (it) purchases.refresh() }
+        }
+        scope.launch {
             auth.state.collect { state -> accountLock.withLock { switchAccount(state) } }
         }
     }
+
+    private fun purchaseAccount(): PurchaseAccount? = (auth.state.value as? AuthState.SignedIn)?.publicId
+        ?.takeIf { it.isNotBlank() }?.let { PurchaseAccount(serverConfig.url.value, it) }
 
     /** Ask for a delta sync now (sign-in, app back in the foreground). No-op when signed out. */
     fun requestSync() {
@@ -143,7 +223,9 @@ class AppGraph(
      */
     fun logout(): Job = scope.launch {
         accountLock.withLock {
+            voice.stop()
             (auth.state.value as? AuthState.SignedIn)?.let { signedIn -> logoutHooks.forEach { it(signedIn.credentials.token) } }
+            purchases.setAccount(null)
             stopAccount()
             withContext(Dispatchers.IO) {
                 store.clearAll()
@@ -187,9 +269,14 @@ class AppGraph(
     }
 
     private suspend fun stopAccount() {
+        voice.stop()
         val account = accountState.value ?: return
         accountState.value = null
         account.stop()
+    }
+
+    private fun onVoiceSessionDeleted(id: String) {
+        if (voice.state.value.sessionId == id) scope.launch { voice.stop() }
     }
 }
 
@@ -199,4 +286,4 @@ class AppGraph(
  * empties). The server choice, the secure store (cleared by [AuthRepository])
  * and the push token store (cleared by its own logout hook) are not here.
  */
-private val WIPED_PREFS = listOf(NewSessionDraftStore.PREFS_NAME, PrefsReviewStamps.PREFS_NAME)
+private val WIPED_PREFS = listOf(NewSessionDraftStore.PREFS_NAME, PrefsReviewStamps.PREFS_NAME, VoicePreferences.PREFS_NAME)

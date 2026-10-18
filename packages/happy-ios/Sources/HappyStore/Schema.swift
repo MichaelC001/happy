@@ -181,6 +181,28 @@ enum Schema {
             }
         }
 
+        migrator.registerMigration("v6") { db in
+            // The first v3 caches predate composerState: it was added to
+            // that migration after they had already recorded v3 as applied.
+            // Add the missing table without replacing existing selections.
+            try db.create(table: "composerState", ifNotExists: true) { t in
+                t.primaryKey("sessionId", .text)
+                t.column("values", .text).notNull()
+            }
+        }
+
+        migrator.registerMigration("v7-private-avatars") { db in
+            try db.alter(table: "session") { t in
+                t.add(column: "avatar", .text)
+                t.add(column: "avatarVersion", .integer)
+                t.add(column: "avatarUpdateSeq", .integer)
+            }
+            try db.alter(table: "project") { t in t.add(column: "avatar", .text) }
+            // Existing rows predate descriptor storage. Backfill once while
+            // keeping their offline content and the first-sync marker.
+            try db.execute(sql: "DELETE FROM syncState WHERE key = 'sessions.lastFullSync'")
+        }
+
         return migrator
     }
 }
