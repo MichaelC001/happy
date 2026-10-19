@@ -2,8 +2,9 @@
 
 The native app requires iOS 26. `Package.swift` and
 `project.yml` declare that minimum. UltraView is a direct, iOS-only SwiftPM
-dependency pinned to `163e3f0da76c3d7d3ade45297ce5da6fc7d9a7d4`; its pre-1.0
+dependency pinned to `d956de067d49022dcb9bca521c8d114df4aaae4c`; its pre-1.0
 API changes frequently. Portable core and layout code still supports Linux.
+The same dependency also powers the optional [chat renderer](CHAT-RENDERERS.md).
 
 UITableView remains the default. Settings → Appearance → Home list renderer
 selects UITableView or UltraList. `LocalSettings.homeListRenderer` persists

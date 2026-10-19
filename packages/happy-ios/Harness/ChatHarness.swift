@@ -16,7 +16,9 @@ import UIKit
 /// in.
 ///
 /// `ChatScrollProbe` reports the list to the tests as the accessibility value
-/// of an element named `chat-scroll-probe`.
+/// of an element named `chat-scroll-probe`. With `-hideKeyboardButton`, an
+/// invisible button named `harness-end-editing` under the navigation bar's
+/// right end puts the keyboard away without a gesture.
 @main
 @MainActor
 final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
@@ -52,6 +54,8 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
     #if DEBUG || HAPPY_FIXTURES
     private var homeRenderer: HomeRendererHarness?
     private var realArchive: RealArchiveHarness?
+    private var qaProbe: ChatUltraQAProbe?
+    private var qaReal: ChatUltraQAReal?
     #endif
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
@@ -63,6 +67,10 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
         self.window = window
         let arguments = ProcessInfo.processInfo.arguments
         #if DEBUG || HAPPY_FIXTURES
+        if arguments.contains("-qaRealChat") {
+            qaReal = ChatUltraQAReal(window: window)
+            return
+        }
         if arguments.contains("-real-archive") {
             realArchive = RealArchiveHarness(window: window)
             return
@@ -103,6 +111,7 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         guard let account = controller.session else { fatalError("harness has no session") }
         self.controller = controller
+        controller.localSettings.chatListRenderer = ProcessInfo.processInfo.arguments.contains("-chatUltraList") ? .ultraList : .collectionView
         let context = AppContext(account: controller, variant: .development, version: "harness")
         let chat = ChatViewController(context: context, session: account, sessionId: FixtureScenarios.prefix + fixture)
         let home = UIViewController()
@@ -114,6 +123,9 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
         let probe = ChatScrollProbe(window: window, chat: chat)
         probe.scrollTo = scrollTo
         self.probe = probe
+        #if DEBUG || HAPPY_FIXTURES
+        if ProcessInfo.processInfo.arguments.contains("-qaProbe") { qaProbe = ChatUltraQAProbe(window: window, chat: chat) }
+        #endif
         if keyboard { probe.focusComposerWhenFilled() }
     }
 }
@@ -121,6 +133,8 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
 /// Sees every touch before it is delivered, for the probe.
 final class HarnessWindow: UIWindow {
     var onTouch: ((UITouch) -> Void)?
+    /// Handler completion is separate from the display frame it schedules.
+    var afterTouch: ((UITouch) -> Void)?
     /// The last touch events, as "phase x,y view", for the tests to read.
     private(set) var events: [String] = []
 
@@ -133,6 +147,9 @@ final class HarnessWindow: UIWindow {
             onTouch?(touch)
         }
         super.sendEvent(event)
+        if event.type == .touches, let touch = event.allTouches?.first {
+            afterTouch?(touch)
+        }
     }
 }
 
@@ -149,14 +166,23 @@ final class ProbeElement: UIView {
 
 /// The chat list as the UI tests read it: its offset, insets and content,
 /// the keyboard and the dock, and what the last finger did, sampled every
-/// frame while it was down.
+/// frame while it was down and for a moment after it lifted.
+///
+/// The keyboard's top is the one the dock sits on: the layout guide's, or
+/// on UltraList what UltraView's keyboard controller reports, since the
+/// controller moves the keyboard without the guide.
 @MainActor
 final class ChatScrollProbe: NSObject {
     private let window: HarnessWindow
     private weak var chat: UIViewController?
     private let element = ProbeElement(frame: CGRect(x: 0, y: 0, width: 2, height: 2))
-    /// Runs only while a finger is down.
+    private let endEditing = UIButton(type: .custom)
+    /// Runs only while a finger is down, and for `releaseDuration` after.
     private var link: CADisplayLink?
+    /// What happens after the finger lifts: the keyboard's release.
+    private var releaseSamples: [Sample] = []
+    private var releaseEnd: CFTimeInterval?
+    private static let releaseDuration: CFTimeInterval = 0.6
     private var timer: Timer?
     private var finger: CGPoint?
     /// Frames sampled while the current finger is down.
@@ -177,6 +203,10 @@ final class ChatScrollProbe: NSObject {
         var dragging: Bool
         /// Gesture recognizers on the list that are recognizing, by class.
         var active: [String]
+        /// The dock's top as drawn, while it animates too.
+        var dockPresentedMinY: CGFloat
+        /// UltraView's keyboard controller owned the keyboard.
+        var driving: Bool
     }
 
     init(window: HarnessWindow, chat: UIViewController) {
@@ -189,6 +219,14 @@ final class ChatScrollProbe: NSObject {
         element.alpha = 0.02
         element.read = { [weak self] in self?.currentReport() ?? "{}" }
         window.addSubview(element)
+        if ProcessInfo.processInfo.arguments.contains("-hideKeyboardButton") {
+            endEditing.frame = CGRect(x: window.bounds.width - 44, y: window.safeAreaInsets.top + 52, width: 44, height: 44)
+            endEditing.alpha = 0.02
+            endEditing.backgroundColor = .black
+            endEditing.accessibilityIdentifier = "harness-end-editing"
+            endEditing.addAction(UIAction { [weak window] _ in window?.endEditing(true) }, for: .touchUpInside)
+            window.addSubview(endEditing)
+        }
         window.onTouch = { [weak self] touch in self?.touched(touch) }
         // Slow enough to leave the app idle in between: the composer's focus
         // once the rows are in.
@@ -223,6 +261,7 @@ final class ChatScrollProbe: NSObject {
         let point = touch.location(in: window)
         switch touch.phase {
         case .began:
+            finishRelease()
             finger = point
             samples = []
             sample()
@@ -238,30 +277,34 @@ final class ChatScrollProbe: NSObject {
             sample()
             finishTouch()
             finger = nil
-            link?.invalidate()
-            link = nil
+            releaseSamples = []
+            releaseEnd = CACurrentMediaTime() + Self.releaseDuration
         default:
             break
         }
     }
 
     @objc private func tick() {
-        if finger != nil { sample() }
+        if finger != nil {
+            sample()
+        } else if let end = releaseEnd {
+            if let sample = makeSample() { releaseSamples.append(sample) }
+            if CACurrentMediaTime() >= end { finishRelease() }
+        }
     }
 
     private func idleTick() {
         guard let chat, let list else { return }
         window.bringSubviewToFront(element)
-        if focusWhenFilled, list.collectionView.numberOfItems(inSection: 0) > 20,
+        if endEditing.superview != nil { window.bringSubviewToFront(endEditing) }
+        if focusWhenFilled, list.plans.count > 20, list.isDisplayReady,
            let card = Self.subview(AgentInputCardView.self, in: chat.view) {
             focusWhenFilled = false
             card.textView.becomeFirstResponder()
         }
-        if let share = scrollTo, list.collectionView.numberOfItems(inSection: 0) > 20 {
+        if let share = scrollTo, list.plans.count > 20, list.isDisplayReady {
             scrollTo = nil
-            let collection = list.collectionView
-            let maxDistance = collection.contentSize.height + collection.contentInset.top + collection.contentInset.bottom - collection.bounds.height
-            collection.contentOffset.y = max(0, maxDistance) * min(1, max(0, share)) - collection.contentInset.top
+            list.setVisibleMinY(list.maximumVisibleMinY * min(1, max(0, share)))
         }
     }
 
@@ -270,25 +313,72 @@ final class ChatScrollProbe: NSObject {
         return report(list: list, chat: chat)
     }
 
-    private func activeRecognizers(_ collection: UICollectionView) -> [String] {
-        (collection.gestureRecognizers ?? [])
+    private func activeRecognizers(_ view: UIView) -> [String] {
+        (view.gestureRecognizers ?? [])
             .filter { $0.state == .began || $0.state == .changed }
             .map { NSStringFromClass(type(of: $0)) }
     }
 
     private func keyboardTop(_ chat: UIViewController) -> CGFloat {
-        chat.view.convert(chat.view.keyboardLayoutGuide.layoutFrame, to: window).minY
+        let guideTop = chat.view.keyboardLayoutGuide.layoutFrame.minY
+        let top = (chat as? ChatViewController)?.ultraKeyboard?.keyboardTop(guideTop: guideTop) ?? guideTop
+        return chat.view.convert(CGPoint(x: 0, y: top), to: window).y
+    }
+
+    /// Who moves the keyboard: UltraView's controller, the list's system
+    /// interactive dismissal on UltraList, or the layout guide on
+    /// UICollectionView.
+    private func keyboardDriver(_ chat: UIViewController) -> String {
+        guard let keyboard = (chat as? ChatViewController)?.ultraKeyboard else { return "guide" }
+        return keyboard.isAvailable ? "controller" : "system"
+    }
+
+    private func dockView(_ chat: UIViewController) -> ChatDockView? {
+        Self.subview(ChatDockView.self, in: chat.view)
+    }
+
+    private func makeSample() -> Sample? {
+        guard let chat, let list else { return nil }
+        let dock = dockView(chat)
+        let presented = dock.map { ($0.layer.presentation() ?? $0.layer).frame.minY } ?? .nan
+        return Sample(
+            time: CACurrentMediaTime(), fingerY: finger?.y ?? .nan, offset: list.scrollOffset, keyboardTop: keyboardTop(chat),
+            contentHeight: list.contentHeight, rows: list.plans.count, visibleMinY: list.visibleMinY,
+            tracking: list.isTracking, dragging: list.isDragging,
+            active: activeRecognizers(list.scrollGestureView),
+            dockPresentedMinY: dock?.superview.map { $0.convert(CGPoint(x: 0, y: presented), to: window).y } ?? .nan,
+            driving: (chat as? ChatViewController)?.ultraKeyboard?.isDriving ?? false
+        )
     }
 
     private func sample() {
-        guard let chat, let list, let finger else { return }
-        let collection = list.collectionView
-        samples.append(Sample(
-            time: CACurrentMediaTime(), fingerY: finger.y, offset: collection.contentOffset.y, keyboardTop: keyboardTop(chat),
-            contentHeight: collection.contentSize.height, rows: collection.numberOfItems(inSection: 0), visibleMinY: list.visibleMinY,
-            tracking: collection.isTracking, dragging: collection.isDragging,
-            active: activeRecognizers(collection)
-        ))
+        guard finger != nil, let sample = makeSample() else { return }
+        samples.append(sample)
+    }
+
+    /// The moment after the finger lifted: whether the keyboard's
+    /// controller still owned it, and how the dock and the keyboard moved,
+    /// frame by frame.
+    private func finishRelease() {
+        guard releaseEnd != nil else { return }
+        releaseEnd = nil
+        link?.invalidate()
+        link = nil
+        guard let first = releaseSamples.first, let last = releaseSamples.last else { return }
+        var moves = 0
+        for (previous, next) in zip(releaseSamples, releaseSamples.dropFirst()) where abs(next.dockPresentedMinY - previous.dockPresentedMinY) > 0.25 {
+            moves += 1
+        }
+        func finite(_ value: CGFloat) -> Any { value.isFinite ? value : NSNull() }
+        var release: [String: Any] = [:]
+        release["samples"] = releaseSamples.count
+        release["driving"] = releaseSamples.contains { $0.driving }
+        release["dockStart"] = finite(first.dockPresentedMinY)
+        release["dockEnd"] = finite(last.dockPresentedMinY)
+        release["dockFramesMoved"] = moves
+        release["keyboardStart"] = first.keyboardTop
+        release["keyboardEnd"] = last.keyboardTop
+        lastTouch["release"] = release
     }
 
     /// What the finger did, from its samples: how far it, the content and
@@ -326,6 +416,7 @@ final class ChatScrollProbe: NSObject {
         touch["tracking"] = tracking
         touch["dragging"] = dragging
         touch["recognizers"] = recognizers.sorted()
+        touch["keyboardDriven"] = samples.contains { $0.driving }
         lastTouch = touch
         var trace: [String] = []
         for sample in samples {
@@ -345,16 +436,16 @@ final class ChatScrollProbe: NSObject {
     }
 
     private func report(list: ChatListView, chat: UIViewController) -> String {
-        let collection = list.collectionView
-        let inset = collection.contentInset
-        let dock = Self.subview(ChatDockView.self, in: chat.view)
+        let inset = list.contentInsets
+        let dock = dockView(chat)
         var value: [String: Any] = [:]
-        value["offset"] = collection.contentOffset.y
+        value["offset"] = list.scrollOffset
         value["visibleMinY"] = list.visibleMinY
         // How far back the reader can go.
-        value["maxDistance"] = max(0, collection.contentSize.height + inset.top + inset.bottom - list.bounds.height)
-        value["contentHeight"] = collection.contentSize.height
-        value["rows"] = collection.numberOfItems(inSection: 0)
+        value["maxDistance"] = list.maximumVisibleMinY
+        value["contentHeight"] = list.contentHeight
+        value["rows"] = list.isDisplayReady ? list.plans.count : 0
+        value["renderer"] = list.renderer.rawValue
         value["newestInset"] = inset.top
         value["oldestInset"] = inset.bottom
         let safe = chat.view.safeAreaInsets
@@ -362,11 +453,13 @@ final class ChatScrollProbe: NSObject {
         value["list"] = rect(list.convert(list.bounds, to: window)) as Any
         value["listSize"] = [list.bounds.width, list.bounds.height]
         value["dockMinY"] = dock.map { $0.convert($0.bounds, to: window).minY } as Any
+        value["dockMaxY"] = dock.map { $0.convert($0.bounds, to: window).maxY } as Any
         value["keyboardTop"] = keyboardTop(chat)
+        value["keyboard"] = keyboardDriver(chat)
         value["window"] = [window.bounds.width, window.bounds.height]
-        value["tracking"] = collection.isTracking
-        value["dragging"] = collection.isDragging
-        value["decelerating"] = collection.isDecelerating
+        value["tracking"] = list.isTracking
+        value["dragging"] = list.isDragging
+        value["decelerating"] = list.isDecelerating
         value["fingerDown"] = finger != nil
         value["lastTouch"] = lastTouch
         value["events"] = window.events

@@ -20,6 +20,11 @@ enum FixtureScenario: String, CaseIterable, Sendable {
     case long
     /// A reply streams in after the chat opens.
     case live
+    /// Async WebKit sizing and a single row beyond the bitmap height cap.
+    case diagrams
+    case giant
+    /// The newest message is a Write whose diff ends in Show more.
+    case showMore
     /// Nothing yet.
     case empty
 
@@ -31,6 +36,9 @@ enum FixtureScenario: String, CaseIterable, Sendable {
         case .sending: "Pending and failed sends"
         case .long: "Very long session"
         case .live: "Streaming reply"
+        case .diagrams: "Mermaid diagrams"
+        case .giant: "One very tall message"
+        case .showMore: "A diff past its first lines"
         case .empty: "Empty session"
         }
     }
@@ -134,6 +142,44 @@ enum FixtureScenarios {
         case .sending: sending(&builder)
         case .long: long(&builder, turns: 1500)
         case .live: live(&builder)
+        case .diagrams:
+            builder.user("Render the flow, then expand a diagram taller than the viewport.")
+            builder.agent("""
+            The list keeps its position when WebKit reports the diagram's height.
+
+            ```mermaid
+            flowchart TD
+                A[Compose] --> B[Send]
+                B --> C[Stream reply]
+                C --> D[Render markdown]
+                D --> E[Measure diagram]
+                E --> F[Keep reading position]
+            ```
+
+            [Open Happy](https://happy.engineering)
+
+            This invalid diagram keeps its error visible:
+
+            ```mermaid
+            graph TD
+                A[Unclosed node
+            ```
+
+            This diagram exceeds the height cap and scrolls inside its box:
+
+            ```mermaid
+            flowchart TD
+            \((1...45).map { "    N\($0)[Step \($0)] --> N\($0 + 1)" }.joined(separator: "\n"))
+            ```
+            """)
+        case .giant:
+            builder.user("Show one long reply so every section can be read while scrolling.")
+            let arguments = ProcessInfo.processInfo.arguments
+            let count = arguments.firstIndex(of: "-giantParagraphs").flatMap { index in
+                arguments.indices.contains(index + 1) ? Int(arguments[index + 1]) : nil
+            } ?? 350
+            builder.agent((1...min(1000, max(1, count))).map { "Section \($0). A single message remains visible through the entire conversation viewport, with selectable text and a stable reading position.\n" }.joined(separator: "\n"))
+        case .showMore: showMore(&builder)
         case .empty: break
         }
         return builder.messages
@@ -297,6 +343,16 @@ enum FixtureScenarios {
         ], state: .running, permission: ToolPermission(id: "perm-edit", status: .pending))
         b.tool("Bash", ["command": "rm -rf .build && swift build", "description": "Clean build"], state: .running,
                description: "Clean build", permission: ToolPermission(id: "perm-bash", status: .pending))
+    }
+
+    /// 301 added lines: the cut after 80 moves to the end of the change
+    /// block, at most 200 on, so the diff shows 280 and holds back 21.
+    static func showMore(_ b: inout Builder) {
+        b.user("Write the chat notes out in full.")
+        b.tool("Write", [
+            "file_path": "/Users/fixture/happy/packages/happy-ios/docs/CHAT-NOTES.md",
+            "content": (1...301).map { "Line \($0) of the full chat notes: every row is measured before it is shown." }.joined(separator: "\n"),
+        ], result: "File created successfully.")
     }
 
     static func question(_ b: inout Builder) {

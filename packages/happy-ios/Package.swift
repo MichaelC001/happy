@@ -42,9 +42,10 @@ let package = Package(
         // Official WebRTC voice transport; microphone, speaker and echo
         // cancellation use the same ElevenLabs conversation JWT as happy-app.
         .package(url: "https://github.com/elevenlabs/elevenlabs-swift-sdk.git", exact: "3.4.0"),
-        // Native Home's optional renderer. Pin the pre-1.0 API used by
+        // Native Home and chat's optional renderer. Pin the pre-1.0 API used by
         // NodeRow and the custom keyframe scroller.
-        .package(url: "https://github.com/slopus/ultraview.git", revision: "163e3f0da76c3d7d3ade45297ce5da6fc7d9a7d4"),
+        .package(url: "https://github.com/slopus/ultraview.git", revision: "d956de067d49022dcb9bca521c8d114df4aaae4c"),
+        .package(url: "https://github.com/slopus/tailcat-swift.git", revision: "70a66d473b32e5c8217cf8652237d9848af4ce3e"),
     ],
     targets: [
         .target(
@@ -66,6 +67,7 @@ let package = Package(
             dependencies: [
                 "HappyCrypto", "HappyWire", "HappyStore",
                 .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "Tailcat", package: "tailcat-swift"),
             ]
         ),
         .target(

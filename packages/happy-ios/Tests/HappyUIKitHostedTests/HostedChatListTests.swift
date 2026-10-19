@@ -25,6 +25,7 @@ private struct NoSockets: WebSocketConnector {
 /// older rows join.
 @MainActor
 final class HostedChatListTests: XCTestCase {
+    private let renderServices = RenderServices.isolated()
     override func setUp() {
         super.setUp()
         Fonts.registerBundledFonts()
@@ -67,7 +68,7 @@ final class HostedChatListTests: XCTestCase {
             snapshot: ChatSnapshot(sessionId: "s", messages: messages, isLoaded: true, hasMoreOlder: false, olderBoundary: nil, windowEpoch: 0),
             session: ChatSessionState(record: nil, settings: AccountSettings()),
             view: view,
-            render: .isolated()
+            render: renderServices
         )
     }
 
@@ -92,7 +93,7 @@ final class HostedChatListTests: XCTestCase {
 
     /// A list over the whole window with the newest page of 600 messages,
     /// at the newest message.
-    private func listInWindow() async throws -> ListUnderTest {
+    private func listInWindow(renderer: ChatListRenderer = .collectionView) async throws -> ListUnderTest {
         let scene = try await hostedActiveScene()
         let hostWindow = scene.keyWindow
         let window = hostedKeyWindow(in: scene)
@@ -103,7 +104,7 @@ final class HostedChatListTests: XCTestCase {
         let root = try XCTUnwrap(window.rootViewController?.view)
         window.layoutIfNeeded()
         let layout = screen(root)
-        let list = ChatListView(frame: layout.list)
+        let list = ChatListView(frame: layout.list, renderer: renderer)
         root.addSubview(list)
         list.layoutIfNeeded()
         list.setEdgeInsets(newest: layout.newestEdgeInset, oldest: layout.oldestEdgeInset)
@@ -111,6 +112,8 @@ final class HostedChatListTests: XCTestCase {
         let derived = try XCTUnwrap(ChatRows.derive(input(all, width: layout.list.width, grows: 0), applied: ChatRowsApplied(), planner: planner))
         list.apply(try XCTUnwrap(derived.output.list), animated: false)
         list.layoutIfNeeded()
+        let drawn = try await until { list.isDisplayReady }
+        XCTAssertTrue(drawn, "the selected renderer never drew its rows")
         return ListUnderTest(window: window, root: root, list: list, applied: derived.state, messages: all)
     }
 
@@ -181,6 +184,63 @@ final class HostedChatListTests: XCTestCase {
         // Older rows join past the oldest: nothing the reader sees moves.
         XCTAssertEqual(list.visibleMinY, place, accuracy: 0.5)
         assertNoIndicator(list, "after a page joined")
+    }
+
+    func testUltraListKeepsTheReaderThroughKeyboardDockAndOlderPages() async throws {
+        let test = try await listInWindow(renderer: .ultraList)
+        let list = test.list
+        XCTAssertNil(list.subviews.first { $0 is UICollectionView })
+        list.setVisibleMinY(list.maximumVisibleMinY / 3)
+        let scrolled = try await until { list.visibleMinY > list.bounds.height }
+        XCTAssertTrue(scrolled)
+        let place = list.visibleMinY
+        let typing = screen(test.root, keyboardTop: test.root.bounds.height - 336, composerHeight: 130)
+        list.setEdgeInsets(newest: typing.newestEdgeInset, oldest: typing.oldestEdgeInset)
+        XCTAssertEqual(list.visibleMinY, place, accuracy: 0.5)
+        let resting = screen(test.root)
+        list.setEdgeInsets(newest: resting.newestEdgeInset, oldest: resting.oldestEdgeInset)
+        XCTAssertEqual(list.visibleMinY, place, accuracy: 0.5)
+        let grown = try XCTUnwrap(ChatRows.derive(input(test.messages, width: list.bounds.width, grows: 1), applied: test.applied, planner: planner))
+        list.apply(try XCTUnwrap(grown.output.list), animated: false)
+        let paged = try await until { list.isDisplayReady && list.contentHeight > test.applied.model.contentHeight }
+        XCTAssertTrue(paged)
+        XCTAssertEqual(list.visibleMinY, place, accuracy: 0.5)
+        list.setRenderer(.collectionView)
+        XCTAssertEqual(list.visibleMinY, place, accuracy: 0.5)
+        list.setRenderer(.ultraList)
+        let switched = try await until { list.isDisplayReady && abs(list.visibleMinY - place) < 0.5 }
+        XCTAssertTrue(switched, "switching renderers preserves the reading position: expected \(place), actual \(list.visibleMinY), ready \(list.isDisplayReady), range \(String(describing: list.ultra?.list.loadedIndexRange)), views \(String(describing: list.ultra?.list.loadedItemViews.map { $0.isDisplayReady }))")
+    }
+
+    func testUltraListFollowsAStreamWithinTheExisting200PointThreshold() async throws {
+        let test = try await listInWindow(renderer: .ultraList)
+        let list = test.list
+        list.setVisibleMinY(190)
+        let positioned = try await until { abs(list.visibleMinY - 190) < 0.5 }
+        XCTAssertTrue(positioned)
+        var messages = test.messages
+        guard case .agentText(var last) = messages.removeLast() else { return XCTFail("expected an agent reply") }
+        last.text += "\n\nThe next streamed paragraph grows the newest reply."
+        messages.append(.agentText(last))
+        let streamed = try XCTUnwrap(ChatRows.derive(input(messages, width: list.bounds.width, grows: 0), applied: test.applied, planner: planner))
+        let update = try XCTUnwrap(streamed.output.list)
+        XCTAssertEqual(update.changeset.reconfigures.count, 1)
+        list.apply(update, animated: true)
+        let followed = try await until { list.isDisplayReady && abs(list.visibleMinY) < 0.5 }
+        XCTAssertTrue(followed, "an idle reader 190 points from newest follows the stream")
+    }
+
+    func testUltraListKeepsDisplayedRowsThroughAppearanceChanges() async throws {
+        let test = try await listInWindow(renderer: .ultraList)
+        let list = test.list
+        for style in [UIUserInterfaceStyle.dark, .light] {
+            let revision = list.ultra?.list.items.first?.revision
+            list.overrideUserInterfaceStyle = style
+            list.setNeedsLayout()
+            list.layoutIfNeeded()
+            let drawn = try await until { list.isDisplayReady && list.ultra?.list.items.first?.revision != revision }
+            XCTAssertTrue(drawn, "unchanged rows must redraw after appearance changes")
+        }
     }
 
     // MARK: The chat screen

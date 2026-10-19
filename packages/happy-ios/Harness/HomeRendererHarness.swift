@@ -19,6 +19,7 @@ private struct HomeHarnessNoSocket: WebSocketConnector {
 final class HomeRendererHarness {
     private var account: AccountController?
     private var archiveProbe: HomeArchiveProbe?
+    private var qaProbe: ChatUltraQAProbe?
     init(window: UIWindow, arguments: [String]) {
         func option(_ name: String) -> String? {
             arguments.firstIndex(of: name).flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
@@ -34,7 +35,10 @@ final class HomeRendererHarness {
                 try await controller.signIn(Credentials(token: "home-harness", secret: Data(repeating: 19, count: 32)))
                 guard let session = controller.session else { fatalError("Home harness missing session") }
                 self.account = controller
-                if !restoreRenderer { controller.localSettings.homeListRenderer = renderer }
+                if !restoreRenderer {
+                    controller.localSettings.homeListRenderer = renderer
+                    controller.localSettings.chatListRenderer = arguments.contains("-chatUltraList") ? .ultraList : .collectionView
+                }
                 let store = session.store
                 try await Task.detached {
                     try SeededAccount.seed(store)
@@ -68,6 +72,9 @@ final class HomeRendererHarness {
                 AppCoordinator.applyAppearance(to: navigation.navigationBar)
                 let shell = TabletShellViewController(context: context, detail: navigation)
                 window.rootViewController = shell
+                if arguments.contains("-qaProbe"), let window = window as? HarnessWindow {
+                    qaProbe = ChatUltraQAProbe(window: window, chat: nil)
+                }
                 shell.rootDidChange()
                 if archiveCount > 0, let window = window as? HarnessWindow {
                     archiveProbe = HomeArchiveProbe(window: window, snapshots: store.homeSnapshots())
@@ -162,7 +169,7 @@ final class HomeArchiveProbe: NSObject {
         idleElement.isAccessibilityElement = true
         idleElement.accessibilityIdentifier = "home.archive-scroll-idle"
         idleElement.read = { [weak window] in
-            func find(_ view: UIView) -> UltraListView? {
+            @MainActor func find(_ view: UIView) -> UltraListView? {
                 if let list = view as? UltraListView { return list }
                 for child in view.subviews { if let list = find(child) { return list } }
                 return nil

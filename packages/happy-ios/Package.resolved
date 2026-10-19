@@ -1,5 +1,5 @@
 {
-  "originHash" : "ab72194343c321b1279ce709f227a53339c3d8c61cddddb981035c42e408819c",
+  "originHash" : "a13bf58bdd10644ff53c22f670810ecc3de5ef3121b9fac41eb24090272a3abf",
   "pins" : [
     {
       "identity" : "client-sdk-swift",
@@ -56,12 +56,37 @@
       }
     },
     {
+      "identity" : "tailcat-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/slopus/tailcat-swift.git",
+      "state" : {
+        "revision" : "70a66d473b32e5c8217cf8652237d9848af4ce3e"
+      }
+    },
+    {
+      "identity" : "ultraview",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/slopus/ultraview.git",
+      "state" : {
+        "revision" : "d956de067d49022dcb9bca521c8d114df4aaae4c"
+      }
+    },
+    {
       "identity" : "webrtc-xcframework",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/livekit/webrtc-xcframework.git",
       "state" : {
         "revision" : "a41df9e9bcc7ab1d62131fda75c123ea391e5188",
         "version" : "150.7871.3"
+      }
+    },
+    {
+      "identity" : "yoga",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/facebook/yoga.git",
+      "state" : {
+        "revision" : "042f5013152eb81c1552dec945b88f7b95ca350f",
+        "version" : "3.2.1"
       }
     }
   ],
