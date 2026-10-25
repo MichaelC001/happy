@@ -20,14 +20,18 @@ final class ChatRowPlan: @unchecked Sendable {
     let alpha: CGFloat
     /// What VoiceOver reads for the row.
     let accessibilityLabel: String?
+    /// Stem Cells sidebar proposals, which the screen keeps as live views
+    /// over the row: each laid out, at its frame in row coordinates.
+    let proposals: [(artifactId: String, layout: StemCellSidebarProposalLayout, frame: CGRect)]
 
-    init(id: String, size: CGSize, items: [ChatDrawItem], hits: [ChatHit] = [], alpha: CGFloat = 1, accessibilityLabel: String? = nil) {
+    init(id: String, size: CGSize, items: [ChatDrawItem], hits: [ChatHit] = [], alpha: CGFloat = 1, accessibilityLabel: String? = nil, proposals: [(artifactId: String, layout: StemCellSidebarProposalLayout, frame: CGRect)] = []) {
         self.id = id
         self.size = size
         self.items = items
         self.hits = hits
         self.alpha = alpha
         self.accessibilityLabel = accessibilityLabel
+        self.proposals = proposals
     }
 }
 
@@ -79,6 +83,17 @@ enum ChatDrawItem {
     /// A mermaid diagram, drawn by its own page; the page reports how tall
     /// it is with `mermaidHeight`.
     case mermaid(ChatMermaid, frame: CGRect)
+    /// A picture or recording a Stem Cells agent presented, or a photo the
+    /// person sent, loaded once it is on screen.
+    case media(ChatMedia, frame: CGRect)
+    /// Live content of its own, drawn by a view that reads and follows it.
+    case embed(ChatEmbed, frame: CGRect)
+}
+
+/// What an embedded view shows.
+enum ChatEmbed: Equatable, Sendable {
+    /// A story, by its ID (`StoryInlineView`).
+    case story(String)
 }
 
 /// A diagram in a row: `index` is its place among the row's diagrams, so
@@ -94,6 +109,17 @@ struct ChatMermaid: Equatable, Sendable {
 struct ChatMermaidHeights: Equatable, Sendable {
     var row = ""
     var heights: [Int: CGFloat] = [:]
+}
+
+/// One picture or recording in a Stem Cells conversation: `key` names it
+/// to the screen's `ChatMediaSource`, and its thumbhash shows until it
+/// arrives. A recording shows its first frame under a play button.
+struct ChatMedia: Equatable, Sendable {
+    var key: String
+    var isVideo: Bool
+    var thumbhash: String?
+    /// What VoiceOver reads: its name.
+    var label: String
 }
 
 /// A picture the person attached: `ref` under the session's attachments,
@@ -124,6 +150,10 @@ enum ChatRowAction: Equatable, Sendable {
     case diffShowMore(toolId: String, chunk: Int, file: Int)
     /// A diagram's page says how tall it is, in points.
     case mermaidHeight(row: String, index: Int, height: CGFloat)
+    /// A Stem Cells picture or recording, opened whole by its `ChatMedia.key`.
+    case openMedia(String)
+    /// A Stem Cells artifact's card.
+    case openArtifact(StemCellArtifact)
 
     // Long presses
 

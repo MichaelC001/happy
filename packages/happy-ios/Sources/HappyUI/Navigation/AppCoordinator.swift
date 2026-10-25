@@ -258,15 +258,23 @@ public final class AppCoordinator {
     private func install(session: AccountSession?, pending: AccountSummary?, animated: Bool) {
         let root: UIViewController
         if let direct = context.account.direct.active {
-            root = DirectHomeViewController(context: context, id: direct.id)
+            // Stem Cells is a preview feature; a production build keeps the computer's page.
+            root = StemCellsPreference(variant: context.variant).isAvailable
+                ? StemCellsDirectHomeViewController(context: context, id: direct.id)
+                : DirectHomeViewController(context: context, id: direct.id)
         } else if let pending {
             root = AccountServerConfirmationViewController(context: context, account: pending)
         } else {
             root = session.map { HomeViewController(context: context, session: $0) }
                 ?? WelcomeViewController(context: context)
         }
-        navigation.presentedViewController?.dismiss(animated: false)
-        navigation.setViewControllers([root], animated: animated)
+        // Stem Cells' settings stays up while the profile it chose takes
+        // over underneath; anything else presented goes with the old root,
+        // and so does settings once a flow pushed in it caused the change.
+        let keepsSettings = (navigation.presentedViewController as? StemCellsSettingsNavigationController)?.keepsThroughRootChange == true
+            && (context.account.direct.active != nil || session != nil)
+        if !keepsSettings { navigation.presentedViewController?.dismiss(animated: false) }
+        navigation.setViewControllers([root], animated: animated && !keepsSettings)
         shell.rootDidChange() // Tablet: the sidebar follows the account.
         openPendingDirectLink()
         openNotificationSession()
