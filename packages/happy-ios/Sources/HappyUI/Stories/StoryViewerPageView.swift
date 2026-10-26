@@ -14,6 +14,8 @@ final class StoryViewerPageView: UIView {
     let moreButton = UIButton(type: .system)
     let heartButton = UIButton(type: .custom)
     let viewsButton = UIButton(type: .system)
+    /// A recording's sound, on or off, at the top beside the more button.
+    let soundButton = UIButton(type: .custom)
     private let topFade = CAGradientLayer()
     private let strip = UIView()
     private var segments: [StoryProgressSegment] = []
@@ -23,7 +25,7 @@ final class StoryViewerPageView: UIView {
     private let timeLabel = UILabel()
     /// Shades the side of the cube turned away.
     let shade = UIView()
-    private var chrome: [UIView] { [strip, avatar, nameLabel, timeLabel, closeButton, moreButton, heartButton, viewsButton] }
+    private var chrome: [UIView] { [strip, avatar, nameLabel, timeLabel, closeButton, moreButton, soundButton, heartButton, viewsButton] }
 
     private(set) var author: StoryFeedAuthor?
     private var photoKey: String?
@@ -69,6 +71,10 @@ final class StoryViewerPageView: UIView {
             button.tintColor = .white
             addSubview(button)
         }
+        soundButton.accessibilityIdentifier = "story-sound"
+        soundButton.adjustsImageWhenHighlighted = false
+        soundButton.isHidden = true
+        addSubview(soundButton)
         heartButton.accessibilityIdentifier = "story-heart"
         heartButton.accessibilityLabel = Strings.Stories.react
         addSubview(heartButton)
@@ -130,6 +136,28 @@ final class StoryViewerPageView: UIView {
         segments[position].progress = CGFloat(progress)
     }
 
+    /// What the sound button shows: nothing on a picture; on a recording
+    /// its sound on or off, or, with no sound at all, off and dimmed.
+    enum Sound: Equatable { case none, on, off, silent }
+
+    func setSound(_ sound: Sound) {
+        let hidden = sound == .none
+        if soundButton.isHidden != hidden {
+            soundButton.isHidden = hidden
+            setNeedsLayout()
+        }
+        soundButton.setImage(StoryEditorIcons.sound(on: sound == .on).withRenderingMode(.alwaysTemplate), for: .normal)
+        // Telegram's dims a recording without sound to half.
+        soundButton.tintColor = UIColor(white: 1, alpha: sound == .silent ? 0.5 : 1)
+        soundButton.accessibilityLabel = sound == .on ? Strings.Stories.mute : Strings.Stories.unmute
+        soundButton.accessibilityValue = switch sound {
+        case .none: nil
+        case .on: "on"
+        case .off: "off"
+        case .silent: "silent"
+        }
+    }
+
     func setHeart(_ reaction: String?) {
         let image: UIImage
         if let reaction, reaction != Strings.Stories.heart {
@@ -186,23 +214,107 @@ final class StoryViewerPageView: UIView {
         super.layoutSubviews()
         let safe = safeAreaInsets
         layout = StoryViewerLayout(size: bounds.size, safeArea: LayoutInsets(top: safe.top, left: 0, bottom: safe.bottom, right: 0))
-        canvas.frame = layout.canvas
+        // Placed by bounds and centre: opening and closing move them by
+        // their transforms.
+        place(canvas, layout.canvas)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         topFade.frame = CGRect(x: 0, y: 0, width: layout.canvas.width, height: 96)
         CATransaction.commit()
         strip.frame = bounds
         for (segment, frame) in zip(segments, StoryViewerLayout.segments(segments.count, in: layout.strip)) { segment.frame = frame }
-        avatar.frame = layout.avatar
+        place(avatar, layout.avatar)
         initials.frame = avatar.bounds
         let lineHeight: CGFloat = 17
-        nameLabel.frame = CGRect(x: layout.titleOrigin.x, y: layout.titleOrigin.y, width: layout.titleWidth, height: lineHeight)
-        timeLabel.frame = CGRect(x: layout.titleOrigin.x, y: layout.titleOrigin.y + lineHeight, width: layout.titleWidth, height: lineHeight)
+        // Without a more button the sound button takes its place.
+        let titleWidth = layout.titleWidth(withSound: !soundButton.isHidden && !moreButton.isHidden)
+        nameLabel.frame = CGRect(x: layout.titleOrigin.x, y: layout.titleOrigin.y, width: titleWidth, height: lineHeight)
+        timeLabel.frame = CGRect(x: layout.titleOrigin.x, y: layout.titleOrigin.y + lineHeight, width: titleWidth, height: lineHeight)
         closeButton.frame = layout.close
         moreButton.frame = layout.more
-        heartButton.frame = layout.heart
-        viewsButton.frame = layout.views
+        soundButton.frame = moreButton.isHidden ? layout.more : layout.sound
+        place(heartButton, layout.heart)
+        place(viewsButton, layout.views)
         shade.frame = bounds
+        if let openingMask {
+            openingMask.frame = bounds
+            openingBar.frame = CGRect(x: 0, y: layout.canvas.maxY, width: bounds.width, height: max(0, bounds.height - layout.canvas.maxY))
+        }
+    }
+
+    private func place(_ view: UIView, _ frame: CGRect) {
+        view.bounds = CGRect(origin: view.bounds.origin, size: frame.size)
+        view.center = CGPoint(x: frame.midX, y: frame.midY)
+    }
+
+    // MARK: Opening and closing
+
+    private var openingMask: UIView?
+    private let openingWindow = UIView()
+    private let openingBar = UIView()
+
+    /// From here until `endOpening`, the story shows only through a window
+    /// (and the bar under it), as it opens out of what was tapped or
+    /// closes back into it (`StoryOpeningLayout`).
+    func beginOpening() {
+        guard openingMask == nil else { return }
+        let mask = UIView(frame: bounds)
+        for view in [openingWindow, openingBar] {
+            view.backgroundColor = .black
+            mask.addSubview(view)
+        }
+        openingWindow.layer.cornerCurve = .continuous
+        openingWindow.frame = layout.canvas
+        openingWindow.layer.cornerRadius = StoryViewerLayout.Metrics.cornerRadius
+        openingBar.frame = CGRect(x: 0, y: layout.canvas.maxY, width: bounds.width, height: max(0, bounds.height - layout.canvas.maxY))
+        openingMask = mask
+        self.mask = mask
+    }
+
+    func endOpening() {
+        mask = nil
+        openingMask = nil
+        canvas.transform = .identity
+        avatar.transform = .identity
+    }
+
+    /// The window, the story in it and the author's avatar: on the source
+    /// (`atSource`) or in their places.
+    func placeOpening(_ opening: StoryOpeningLayout, atSource: Bool) {
+        openingWindow.frame = atSource ? opening.window : layout.canvas
+        openingWindow.layer.cornerRadius = atSource ? opening.windowRadius : StoryViewerLayout.Metrics.cornerRadius
+        canvas.transform = atSource ? opening.canvas.transform : .identity
+        if let placement = opening.avatar { avatar.transform = atSource ? placement.transform : .identity }
+    }
+
+    /// The controls over the story, and the shade behind them, shown or
+    /// not; the author's avatar too when it doesn't fly to the source.
+    /// Called inside an animation block; the shade animates itself.
+    func showOpeningControls(_ shown: Bool, opening: StoryOpeningLayout, duration: Double) {
+        var views = [strip, closeButton, moreButton, soundButton, nameLabel, timeLabel]
+        if opening.avatar == nil { views.append(avatar) }
+        for view in views { view.alpha = shown ? 1 : 0 }
+        let from = topFade.presentation()?.opacity ?? topFade.opacity
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        topFade.opacity = shown ? 1 : 0
+        CATransaction.commit()
+        guard duration > 0 else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = from
+        fade.toValue = topFade.opacity
+        fade.duration = duration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        topFade.add(fade, forKey: "opening")
+    }
+
+    /// The bar under the story: in its place, or dropped below the screen.
+    func placeOpeningBar(_ opening: StoryOpeningLayout, risen: Bool) {
+        for view in [heartButton, viewsButton] { view.transform = risen ? .identity : CGAffineTransform(translationX: 0, y: opening.barDrop) }
+    }
+
+    func showOpeningBar(_ shown: Bool) {
+        for view in [heartButton, viewsButton] { view.alpha = shown ? 1 : 0 }
     }
 }
 

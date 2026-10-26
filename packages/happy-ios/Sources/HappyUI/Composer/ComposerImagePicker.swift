@@ -49,6 +49,27 @@ final class ComposerImagePicker: NSObject, PHPickerViewControllerDelegate {
         present(alert)
     }
 
+    /// How many more pictures may wait in the composer; at none, says so.
+    func room() -> Int {
+        let remaining = ComposerAttachmentRules.remaining(selected: images.count)
+        if remaining == 0 { limitAlert() }
+        return remaining
+    }
+
+    /// Pictures picked elsewhere (the shared library sheet), as their bytes:
+    /// each converted and held as a paste's is, one after another so they
+    /// wait in the order they were picked.
+    func add(pictures: [Data]) {
+        let picked = Array(pictures.prefix(ComposerAttachmentRules.remaining(selected: images.count)))
+        Task { for data in picked { await stage(data, name: nil) } }
+    }
+
+    /// The pasteboard's picture, attached: what a paste in the text view
+    /// does when there is one.
+    func paste() {
+        pasteImages()
+    }
+
     func remove(id: String) {
         guard let index = images.firstIndex(where: { $0.id == id }) else { return }
         staging.remove(images[index].attachment.fileURL)
@@ -147,20 +168,23 @@ final class ComposerImagePicker: NSObject, PHPickerViewControllerDelegate {
             return
         }
         let name = ComposerAttachmentRules.pastedName(now: Date())
+        Task { await stage(data, name: name) }
+    }
+
+    /// Converts a picture's bytes off the main thread and holds it.
+    private func stage(_ data: Data, name: String?) async {
         let staging = staging
-        Task {
-            do {
-                let normalized = try await Task.detached {
-                    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
-                        throw ComposerImageError.unreadable
-                    }
-                    return try ComposerImageNormalizer.normalize(source, into: staging)
-                }.value
-                admit(normalized, name: name)
-            } catch {
-                logger.error("pasted image conversion failed: \(String(describing: error), privacy: .public)")
-                uploadFailedAlert()
-            }
+        do {
+            let normalized = try await Task.detached {
+                guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                    throw ComposerImageError.unreadable
+                }
+                return try ComposerImageNormalizer.normalize(source, into: staging)
+            }.value
+            admit(normalized, name: name)
+        } catch {
+            logger.error("picture conversion failed: \(String(describing: error), privacy: .public)")
+            uploadFailedAlert()
         }
     }
 

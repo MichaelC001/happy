@@ -1,4 +1,5 @@
 import ObjectiveC
+import UIKit
 import XCTest
 
 /// XCUITest waits up to a minute for the app to idle around every action,
@@ -405,19 +406,12 @@ final class StemCellsUITests: XCTestCase {
         app.alerts.buttons["Create"].tap()
     }
 
-    /// Prioritizing turned on from the banner, then new work: live over the
+    /// Prioritizing on (home never mentions it off), then new work: live over the
     /// events stream the row grows its icon and its name, Prioritizing puts
     /// its own row in, and its batch moves the new row where it belongs.
     func testPrioritizing() {
         home()
-        let turnOn = app.buttons["Turn on"]
-        if turnOn.waitForExistence(timeout: 5) {
-            pause(2)
-            capture("prioritizing-off")
-            turnOn.tap()
-            pause(2)
-        }
-        XCTAssertFalse(app.buttons["Turn on"].exists)
+        XCTAssertFalse(app.staticTexts["Prioritizing is off"].exists, "home mentions Prioritizing being off")
         app.descendants(matching: .any)["stem-new-work"].tap()
         let composer = app.textViews["stem-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
@@ -1188,9 +1182,18 @@ final class StemCellsUITests: XCTestCase {
         capture("settings-closed")
     }
 
-    private func pickIn(_ opener: XCUIElement, _ id: String, shot: String) {
-        XCTAssertTrue(opener.waitForExistence(timeout: 5), "no \(opener)")
-        opener.tap()
+    /// The model control's short list (Model, Effort, Provider, each
+    /// showing its value), then its `index`th setting.
+    private func open(_ control: XCUIElement, _ index: Int) {
+        XCTAssertTrue(control.waitForExistence(timeout: 5), "no \(control)")
+        control.tap()
+        let entry = app.collectionViews.buttons.element(boundBy: index)
+        XCTAssertTrue(entry.waitForExistence(timeout: 3), "the model control lists no setting \(index)")
+        entry.tap()
+    }
+
+    private func pickIn(_ control: XCUIElement, _ index: Int, _ id: String, shot: String) {
+        open(control, index)
         let row = app.descendants(matching: .any)["stem-pick:\(id)"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), "the picker has no \(id)")
         pause(1.5)
@@ -1200,22 +1203,23 @@ final class StemCellsUITests: XCTestCase {
         pause(1.5)
     }
 
-    /// The pickers: on the dock before new work exists, then in its
-    /// conversation; each send goes with what was picked. The driver reads
-    /// the modes back from the daemon.
+    /// The pickers: the model control in the dock before new work exists,
+    /// then in its conversation's bar; each send goes with what was picked.
+    /// The driver reads the modes back from the daemon.
     func testPickers() {
         home()
         pause(1.5)
         capture("dock-pickers")
+        let dock = app.descendants(matching: .any)["stem-dock-model"]
         // The provider sheet shows each account's usage; it is looked at and closed.
-        app.descendants(matching: .any)["stem-dock-provider"].tap()
+        open(dock, 2)
         XCTAssertTrue(app.descendants(matching: .any)["stem-pick:claude"].waitForExistence(timeout: 5))
         pause(3)
         capture("picker-provider")
         app.descendants(matching: .any)["stem-picker"].swipeDown(velocity: .fast)
         pause(1.5)
-        pickIn(app.descendants(matching: .any)["stem-dock-model"], "claude:anthropic/haiku-5-5", shot: "picker-model")
-        pickIn(app.descendants(matching: .any)["stem-dock-effort"], "low", shot: "picker-effort")
+        pickIn(dock, 0, "claude:anthropic/haiku-5-5", shot: "picker-model")
+        pickIn(dock, 1, "low", shot: "picker-effort")
         pause(1)
         capture("dock-picked")
 
@@ -1238,10 +1242,10 @@ final class StemCellsUITests: XCTestCase {
 
         app.swipeDown(velocity: .slow)
         pause(1)
-        pickIn(app.buttons["Model: Haiku 5.5"], "claude:anthropic/sonnet-5", shot: "chat-picker-model")
+        pickIn(app.buttons["Model: Haiku 5.5"], 0, "claude:anthropic/sonnet-5", shot: "chat-picker-model")
         // A new model starts on its own default effort.
         XCTAssertTrue(app.buttons["Effort: Medium"].waitForExistence(timeout: 3))
-        pickIn(app.buttons["Effort: Medium"], "high", shot: "chat-picker-effort")
+        pickIn(app.buttons["Effort: Medium"], 1, "high", shot: "chat-picker-effort")
         XCTAssertTrue(app.buttons["Effort: High"].waitForExistence(timeout: 3))
         composer.tap()
         composer.typeText("And now? Five words or fewer.")
@@ -1254,6 +1258,240 @@ final class StemCellsUITests: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         pause(2)
         // The dock keeps its own pick for the next new work.
-        XCTAssertTrue(app.descendants(matching: .any)["stem-dock-model"].label.contains("Haiku 5.5"))
+        XCTAssertTrue(dock.label.contains("Haiku 5.5"))
+    }
+
+    /// Rows nested under a row as desktop has them, against the computer's
+    /// side played by `family_driver.py`. A fold is the document's: one made
+    /// on the computer shows here live, and one made here reaches the
+    /// computer (`DRIVER_DOC`). Siblings reorder among themselves, a
+    /// subtask's own subtasks show and fold, one is archived, a task set
+    /// under a row renames in place, and a section's heading is deleted
+    /// with its rows left where they were.
+    func testFamily() {
+        home()
+        pause(1.5)
+        let parent = "Refactor billing service"
+        let task = row("space", parent)
+        XCTAssertTrue(task.waitForExistence(timeout: 5))
+        bringIntoView(task)
+        pause(1)
+        // One read: a row may go between two questions about it.
+        func shows(_ element: XCUIElement) -> Bool {
+            guard let shot = try? element.snapshot() else { return false }
+            return shot.frame.height > 0 && shot.frame.minY < app.frame.height && shot.frame.maxY > 0
+        }
+        func until(_ seconds: TimeInterval, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline { if condition() { return true }; pause(0.2) }
+            return condition()
+        }
+        /// A tap on a row's chevron, at its trailing end.
+        func fold(_ row: XCUIElement) {
+            app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: row.frame.maxX - 25, dy: row.frame.midY)).tap()
+        }
+        let plan = row("session", "Billing test plan")
+        let deps = row("session", "Invoice deps")
+        if !shows(plan) { fold(task) }
+        XCTAssertTrue(until(5) { shows(plan) && shows(deps) }, "the task's subtasks aren't under it")
+        capture("family-open")
+
+        // Folded and unfolded on the computer: live here.
+        print("STEM_FAMILY_FOLD false \(parent)")
+        XCTAssertTrue(until(8) { !shows(plan) }, "a fold made on the computer didn't show")
+        capture("family-folded-there")
+        pause(1)
+        print("STEM_FAMILY_FOLD true \(parent)")
+        XCTAssertTrue(until(8) { shows(plan) }, "an unfold made on the computer didn't show")
+        pause(1)
+
+        // Folded here: at once, and the computer has it.
+        fold(task)
+        XCTAssertTrue(until(0.6) { !shows(plan) }, "the fold didn't happen at once")
+        capture("family-folded-here")
+        pause(1.5)
+        print("STEM_FAMILY_READ folded-here")
+        pause(1)
+        fold(task)
+        XCTAssertTrue(until(0.6) { shows(plan) }, "the unfold didn't happen at once")
+        pause(1.5)
+        print("STEM_FAMILY_READ unfolded-here")
+
+        // A subtask's own subtasks, shown under it and folded with it.
+        // Whatever the plan's own subtasks are called: subtask rows that are none of the others.
+        let others = ["Billing test plan", "Invoice deps", "Day Trips", "Neighbourhoods", "Best train day trip"].map { "stem-row:session:\($0)" }
+        let grandchildren = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND NOT (identifier IN %@)", "stem-row:session:", others))
+        if !grandchildren.allElementsBoundByIndex.contains(where: shows) {
+            // Not shown yet: Show subtasks. Shown but folded: Expand. Both from its menu.
+            bringIntoView(plan)
+            pause(1)
+            plan.press(forDuration: 1.0)
+            let show = app.buttons["Show subtasks"]
+            let expand = app.buttons["Expand"]
+            XCTAssertTrue(show.waitForExistence(timeout: 3) || expand.exists, "a subtask with subtasks offered neither Show subtasks nor Expand")
+            capture("family-subtask-menu")
+            (show.exists ? show : expand).tap()
+        }
+        XCTAssertTrue(until(6) { grandchildren.allElementsBoundByIndex.contains(where: shows) }, "a subtask's subtasks didn't show under it")
+        pause(1)
+        capture("family-nested")
+        fold(plan)
+        XCTAssertTrue(until(0.6) { !grandchildren.allElementsBoundByIndex.contains(where: shows) }, "a subtask didn't fold")
+        pause(1.5)
+        fold(plan)
+        XCTAssertTrue(until(2) { grandchildren.allElementsBoundByIndex.contains(where: shows) })
+        pause(1.5)
+
+        // Siblings: the upper one, with its own subtasks, carried down past the
+        // lower one. Clear of the dock, and away from the menu over the row.
+        bringIntoView(plan)
+        pause(1)
+        let (upper, lower) = plan.frame.minY < deps.frame.minY ? (plan, deps) : (deps, plan)
+        capture("family-drag-before")
+        upper.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.7, thenDragTo: lower.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 3.2)), withVelocity: .slow, thenHoldForDuration: 0.8)
+        pause(1.5)
+        capture("family-drag-after")
+        XCTAssertGreaterThan(upper.frame.minY, lower.frame.minY, "the subtask didn't move past its sibling")
+        XCTAssertGreaterThan(lower.frame.minY, task.frame.minY, "the subtask left its family")
+        pause(1.5)
+        print("STEM_FAMILY_READ dragged")
+        pause(1)
+
+        // A subtask's subtask archived from its menu: gone once the computer says.
+        if let leaf = grandchildren.allElementsBoundByIndex.first(where: shows) {
+            let id = leaf.identifier
+            leaf.press(forDuration: 1.0)
+            let archive = app.buttons["Archive subtask"]
+            XCTAssertTrue(archive.waitForExistence(timeout: 3), "a subtask offered no archive")
+            XCTAssertFalse(app.buttons["Rename"].exists || app.buttons["Rename task"].exists, "a subtask offered a rename")
+            capture("family-subtask-leaf-menu")
+            archive.tap()
+            XCTAssertTrue(until(10) { !shows(app.descendants(matching: .any)[id]) }, "the archived subtask stayed")
+            capture("family-archived")
+        }
+
+        // A task set under a row renames in place, as at the top.
+        let (from, to) = row("space", "Compare home insurance").waitForExistence(timeout: 2) ? ("Compare home insurance", "Compare insurance quotes") : ("Compare insurance quotes", "Compare home insurance")
+        print("STEM_FAMILY_NEST \(from) | \(parent)")
+        let nested = row("space", from)
+        XCTAssertTrue(until(8) { shows(nested) && nested.frame.minY > task.frame.minY && nested.frame.minX >= task.frame.minX }, "the task wasn't set under the row")
+        pause(1)
+        bringIntoView(nested)
+        nested.press(forDuration: 1.0)
+        let rename = app.buttons["Rename task"]
+        XCTAssertTrue(rename.waitForExistence(timeout: 3), "a nested task offered no rename")
+        capture("family-nested-menu")
+        rename.tap()
+        let field = app.textFields["stem-rename"]
+        XCTAssertTrue(field.waitForExistence(timeout: 3))
+        field.typeText(to + "\n")
+        XCTAssertTrue(row("space", to).waitForExistence(timeout: 2), "the nested rename didn't show")
+        capture("family-nested-renamed")
+        pause(2)
+        print("STEM_FAMILY_UNNEST \(to)")
+        pause(3)
+
+        // A section's heading deleted: its rows stay, under the one above.
+        print("STEM_FAMILY_SECTION_ADD Scratch")
+        let section = row("section", "Scratch")
+        XCTAssertTrue(section.waitForExistence(timeout: 8), "the computer's section didn't show")
+        bringIntoView(section)
+        pause(1)
+        let meals = row("space", "Meals this week")
+        let mealsY = meals.frame.minY
+        section.press(forDuration: 1.0)
+        let delete = app.buttons["Delete section"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 3), "a section offered no delete")
+        capture("family-section-menu")
+        delete.tap()
+        XCTAssertTrue(until(0.8) { !section.exists }, "the heading didn't go at once")
+        XCTAssertTrue(shows(meals), "the section's rows went with it")
+        XCTAssertLessThan(meals.frame.minY, mealsY, "its rows didn't close up under the block above")
+        capture("family-section-deleted")
+        pause(2)
+        print("STEM_FAMILY_READ section-deleted")
+        pause(1)
+    }
+
+
+    /// The composer with nothing in between: new work opens straight on its
+    /// composer, + goes straight to the library, and a long press's Paste
+    /// attaches a copied picture, sent with the message. A copied recording
+    /// offers no Paste: a message carries only text and pictures.
+    func testPaste() {
+        home()
+        pause(1)
+        app.descendants(matching: .any)["stem-new-work"].tap()
+        let composer = app.textViews["stem-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.alerts.firstMatch.exists || app.sheets.firstMatch.exists, "something stood between new work and its composer")
+        pause(1)
+        capture("paste-new-work")
+
+        // + opens the shared library sheet at once; a photo picked there waits in the composer.
+        app.buttons["Add a picture"].tap()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let allow = springboard.buttons["Allow Full Access"]
+        if allow.waitForExistence(timeout: 3) { allow.tap() }
+        let library = app.descendants(matching: .any)["library-picker"]
+        XCTAssertTrue(library.waitForExistence(timeout: 5), "+ didn't open the library")
+        XCTAssertFalse(app.alerts.firstMatch.exists, "+ asked first")
+        let first = app.descendants(matching: .any)["library-cell:0"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5), "the library shows no photo")
+        pause(1)
+        first.tap()
+        pause(0.5)
+        capture("paste-plus-library")
+        app.descendants(matching: .any)["library-add"].tap()
+        let attachments = app.descendants(matching: .any).matching(identifier: "composer-attachment")
+        XCTAssertTrue(attachments.firstMatch.waitForExistence(timeout: 8), "the picked photo didn't attach")
+        pause(1)
+        capture("paste-library-attached")
+
+        // A copied picture: a long press, Paste, and it waits in the composer.
+        let size = CGSize(width: 240, height: 160)
+        let picture = UIGraphicsImageRenderer(size: size).image { context in
+            UIColor.systemOrange.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+        }
+        UIPasteboard.general.image = picture
+        composer.press(forDuration: 1.0)
+        let paste = app.menuItems["Paste"]
+        XCTAssertTrue(paste.waitForExistence(timeout: 3), "a copied picture offered no Paste")
+        capture("paste-menu")
+        paste.tap()
+        XCTAssertTrue(until(5) { attachments.count == 2 }, "the pasted picture didn't attach")
+        let attachment = attachments.firstMatch
+        pause(1)
+        capture("paste-attached")
+        composer.typeText("What colour is the plain picture? One word, no tools.")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(until(4) { !attachment.exists }, "the picture stayed in the composer")
+        let messages = app.descendants(matching: .any).matching(identifier: "stem-message")
+        let working = app.descendants(matching: .any)["stem-working"]
+        let deadline = Date().addingTimeInterval(120)
+        pause(2)
+        while Date() < deadline, messages.count < 2 || working.exists { pause(1) }
+        pause(1.5)
+        capture("paste-sent")
+        let answer = messages.allElementsBoundByIndex.map(\.label).joined(separator: " ").lowercased()
+        print("STEM_PASTE_ANSWER \(answer.suffix(200))")
+        XCTAssertTrue(answer.contains("orange"), "the agent didn't see the pasted picture: \(answer.suffix(200))")
+
+        // A copied recording: no Paste, nothing attached.
+        UIPasteboard.general.items = [["public.mpeg-4": Data(repeating: 0, count: 64)]]
+        composer.tap()
+        pause(0.5)
+        composer.press(forDuration: 1.0)
+        pause(1)
+        capture("paste-video")
+        XCTAssertFalse(app.menuItems["Paste"].exists, "a recording offered Paste")
+        XCTAssertFalse(attachment.exists)
+    }
+
+    private func until(_ seconds: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline { if condition() { return true }; pause(0.2) }
+        return condition()
     }
 }

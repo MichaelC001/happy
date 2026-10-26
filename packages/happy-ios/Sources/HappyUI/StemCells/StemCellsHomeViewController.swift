@@ -16,7 +16,7 @@ final class StemCellsHomeViewController: UIViewController {
     private let banner = StemCellsBannerView()
     private let empty = StemCellsEmptyView()
     let dockView = HomeDockView()
-    private let modelBar = StemCellModelBarView()
+    private let modelControl = StemCellModelControl()
     private var modelsWatch: StemCellsWatch?
     private let dockText = HomeDockTextStore()
     private var session: StemCellsSession?
@@ -25,8 +25,16 @@ final class StemCellsHomeViewController: UIViewController {
     private var carryWork: Task<Void, Never>?
     private var snapshot = StemCellsSnapshot()
     private var creating = false
-    /// Stories' row above the sidebar; no height while Stories are off.
+    /// Stories, in home's header: open under it, or closed into its title.
+    /// Nothing at all while Stories are off.
     private lazy var stories = StoriesHomeController(host: self)
+    /// How the stories last changed the list's room, while it is applied.
+    private var storiesChange: StoriesHomeController.Change?
+
+    /// The header home floats over this screen, for the stories to live in.
+    weak var header: HomeHeaderView? {
+        didSet { if header !== oldValue { stories.install(in: header) } }
+    }
 
     /// Every snapshot shown, for the screen around this one.
     var onSnapshot: ((StemCellsSnapshot) -> Void)?
@@ -51,8 +59,8 @@ final class StemCellsHomeViewController: UIViewController {
         view.addSubview(empty)
         view.addSubview(banner)
         view.addSubview(dockView)
-        view.addSubview(modelBar)
-        modelBar.onPress = { [weak self] kind in self?.pick(kind) }
+        dockView.accessory = modelControl
+        modelControl.onPick = { [weak self] kind in self?.pick(kind) }
         dockView.showsScrim = true
         dockView.prompt = ""
         dockView.entryButton.accessibilityIdentifier = "stem-new-work"
@@ -70,12 +78,8 @@ final class StemCellsHomeViewController: UIViewController {
         sidebar.onDrop = { [weak self] drag, to in self?.drop(drag, to: to) }
         sidebar.onDragging = { [weak self] active in self?.dragging(active) }
         sidebar.delegate = self
-        sidebar.addSubview(stories.row)
-        stories.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
-        banner.onTurnOn = { [weak self] in
-            guard let store = self?.session?.store else { return }
-            Task { await store.enablePrioritizing() }
-        }
+        stories.onInsetChange = { [weak self] change in self?.storiesMoved(change) }
+        stories.list = sidebar
         empty.onPair = { [weak self] in
             guard let self else { return }
             DirectPairingFlow.scan(context: context, on: self)
@@ -131,7 +135,7 @@ final class StemCellsHomeViewController: UIViewController {
         self.snapshot = snapshot
         onSnapshot?(snapshot)
         if previous.rows != snapshot.rows { sidebar.apply(Self.drawn(snapshot.rows)) }
-        if previous.prioritizing != snapshot.prioritizing || previous.availability != snapshot.availability || previous.error != snapshot.error || previous.stemCellError != snapshot.stemCellError {
+        if previous.availability != snapshot.availability || previous.error != snapshot.error || previous.stemCellError != snapshot.stemCellError {
             applyChrome()
         }
     }
@@ -142,14 +146,12 @@ final class StemCellsHomeViewController: UIViewController {
         empty.message = !hasComputer ? Strings.StemCells.noComputer : Strings.StemCells.unsupported
         empty.showsPair = !hasComputer
         sidebar.isHidden = !empty.isHidden
+        stories.isSuppressed = sidebar.isHidden
         let reason = { (text: String) in text.isEmpty ? Strings.StemCells.unanswered : text }
         let notice = snapshot.stemCellError.map { Strings.StemCells.newWorkFailed(reason($0)) } ?? snapshot.error.map(reason)
-        banner.configure(
-            prioritizingOff: hasComputer && snapshot.availability == .available && snapshot.prioritizing == false,
-            notice: notice
-        )
+        // Prioritizing being off is Settings' business: home says nothing of it.
+        banner.configure(notice: notice)
         dockView.isHidden = !hasComputer || snapshot.availability == .unsupported
-        modelBar.isHidden = dockView.isHidden
         view.setNeedsLayout()
     }
 
@@ -162,7 +164,7 @@ final class StemCellsHomeViewController: UIViewController {
     private func updateModelBar() {
         let models = session?.models
         let menus = models?.catalog.flatMap { catalog in models?.newWorkMode.map { StemCellModelMenus(catalog: catalog, selection: $0) } }
-        modelBar.configure(menus)
+        modelControl.configure(menus)
         view.setNeedsLayout()
     }
 
@@ -189,25 +191,50 @@ final class StemCellsHomeViewController: UIViewController {
         dockText.prepare(HomeDockController.textKey(width: bounds.width, text: TextEnvironment(traitCollection)))
         let bannerHeight = banner.isEmpty ? 0 : banner.sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height
         dockView.frame = bounds
-        let bar = modelBar.layout(field: dockView.fieldFrame)
-        // The list keeps clear of the pickers over the dock too.
-        let barHeight = modelBar.isHidden ? 0 : StemCellModelBarLayout.height + StemCellModelBarLayout.gap
-        dockView.scrimRaise = barHeight
-        let layout = StemCellsHomeLayout(size: bounds.size, contentTop: contentInsets.contentTop, chromeTop: contentInsets.chromeTop, listBottom: contentInsets.listBottom + barHeight, bannerHeight: bannerHeight, storiesHeight: sidebar.isHidden ? 0 : stories.height)
+        let layout = StemCellsHomeLayout(size: bounds.size, contentTop: contentInsets.contentTop, chromeTop: contentInsets.chromeTop, listBottom: contentInsets.listBottom, bannerHeight: bannerHeight, storiesHeight: sidebar.isHidden ? 0 : stories.inset)
         banner.frame = layout.banner
         sidebar.frame = bounds
-        stories.row.frame = layout.stories
         let insets = UIEdgeInsets(layout.listInsets)
         if sidebar.contentInset != insets {
             let atTop = sidebar.contentOffset.y <= -sidebar.contentInset.top + 1
             sidebar.contentInset = insets
             sidebar.verticalScrollIndicatorInsets = UIEdgeInsets(layout.indicatorInsets)
-            // A shrinking top (Stories turned off) leaves nothing scrolled past it.
-            if atTop || (!sidebar.isDragging && sidebar.contentOffset.y < -insets.top) { sidebar.contentOffset.y = -insets.top }
+            switch storiesChange {
+            case .held:
+                // The stories opened or closed under the finger: the list stays.
+                break
+            case .animated:
+                // They opened or closed on their own: the list goes to its new top.
+                sidebar.contentOffset.y = -insets.top
+            case .immediate, nil:
+                // A shrinking top (Stories turned off) leaves nothing scrolled past it.
+                if atTop || (!sidebar.isDragging && sidebar.contentOffset.y < -insets.top) { sidebar.contentOffset.y = -insets.top }
+            }
         }
         empty.frame = layout.empty
-        modelBar.frame = bounds
-        modelBar.place(field: bar.frame.isEmpty ? .zero : dockView.fieldFrame)
+    }
+
+    override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        if parent == nil { header = nil }
+    }
+
+    /// The stories' room above the list changed: the list keeps still under
+    /// a finger, and otherwise moves to its new top, animated as Telegram's
+    /// chat list scrolls to its stories.
+    private func storiesMoved(_ change: StoriesHomeController.Change) {
+        storiesChange = change
+        defer { storiesChange = nil }
+        view.setNeedsLayout()
+        switch change {
+        case .held, .immediate:
+            view.layoutIfNeeded()
+        case .animated:
+            let animator = UIViewPropertyAnimator(duration: 0.3, controlPoint1: CGPoint(x: 0.33, y: 0.52), controlPoint2: CGPoint(x: 0.25, y: 0.99)) { [weak self] in
+                self?.view.layoutIfNeeded()
+            }
+            animator.startAnimation()
+        }
     }
 
     // MARK: Acts
@@ -283,9 +310,19 @@ final class StemCellsHomeViewController: UIViewController {
                     self?.sidebar.afterMenuCloses { rename.begin() }
                 })
             }
+            // Only the heading goes: its rows join the block above.
+            items.append(UIMenu(options: .displayInline, children: [
+                UIAction(title: Strings.StemCells.deleteSection, image: StemCellsGlyphs.image("trash"), attributes: .destructive) { _ in
+                    StemCellsHaptics.play(.putAway)
+                    Task { await store.attentionInput(); await store.removeSection(row.nodeId) }
+                },
+            ]))
         case .space:
             let openTitle = row.targetKind == "bot" ? Strings.StemCells.openBot : Strings.StemCells.open
             items.append(UIAction(title: openTitle, image: StemCellsGlyphs.image("open")) { [weak self] _ in self?.open(row) })
+            if row.collapsed != nil {
+                items.append(UIAction(title: row.collapsed == true ? Strings.StemCells.unfold : Strings.StemCells.fold, image: StemCellsGlyphs.image(row.collapsed == true ? "chevron-down" : "chevron-right")) { [weak self] _ in self?.fold(row) })
+            }
             // Opening comes first, then what the row shows under it.
             if row.hasHiddenSessions {
                 items.append(UIAction(title: Strings.StemCells.showSubtasks, image: StemCellsGlyphs.image("eye")) { _ in Task { await store.revealSessions(row.nodeId, sessions: row.sessions) } })
@@ -314,7 +351,25 @@ final class StemCellsHomeViewController: UIViewController {
             }
             if !leaving.isEmpty { items.append(UIMenu(options: .displayInline, children: leaving)) }
         case .session:
+            // A subtask as desktop offers it: no rename (its title is the
+            // agent's own), its subtasks, and archiving it.
             items.append(UIAction(title: Strings.StemCells.open, image: StemCellsGlyphs.image("open")) { [weak self] _ in self?.open(row) })
+            if row.collapsed != nil {
+                items.append(UIAction(title: row.collapsed == true ? Strings.StemCells.unfold : Strings.StemCells.fold, image: StemCellsGlyphs.image(row.collapsed == true ? "chevron-down" : "chevron-right")) { [weak self] _ in self?.fold(row) })
+            }
+            if row.hasHiddenSessions {
+                items.append(UIAction(title: Strings.StemCells.showSubtasks, image: StemCellsGlyphs.image("eye")) { _ in Task { await store.revealSessions(row.nodeId, sessions: row.sessions) } })
+            }
+            if row.hasShownSessions {
+                items.append(UIAction(title: Strings.StemCells.hideSubtasks, image: StemCellsGlyphs.image("eye-off")) { _ in Task { await store.hideSessions(row.nodeId) } })
+            }
+            let leaving = closing(row).map { act in
+                UIAction(title: act.title, image: StemCellsGlyphs.image(act.icon), attributes: act.destructive ? .destructive : []) { _ in
+                    StemCellsHaptics.play(.putAway)
+                    act.run()
+                }
+            }
+            if !leaving.isEmpty { items.append(UIMenu(options: .displayInline, children: leaving)) }
         default:
             return nil
         }
@@ -345,7 +400,11 @@ final class StemCellsHomeViewController: UIViewController {
     /// named closes; a task is left, and archived too when the person may;
     /// a bot is archived. Never Happy.
     private func closing(_ row: StemCellsRow) -> [(title: String, short: String, icon: String, destructive: Bool, run: () -> Void)] {
-        guard let store = session?.store, row.kind == .space, !row.isHappy else { return [] }
+        guard let store = session?.store, !row.isHappy else { return [] }
+        if row.kind == .session, let agentId = row.agentId {
+            return [(Strings.StemCells.archiveSubtask, Strings.StemCells.swipeArchive, "archive", true, { Task { await store.archiveSubtask(agentId) } })]
+        }
+        guard row.kind == .space else { return [] }
         if row.isUntouchedStemCell, let spaceId = row.spaceId {
             return [(Strings.StemCells.closeNewWork, Strings.StemCells.swipeClose, "close", true, { Task { await store.discard(spaceId) } })]
         }
@@ -396,6 +455,8 @@ final class StemCellsHomeViewController: UIViewController {
     }
 
     private func dragging(_ active: Bool) {
+        // A carry scrolls the list near its edges: not a pull on the stories.
+        stories.carrying = active
         guard let store = session?.store else { return }
         inOrder {
             if active { await store.attentionInput() }
@@ -417,18 +478,31 @@ final class StemCellsHomeViewController: UIViewController {
 extension StemCellsHomeViewController: UIScrollViewDelegate {
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         sidebar.closeSwipe(animated: true)
+        stories.listWillBeginDragging()
         // Scrolling is being in the list: Prioritizing's batches wait.
         if let store = session?.store { Task { await store.attentionInput() } }
     }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        stories.listDidScroll()
+    }
+
+    func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+        stories.listWillEndDragging(target: targetContentOffset)
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        stories.listDidEndDragging(decelerate: decelerate)
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        stories.listDidEndDecelerating()
+    }
 }
 
-/// The note above the list: Prioritizing is off, with the one way to turn
-/// it on, or the last thing the computer refused.
+/// The note above the list: the last thing the computer refused.
 final class StemCellsBannerView: UIView {
-    var onTurnOn: (() -> Void)?
     private let title = UILabel()
-    private let detail = UILabel()
-    private let button = UIButton(type: .system)
     private let card = UIView()
     private(set) var isEmpty = true
 
@@ -440,39 +514,21 @@ final class StemCellsBannerView: UIView {
         addSubview(card)
         title.font = StemCellsFonts.ui(.semiBold, size: 15)
         title.textColor = UIColor(Palette.stemCellsRowTextActive)
-        detail.font = StemCellsFonts.ui(.regular, size: 14)
-        detail.textColor = UIColor(Palette.stemCellsRowText)
-        detail.numberOfLines = 0
-        var configuration = UIButton.Configuration.filled()
-        configuration.cornerStyle = .capsule
-        configuration.baseBackgroundColor = UIColor(Palette.stemCellsRowTextActive)
-        configuration.baseForegroundColor = UIColor(Palette.groupedBackground)
-        configuration.attributedTitle = AttributedString(Strings.StemCells.turnOn, attributes: AttributeContainer([.font: StemCellsFonts.ui(.semiBold, size: 14)]))
-        configuration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 14, bottom: 6, trailing: 14)
-        button.configuration = configuration
-        button.addAction(UIAction { [weak self] _ in self?.onTurnOn?() }, for: .touchUpInside)
-        for view in [title, detail, button] { card.addSubview(view) }
+        card.addSubview(title)
         isHidden = true
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    func configure(prioritizingOff: Bool, notice: String?) {
-        isEmpty = !prioritizingOff && notice == nil
+    func configure(notice: String?) {
+        isEmpty = notice == nil
         isHidden = isEmpty
-        button.isHidden = !prioritizingOff
-        title.text = prioritizingOff ? Strings.StemCells.prioritizingOff : notice
-        detail.text = prioritizingOff ? Strings.StemCells.prioritizingOffDetail : nil
-        detail.isHidden = !prioritizingOff
+        title.text = notice
         setNeedsLayout()
     }
 
     private func layout(width: CGFloat) -> StemCellsBannerLayout {
-        StemCellsBannerLayout(
-            width: width, title: title.measurable,
-            detail: detail.isHidden ? nil : detail.measurable,
-            button: button.isHidden ? nil : button.sizeThatFits(.zero)
-        )
+        StemCellsBannerLayout(width: width, title: title.measurable, detail: nil, button: nil)
     }
 
     override func sizeThatFits(_ size: CGSize) -> CGSize {
@@ -484,8 +540,6 @@ final class StemCellsBannerView: UIView {
         let layout = layout(width: bounds.width)
         card.frame = layout.card
         title.frame = layout.title
-        detail.frame = layout.detail ?? .zero
-        button.frame = layout.button ?? .zero
     }
 }
 

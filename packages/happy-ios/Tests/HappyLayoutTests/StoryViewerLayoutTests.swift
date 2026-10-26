@@ -11,8 +11,10 @@ final class StoryViewerLayoutTests: XCTestCase {
         XCTAssertEqual(layout.avatar, CGRect(x: 12, y: 80, width: 32, height: 32))
         XCTAssertEqual(layout.close, CGRect(x: 352, y: 64, width: 50, height: 64))
         XCTAssertEqual(layout.more, CGRect(x: 310, y: 64, width: 50, height: 64))
+        XCTAssertEqual(layout.sound, CGRect(x: 265, y: 64, width: 50, height: 64))
         XCTAssertEqual(layout.titleOrigin, CGPoint(x: 54, y: 79))
         XCTAssertEqual(layout.titleWidth, 256)
+        XCTAssertEqual(layout.titleWidth(withSound: true), 211)
         XCTAssertEqual(layout.bar, CGRect(x: 0, y: 776, width: 402, height: 64))
         XCTAssertEqual(layout.heart, CGRect(x: 350, y: 780, width: 44, height: 44))
         XCTAssertEqual(layout.views, CGRect(x: 8, y: 780, width: 201, height: 44))
@@ -88,5 +90,26 @@ final class StoryCanvasLayoutTests: XCTestCase {
         let caption = StoryCanvasLayout.caption(textHeight: 39.2, canvas: canvas)
         XCTAssertEqual(caption.text, CGRect(x: 16, y: 584, width: 328, height: 40))
         XCTAssertEqual(caption.fade, CGRect(x: 0, y: 520, width: 360, height: 120))
+        XCTAssertEqual(caption.scroll, CGRect(x: 0, y: 0, width: 360, height: 632))
+    }
+
+    func testAnOpenCaptionGrowsUpFromItsLastLine() {
+        // Folded to three lines; nine in full fit under the header.
+        let caption = StoryCanvasLayout.caption(textHeight: 60, fullHeight: 179.5, canvas: canvas)
+        XCTAssertEqual(caption.text, CGRect(x: 16, y: 564, width: 328, height: 60))
+        XCTAssertEqual(caption.openText, CGRect(x: 16, y: 444, width: 328, height: 180))
+        XCTAssertEqual(caption.shade, CGRect(x: 0, y: 380, width: 360, height: 260))
+        XCTAssertEqual(caption.content, CGSize(width: 360, height: 632))
+        XCTAssertFalse(caption.scrolls)
+    }
+
+    func testALongOpenCaptionStartsUnderTheHeaderAndScrolls() {
+        let caption = StoryCanvasLayout.caption(textHeight: 60, fullHeight: 900, canvas: canvas, bottomInset: 60, topInset: 72)
+        XCTAssertEqual(caption.text, CGRect(x: 16, y: 520, width: 328, height: 60))
+        XCTAssertEqual(caption.scroll, CGRect(x: 0, y: 0, width: 360, height: 588))
+        XCTAssertEqual(caption.openText, CGRect(x: 16, y: 72, width: 328, height: 900))
+        XCTAssertEqual(caption.shade, CGRect(x: 0, y: 8, width: 360, height: 632))
+        XCTAssertEqual(caption.content, CGSize(width: 360, height: 980))
+        XCTAssertTrue(caption.scrolls)
     }
 }

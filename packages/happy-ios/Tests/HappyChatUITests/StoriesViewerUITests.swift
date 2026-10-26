@@ -35,6 +35,17 @@ final class StoriesViewerUITests: XCTestCase {
         add(attachment)
     }
 
+    /// The row starts closed into the title, as Telegram's does: its
+    /// avatars there open it.
+    private func openRow() {
+        guard field("header") != "open" else { return }
+        let collapsed = element("stories-collapsed")
+        XCTAssertTrue(collapsed.waitForExistence(timeout: 6))
+        collapsed.tap()
+        wait("header", "open", "tapping the avatars didn't open the row")
+        pause(0.6)
+    }
+
     private func tap(_ x: CGFloat, _ y: CGFloat) {
         app.coordinate(withNormalizedOffset: CGVector(dx: x, dy: y)).tap()
     }
@@ -44,10 +55,107 @@ final class StoriesViewerUITests: XCTestCase {
     /// the reaction bubble and the heart react, holding the heart offers
     /// other emoji, a swipe turns the cube to the next author and a drag
     /// down closes.
+    /// Filmed ten times slower: the story opens out of Ana's circle and
+    /// closes back into it, as Telegram's does.
+    func testOpeningFromTheCircle() {
+        app.terminate()
+        app.launchArguments += ["-storiesSlowMotion", "10"]
+        app.launch()
+        let ana = element("story-circle:Ana")
+        XCTAssertTrue(ana.waitForExistence(timeout: 8))
+        openRow()
+        pause(4)
+        ana.tap()
+        wait("viewer", "1", timeout: 10, "the viewer never opened")
+        pause(5)
+        capture("opened")
+        element("story-close").tap()
+        wait("viewer", "0", timeout: 10, "the viewer never closed")
+        pause(5)
+        capture("closed")
+    }
+
+    /// A recording's sound button, as Telegram's: on at first, off and on
+    /// again by a tap; a recording without sound dims it, and a tap says so
+    /// and holds the story until the next touch.
+    func testVideoSound() {
+        app.terminate()
+        app.launchArguments += ["-storiesVideo"]
+        app.launch()
+        let ana = element("story-circle:Ana")
+        XCTAssertTrue(ana.waitForExistence(timeout: 8))
+        openRow()
+        ana.tap()
+        wait("viewer", "1", "the viewer never opened")
+        wait("sound", "on", timeout: 8, "no sound button on a recording with sound")
+        XCTAssertEqual(field("muted"), "0")
+        let sound = element("story-sound")
+        pause(0.5)
+        capture("sound-on")
+        sound.tap()
+        wait("sound", "off", "a tap didn't turn the sound off")
+        XCTAssertEqual(field("muted"), "1", "the player still plays its sound")
+        capture("sound-off")
+        sound.tap()
+        wait("sound", "on", "a second tap didn't turn it on")
+        XCTAssertEqual(field("muted"), "0")
+
+        // The silent one.
+        tap(0.85, 0.5)
+        wait("position", "1")
+        wait("sound", "silent", timeout: 8, "a recording without sound isn't marked so")
+        sound.tap()
+        let tooltip = element("stories-tooltip")
+        XCTAssertTrue(tooltip.waitForExistence(timeout: 3), "no word that it has no sound")
+        XCTAssertEqual(tooltip.label, "This video has no sound")
+        wait("paused", "1", "the story ran on under the tooltip")
+        pause(0.5)
+        capture("no-sound")
+        // The touch that puts it away goes no further: still the same frame.
+        tap(0.85, 0.5)
+        pause(0.5)
+        XCTAssertFalse(tooltip.exists)
+        XCTAssertEqual(field("position"), "1", "the touch on the tooltip turned the frame")
+        wait("paused", "0")
+    }
+
+    /// A conversation's story card through its states: a draft with Post
+    /// and Edit, Post spinning then "Posted" after a ring, opening the
+    /// viewer, and deleted, a mark and the words where it was.
+    func testCardStates() {
+        app.terminate()
+        app.launchArguments += ["-storiesCard", "-storiesSlowMotion", "4"]
+        app.launch()
+        wait("card", "draft", timeout: 10, "the card never drew the draft")
+        let post = element("story-inline-post")
+        XCTAssertTrue(post.waitForExistence(timeout: 4))
+        pause(2)
+        capture("card-draft")
+        post.tap()
+        wait("card", "posted", timeout: 10, "Post didn't post")
+        let status = element("story-inline-status")
+        XCTAssertEqual(status.label, "Posted")
+        XCTAssertFalse(post.exists && post.isHittable, "Post stayed after posting")
+        pause(2)
+        capture("card-posted")
+        element("story-inline:d1").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        wait("viewer", "1", timeout: 8, "the posted card didn't open the viewer")
+        pause(3)
+        element("story-close").tap()
+        wait("viewer", "0", timeout: 8)
+        pause(2)
+        element("harness-delete-card").tap()
+        wait("card", "deleted", timeout: 10, "the card didn't show the story deleted")
+        XCTAssertTrue(app.staticTexts["This story was deleted"].exists)
+        pause(2)
+        capture("card-deleted")
+    }
+
     func testSomeoneElsesStories() {
         let steve = element("story-circle:Steve")
         XCTAssertTrue(steve.waitForExistence(timeout: 8), "no ring for Steve")
         pause(1)
+        openRow()
         capture("row")
         steve.tap()
         wait("viewer", "1", "the viewer never opened")
@@ -61,6 +169,10 @@ final class StoriesViewerUITests: XCTestCase {
         XCTAssertTrue(canvas.waitForExistence(timeout: 3))
         canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.6)).tap()
         wait("reaction", "🔥", "the bubble didn't react")
+        // Thrown out around the bubble, as Telegram's reaction effect is.
+        XCTAssertTrue(field("trail")?.contains("burst") == true, probe)
+        pause(0.15)
+        capture("reacted-fire-burst")
         pause(1)
         capture("reacted-fire")
         // Tapped again, the reaction goes.
@@ -70,6 +182,8 @@ final class StoriesViewerUITests: XCTestCase {
         // The heart reacts with ❤️; held, it offers the others.
         element("story-heart").tap()
         wait("reaction", "❤️")
+        pause(0.15)
+        capture("reacted-heart-burst")
         pause(0.6)
         element("story-heart").press(forDuration: 0.6)
         XCTAssertTrue(element("story-reaction-picker").waitForExistence(timeout: 3))
@@ -110,6 +224,8 @@ final class StoriesViewerUITests: XCTestCase {
         wait("viewer", "0", "a drag down didn't close it")
         pause(1)
         capture("closed")
+        // Everything of Steve's seen: his ring has gone grey.
+        XCTAssertFalse(steve.label.contains("new"), "Steve's ring still says new: \(steve.label)")
         let haptics = field("haptics") ?? ""
         for moment in ["open", "react", "advance"] { XCTAssertTrue(haptics.contains(moment), "no \(moment) haptic in \(haptics)") }
     }
@@ -121,6 +237,7 @@ final class StoriesViewerUITests: XCTestCase {
         let mine = element("story-circle:self")
         XCTAssertTrue(mine.waitForExistence(timeout: 8))
         pause(1)
+        openRow()
         mine.tap()
         wait("viewer", "1")
         wait("author", "0")
@@ -134,8 +251,35 @@ final class StoriesViewerUITests: XCTestCase {
         wait("paused", "1")
         pause(1)
         capture("viewers")
-        app.buttons["Done"].tap()
+        // Telegram's sheet: edge to edge, down to the foot, half open, no Done.
+        let sheet = element("story-viewers")
+        let screen = app.windows.firstMatch.frame
+        XCTAssertEqual(sheet.frame.minX, 0)
+        XCTAssertEqual(sheet.frame.width, screen.width)
+        XCTAssertGreaterThanOrEqual(sheet.frame.maxY, screen.maxY)
+        XCTAssertEqual(sheet.frame.minY, screen.height - max(100, screen.height - 337) + 12, accuracy: 1)
+        XCTAssertFalse(app.buttons["Done"].exists, "the sheet still has a Done")
+        // Dragged up by its list it opens full, not scrolling the list, and
+        // by its header down again to half.
+        let title = element("story-viewers-title")
+        element("story-viewer:Maya Okafor").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        pause(0.8)
+        XCTAssertEqual(sheet.frame.minY, 72, accuracy: 1, "a drag up didn't open the sheet full")
+        capture("viewers-full")
+        title.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        pause(0.8)
+        XCTAssertEqual(sheet.frame.minY, screen.height - max(100, screen.height - 337) + 12, accuracy: 1, "a drag down didn't bring the sheet back to half")
+        // A tap above it closes it.
+        tap(0.5, 0.2)
         wait("paused", "0", "closing the list didn't resume")
+        // Swiped up, as Telegram's, the story opens who has seen it too.
+        let story = element("story-canvas")
+        story.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7)).press(forDuration: 0.05, thenDragTo: story.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25)), withVelocity: .fast, thenHoldForDuration: 0)
+        XCTAssertTrue(element("story-viewer:Steve Korshakov").waitForExistence(timeout: 4), "a swipe up didn't open the viewers — probe: \(probe)")
+        pause(0.8)
+        // A drag down closes it.
+        element("story-viewers-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)), withVelocity: .fast, thenHoldForDuration: 0)
+        wait("paused", "0", "dragging the list down didn't close it")
 
         // The link pill at (0.5, 0.82): its sheet first, never the browser.
         let canvas = element("story-canvas")

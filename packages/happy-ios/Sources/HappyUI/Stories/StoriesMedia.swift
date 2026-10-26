@@ -90,6 +90,21 @@ final class StoriesMedia {
         AVPlayer(playerItem: AVPlayerItem(asset: stream(storyId, frame).asset()))
     }
 
+    /// A conversation's picture, before a story holds it.
+    func assetImage(_ asset: StoryAsset, pixels: Int) async -> UIImage? {
+        let client = client
+        return await picture("asset/\(DirectAgentClient.path(asset))", pixels: pixels) { try? await client.asset(asset).body }
+    }
+
+    /// A player for a conversation's recording, before a story holds it.
+    func player(_ asset: StoryAsset) -> AVPlayer {
+        let client = client
+        let stream = StoriesByteStream(name: "asset", mimeType: "video/mp4") { range in
+            try await client.asset(asset, range: range)
+        }
+        return AVPlayer(playerItem: AVPlayerItem(asset: stream.asset()))
+    }
+
     private func stream(_ storyId: String, _ frame: StoryFrame) -> StoriesByteStream {
         let key = Self.key(storyId, frame.id)
         if let stream = streams[key] { return stream }

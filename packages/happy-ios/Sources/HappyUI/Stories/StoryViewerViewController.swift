@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import AVFoundation
 import HappyCore
 import HappyLayout
 import UIKit
@@ -11,8 +12,20 @@ import UIKit
 final class StoryViewerViewController: UIViewController, UIGestureRecognizerDelegate {
     /// The person asked for a story's conversation (their own).
     var onOpenConversation: ((StorySource) -> Void)?
-    /// The circle the viewer opened from, which it closes into.
+    /// The viewer went away.
+    var onClose: (() -> Void)?
+    /// The viewer starts going away, back into what it opened from.
+    var onClosing: (() -> Void)?
+    /// The circle the viewer opened from.
     weak var origin: UIView?
+    /// The circle of an author by key, in the row it opened from: it closes
+    /// into the one of whoever it shows then, or falls away without one.
+    var originFor: ((String) -> UIView?)?
+
+    var closingOrigin: UIView? {
+        guard let originFor else { return origin }
+        return authors.indices.contains(authorIndex) ? originFor(authors[authorIndex].key) : nil
+    }
 
     private let session: StoriesSession
     private var authors: [StoryFeedAuthor]
@@ -43,7 +56,16 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
     /// open: one opened from a conversation may be out of the feed.
     private let opened: String?
 
-    private enum Pause: Hashable { case hold, drag, sheet, background, picker, appearing }
+    private enum Pause: Hashable { case hold, drag, sheet, background, picker, appearing, caption, tooltip }
+    /// A recording's sound, as Telegram's viewer keeps it while open: at
+    /// first as the phone's ringer switch has it (and with other audio),
+    /// then off or on, past the switch, by the sound button or a volume
+    /// button.
+    enum Audio { case ambient, off, on }
+    private(set) var audio = Audio.ambient
+    private var volume: NSKeyValueObservation?
+    private var restoreCategory: AVAudioSession.Category?
+    private weak var tooltip: StoriesTooltipView?
     private enum Drag { case none, sideways(next: Int), down }
 
     /// The turn between two authors, run a frame at a time.
@@ -84,6 +106,8 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
     static var showScale: Double = 1
     /// The last few things the viewer did, for the harness to report.
     private(set) var trail: [String] = []
+    /// The reaction effect playing, over everything.
+    private weak var burst: StoryReactionBurstView?
 
     private func note(_ step: String) {
         trail.append(step)
@@ -135,17 +159,42 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
         startTicking()
     }
 
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        guard isBeingDismissed || presentingViewController == nil else { return }
+        // However it goes, its sound stops as it starts to.
+        page.canvas.pause()
+        neighbor.canvas.pause()
+        tooltip?.dismiss()
+        onClosing?()
+        onClosing = nil
+    }
+
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         guard isBeingDismissed || presentingViewController == nil else { return }
         finish()
+        onClose?()
+        onClose = nil
     }
 
     private func finish() {
         link?.invalidate(); link = nil
+        volume?.invalidate(); volume = nil
         holdTimer?.invalidate(); holdTimer = nil
         page.canvas.stop()
         neighbor.canvas.stop()
+        // The players gone, the session goes back to what it was and lets
+        // other audio back; ambient for the default solo ambient, which
+        // would stop other apps' audio again.
+        if let restoreCategory {
+            self.restoreCategory = nil
+            let session = AVAudioSession.sharedInstance()
+            if ![.playAndRecord, .record].contains(session.category) {
+                try? session.setCategory(restoreCategory == .soloAmbient ? .ambient : restoreCategory)
+                try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            }
+        }
         watch?.invalidate(); watch = nil
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers = []
@@ -165,10 +214,14 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
     }
 
     private func wire(_ page: StoryViewerPageView) {
+        // The caption opened in full holds the story still, as Telegram's.
+        page.canvas.onCaptionExpanded = { [weak self] open in self?.pause(.caption, open) }
         page.closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
         page.moreButton.addTarget(self, action: #selector(moreTapped), for: .touchUpInside)
         page.viewsButton.addTarget(self, action: #selector(viewsTapped), for: .touchUpInside)
         page.heartButton.addTarget(self, action: #selector(heartTapped), for: .touchUpInside)
+        page.soundButton.addTarget(self, action: #selector(soundTapped), for: .touchUpInside)
+        page.canvas.onAudioKnown = { [weak self] _ in self?.updateSound() }
         let hold = UILongPressGestureRecognizer(target: self, action: #selector(heartHeld(_:)))
         hold.minimumPressDuration = 0.35
         page.heartButton.addGestureRecognizer(hold)
@@ -207,6 +260,8 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
     private var now: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 
     private func showCurrent() {
+        burst?.removeFromSuperview()
+        tooltip?.dismiss()
         guard authors.indices.contains(authorIndex) else { return }
         let author = authors[authorIndex]
         let frames = frames(author)
@@ -235,6 +290,77 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
         }
         if pauses.isEmpty { page.canvas.play() }
         preload(after: frames, position: position)
+        updateSound()
+    }
+
+    // MARK: Sound
+
+    /// The button and the players as the frame shown and `audio` have them.
+    private func updateSound() {
+        for page in [page, neighbor] {
+            page.canvas.isMuted = audio == .off
+            let video = page.canvas.shownFrame?.kind == .video
+            page.setSound(!video ? .none : page.canvas.hasAudio == false ? .silent : audio == .off ? .off : .on)
+        }
+        guard current?.frame.kind == .video else { return }
+        applyAudioSession()
+        // A volume button press turns the sound on, as Telegram's does.
+        if volume == nil {
+            volume = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.new]) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.volumeChanged() }
+            }
+        }
+    }
+
+    private func volumeChanged() {
+        guard audio != .on, !pauses.contains(.background), !isBeingDismissed, presentingViewController != nil,
+              current?.frame.kind == .video, page.canvas.hasAudio != false else { return }
+        audio = .on
+        note("sound:on")
+        updateSound()
+    }
+
+    /// Ambient follows the ringer switch and plays alongside other audio;
+    /// on plays past it. A call or a recording in progress is left alone.
+    private func applyAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        guard ![.playAndRecord, .record].contains(session.category) else { return }
+        let category: AVAudioSession.Category = audio == .on ? .playback : .ambient
+        guard session.category != category else { return }
+        if restoreCategory == nil { restoreCategory = session.category }
+        try? session.setCategory(category)
+        try? session.setActive(true)
+    }
+
+    @objc private func soundTapped() {
+        guard tooltip == nil else { return }
+        if page.canvas.hasAudio == false {
+            showNoSound()
+            return
+        }
+        audio = audio == .off ? .on : .off
+        note("sound:\(audio == .on ? "on" : "off")")
+        updateSound()
+    }
+
+    /// Telegram's "This video has no sound" under the button, holding the
+    /// story until a touch, which it takes.
+    private func showNoSound() {
+        let button = page.soundButton
+        let tooltip = StoriesTooltipView(text: Strings.Stories.videoHasNoSound, takesTouch: true)
+        tooltip.overrideUserInterfaceStyle = .dark
+        tooltip.frame = view.bounds
+        tooltip.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        tooltip.point(at: button.convert(CGPoint(x: button.bounds.midX + 1, y: button.bounds.maxY - 10), to: view))
+        tooltip.onDismiss = { [weak self] in
+            self?.tooltip = nil
+            self?.pause(.tooltip, false)
+        }
+        view.addSubview(tooltip)
+        tooltip.show()
+        self.tooltip = tooltip
+        pause(.tooltip, true)
+        note("sound:silent")
     }
 
     /// The next frame's picture, read while this one shows.
@@ -369,6 +495,9 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
     /// Turns the cube to another author, from a tap or the end of a frame.
     private func turn(to index: Int, acted: Bool) {
         note("turn")
+        burst?.removeFromSuperview()
+        tooltip?.dismiss()
+        page.canvas.setCaptionExpanded(false, animated: false)
         guard cube == nil, authors.indices.contains(index) else { return }
         prepareNeighbor(index)
         let direction: CGFloat = index > authorIndex ? -1 : 1
@@ -383,6 +512,7 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
         neighbor.layoutIfNeeded()
         neighbor.show(author: author, frames: frames(author), position: startPosition(author), media: session.media, images: session.images, now: now)
         neighbor.canvas.pause()
+        updateSound()
         drag = .sideways(next: index)
     }
 
@@ -444,12 +574,17 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
     // MARK: Gestures
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // A tooltip takes the touch that puts it away.
+        if let tooltip, touch.view?.isDescendant(of: tooltip) == true { return false }
+        if gestureRecognizer is UIPanGestureRecognizer, page.canvas.passesDrag(touch) {
+            return cube == nil && presentedViewController == nil && !isBeingDismissed
+        }
         var view = touch.view
         while let current = view, current !== self.view {
             if current is UIControl || current === picker { return false }
             view = current.superview
         }
-        return cube == nil
+        return cube == nil && presentedViewController == nil && !isBeingDismissed
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
@@ -460,7 +595,8 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
         guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
         let velocity = pan.velocity(in: view)
         if abs(velocity.x) > abs(velocity.y) { return authors.count > 1 }
-        return velocity.y > 0
+        // Down closes; up, on one's own story, shows who has seen it.
+        return velocity.y > 0 || (authors.indices.contains(authorIndex) && authors[authorIndex].isSelf)
     }
 
     /// Down, up: a tap by thirds or on an overlay; held past a moment, a pause.
@@ -499,9 +635,9 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
         if page.canvas.bounds.contains(canvasPoint), let overlay = page.canvas.tappable(at: canvasPoint) {
             switch overlay {
             case .link(let id, let url, _, _, _, _): return openLink(url, from: page.canvas.overlayView(id))
-            case .reaction(_, let emoji, _, _, _):
+            case .reaction(let id, let emoji, _, _, _):
                 guard authors.indices.contains(authorIndex), !authors[authorIndex].isSelf else { break }
-                return react(emoji)
+                return react(emoji, from: page.canvas.overlayView(id))
             default: break
             }
         }
@@ -520,18 +656,25 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
             holdTimer?.invalidate()
             page.chromeHidden = false
             pause(.drag, true)
+            // Any drag folds the caption, so no fold is left holding the
+            // next author still.
+            page.canvas.setCaptionExpanded(false)
             if abs(velocity.x) > abs(velocity.y) {
                 drag = .sideways(next: -1)
             } else {
                 drag = .down
+                // Only the canvas shrinks away; the page's own black goes
+                // with the ground behind it.
+                page.backgroundColor = .clear
             }
         case .changed:
             switch drag {
             case .down:
-                let y = max(0, translation.y)
-                let scale = 1 - min(0.25, y / max(1, view.bounds.height) * 0.5)
-                page.transform = CGAffineTransform(translationX: 0, y: y).scaledBy(x: scale, y: scale)
-                view.backgroundColor = UIColor(Palette.storiesViewerGround).withAlphaComponent(1 - min(0.8, y / 300))
+                // With the finger, shrinking towards 0.6 by a screen, as
+                // Telegram's: let go, it closes from here into its circle.
+                let state = StoryViewerDrag.state(translation: translation.y, height: view.bounds.height)
+                page.transform = CGAffineTransform(translationX: 0, y: state.offset).scaledBy(x: state.scale, y: state.scale)
+                view.backgroundColor = UIColor(Palette.storiesViewerGround).withAlphaComponent(state.groundAlpha)
             case .sideways(let next):
                 let offset = translation.x / max(1, view.bounds.width)
                 let wanted = offset < 0 ? authorIndex + 1 : authorIndex - 1
@@ -555,16 +698,28 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
         case .ended, .cancelled, .failed:
             switch drag {
             case .down:
-                if pan.state == .ended, translation.y > 120 || velocity.y > 800 {
+                let own = authors.indices.contains(authorIndex) && authors[authorIndex].isSelf
+                let release = pan.state == .ended ? StoryViewerDrag.release(translation: translation.y, velocity: velocity.y, canShowViewers: own) : .stay
+                if release == .close {
+                    note("drag-close")
                     dismissViewer()
+                } else if page.transform == .identity {
+                    // Up only: nothing moved, nothing to spring back.
+                    page.backgroundColor = UIColor(Palette.storiesViewerGround)
+                    view.backgroundColor = UIColor(Palette.storiesViewerGround)
+                    drag = .none
+                    pause(.drag, false)
+                    if release == .viewers { viewsTapped() }
                 } else {
                     UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0) {
                         self.page.transform = .identity
                         self.view.backgroundColor = UIColor(Palette.storiesViewerGround)
                     } completion: { _ in
+                        self.page.backgroundColor = UIColor(Palette.storiesViewerGround)
                         self.drag = .none
                         self.pause(.drag, false)
                     }
+                    if release == .viewers { viewsTapped() }
                 }
             case .sideways(let next):
                 let width = max(1, view.bounds.width)
@@ -593,11 +748,17 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
     func dismissViewer() {
         guard presentingViewController != nil, !isBeingDismissed else { return }
         link?.invalidate(); link = nil
+        burst?.removeFromSuperview()
+        tooltip?.dismiss()
         page.canvas.pause()
-        dismiss(animated: true)
+        // From whatever it presents too: a sheet up mustn't keep it here.
+        presentingViewController?.dismiss(animated: true)
     }
 
-    private func react(_ emoji: String) {
+    /// Reacts with `emoji`, or takes it back when it's the reaction already.
+    /// Reacting throws the emoji out around `source` (the bubble tapped, or
+    /// the heart), as Telegram's reaction effect does.
+    private func react(_ emoji: String, from source: UIView? = nil) {
         note("react")
         guard let (story, _) = current else { return }
         let next = story.myReaction == emoji ? nil : emoji
@@ -605,6 +766,16 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
         StoriesHaptics.play(.react)
         if let next, let reaction = page.canvas.overlayViewMatching(emoji: next) { Self.bounce(reaction) }
         Self.bounce(page.heartButton)
+        burst?.removeFromSuperview()
+        // On the page, so it goes with it as it turns, shrinks or closes.
+        if let next, !isBeingDismissed {
+            let around = source ?? page.heartButton
+            let shown = StoryReactionBurstView(emoji: next, burst: StoryReactionBurst(target: around.convert(around.bounds, to: page)))
+            page.addSubview(shown)
+            shown.play()
+            burst = shown
+            note("burst")
+        }
         let store = session.store
         Task { await store.react(story.id, emoji: next) }
     }
@@ -731,18 +902,13 @@ final class StoryViewerViewController: UIViewController, UIGestureRecognizerDele
     }
 
     @objc private func viewsTapped() {
-        guard let (story, _) = current else { return }
+        guard presentedViewController == nil, let (story, _) = current else { return }
         note("viewers")
         pause(.sheet, true)
         let list = StoriesViewersViewController(session: session, story: story)
         list.onClose = { [weak self] in self?.pause(.sheet, false) }
-        let navigation = UINavigationController(rootViewController: list)
-        if let sheet = navigation.sheetPresentationController {
-            sheet.detents = [.medium(), .large()]
-            sheet.prefersGrabberVisible = true
-        }
-        navigation.presentationController?.delegate = list
-        present(navigation, animated: true)
+        // It presents itself as Telegram's sheet.
+        present(list, animated: true)
     }
 }
 
@@ -754,6 +920,67 @@ private final class StoryViewerTicker: NSObject {
     @objc func tick(_ link: CADisplayLink) {
         guard let viewer else { return link.invalidate() }
         viewer.tick(link)
+    }
+}
+
+/// Telegram's reaction effect drawn from `StoryReactionBurst`: copies of
+/// the emoji thrown out from what was tapped, rising and fading, once.
+/// Touches go through it.
+final class StoryReactionBurstView: UIView {
+    private let emoji: String
+    private let burst: StoryReactionBurst
+
+    init(emoji: String, burst: StoryReactionBurst) {
+        self.emoji = emoji
+        self.burst = burst
+        super.init(frame: .zero)
+        isUserInteractionEnabled = false
+        accessibilityIdentifier = "story-reaction-burst"
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        frame = superview?.bounds ?? .zero
+    }
+
+    func play() {
+        let side = StoryReactionBurst.Metrics.particle
+        let now = layer.convertTime(CACurrentMediaTime(), from: nil)
+        // Drawn once, shared by every copy.
+        let picture = StoryViewerPageView.emojiImage(emoji, size: side).cgImage
+        var longest = 0.0
+        for particle in burst.particles {
+            let copy = CALayer()
+            copy.contents = picture
+            copy.contentsGravity = .resizeAspect
+            copy.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+            copy.position = particle.end
+            copy.opacity = 0
+            layer.addSublayer(copy)
+
+            let move = CABasicAnimation(keyPath: "position")
+            move.fromValue = particle.start
+            move.toValue = particle.end
+            move.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+            let grow = CAKeyframeAnimation(keyPath: "transform")
+            grow.values = [0.2, particle.peakScale, particle.peakScale * 0.55].enumerated().map { index, scale in
+                CATransform3DRotate(CATransform3DMakeScale(scale, scale, 1), particle.rotation * CGFloat(index), 0, 0, 1)
+            }
+            grow.keyTimes = [0, 0.3, 1]
+            let fade = CAKeyframeAnimation(keyPath: "opacity")
+            fade.values = [0, 1, 1, 0]
+            fade.keyTimes = [0, 0.12, 0.6, 1]
+            let group = CAAnimationGroup()
+            group.animations = [move, grow, fade]
+            group.duration = particle.duration
+            group.beginTime = now + particle.delay
+            group.fillMode = .backwards
+            copy.add(group, forKey: "burst")
+            longest = max(longest, particle.delay + particle.duration)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + longest) { [weak self] in self?.removeFromSuperview() }
     }
 }
 

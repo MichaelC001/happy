@@ -101,6 +101,8 @@ final class StemCellChatViewController: UIViewController {
         card.configuration.addAccessibilityLabel = Strings.StemCells.addPicture
         card.delegate = self
         card.textView.accessibilityIdentifier = "stem-composer"
+        // A long press's Paste attaches a copied picture.
+        card.textView.onPasteAttachment = { [weak self] in self?.pictures.paste() }
         pictures.host = { [weak self] in self }
         pictures.onChange = { [weak self] in
             guard let self else { return }
@@ -618,9 +620,22 @@ extension StemCellChatViewController: AgentInputCardDelegate {
 
     func agentInputCardDidPressSend(_ card: AgentInputCardView) { send() }
 
-    func agentInputCardDidPressAdd(_ card: AgentInputCardView) { pictures.attach() }
+    /// The add button opens the shared library sheet at once: no question
+    /// first. Photos only: a message carries text and pictures alone.
+    func agentInputCardDidPressAdd(_ card: AgentInputCardView) {
+        let pictures = pictures
+        let room = pictures.room()
+        guard room > 0 else { return }
+        LibraryPicker.present(from: self, options: .init(limit: room, videos: false)) { picks in
+            pictures.add(pictures: picks.compactMap { if case .image(let data, _) = $0.media { data } else { nil } })
+        }
+    }
 
     func agentInputCard(_ card: AgentInputCardView, didRemoveAttachment id: String) { pictures.remove(id: id) }
+
+    func agentInputCard(_ card: AgentInputCardView, didSelect key: String, in chip: AgentInputChip) {
+        StemCellModelPickers.Kind(rawValue: key).map(pick)
+    }
 
     func agentInputCard(_ card: AgentInputCardView, didPress chip: AgentInputChip) {
         switch chip {

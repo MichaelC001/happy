@@ -1,4 +1,5 @@
 import Foundation
+import HappyCore
 
 // Stories, spelled as happy-agent's API.md "Stories" and "Stickers" name
 // them, and as Telegram's stories say the rest. English only, as desktop is.
@@ -9,14 +10,26 @@ extension Strings {
         public static func author(_ name: String, unseen: Int) -> String {
             unseen > 0 ? "\(name), \(unseen) new" : name
         }
-        public static let addStory = "Add story"
+        /// The avatars closed into the header's title.
+        public static func collapsed(_ names: [String]) -> String {
+            names.isEmpty ? "Stories" : "Stories: \(names.joined(separator: ", "))"
+        }
+        /// The one-time tooltip under them (ChatList.StoryFeedTooltipUsers),
+        /// naming up to three: "Ana", "Ana and Steve", "Ana, Steve, and Bo".
+        public static func tooltip(_ names: [String]) -> String {
+            let list = ListFormatter()
+            list.locale = Locale(identifier: "en_US")
+            return "Tap above to view stories from \(list.string(from: names) ?? names.joined(separator: ", "))"
+        }
 
         // Settings.
         public static let setting = "Stories"
-        public static let settingDetail = "Experimental. Share what your work looks like in a row of circles above the sidebar."
+        public static let settingDetail = "Experimental. Share what your work looks like in a row of circles in the header."
 
         // The viewer.
         public static let close = "Close"
+        /// What ends a folded caption (Telegram's Story.CaptionShowMore).
+        public static let captionShowMore = "Show more"
         public static let photoUnavailable = "This photo is no longer available"
         public static let videoUnavailable = "This video is no longer available"
         public static let open = "Open"
@@ -31,6 +44,10 @@ extension Strings {
         public static let noViewers = "No views yet"
         public static func views(_ count: Int) -> String { count == 1 ? "1 view" : "\(count) views" }
         public static let react = "React"
+        /// A recording's sound (Telegram's Story.TooltipVideoHasNoSound).
+        public static let mute = "Mute"
+        public static let unmute = "Unmute"
+        public static let videoHasNoSound = "This video has no sound"
         public static let heart = "❤️"
         public static let reactions = ["❤️", "👍", "🔥", "🎉", "😂", "😮", "😢", "👏"]
         public static func ago(_ milliseconds: Int64) -> String {
@@ -38,6 +55,21 @@ extension Strings {
             if minutes < 1 { return "just now" }
             if minutes < 60 { return "\(minutes)m ago" }
             return "\(minutes / 60)h ago"
+        }
+        /// When something happened, both in epoch milliseconds: how long
+        /// ago within a day, then "yesterday at" its time as Telegram's
+        /// list says, then the date.
+        public static func when(_ milliseconds: Int64, now: Int64, calendar: Calendar = .current) -> String {
+            if now - milliseconds < 86_400_000 { return ago(now - milliseconds) }
+            let date = Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1000)
+            var style = Date.FormatStyle.dateTime
+            style.timeZone = calendar.timeZone
+            style.locale = Locale(identifier: "en_US")
+            if let yesterday = calendar.date(byAdding: .day, value: -1, to: Date(timeIntervalSince1970: TimeInterval(now) / 1000)),
+               calendar.isDate(date, inSameDayAs: yesterday) {
+                return "yesterday at \(date.formatted(style.hour().minute()))"
+            }
+            return date.formatted(style.month(.abbreviated).day())
         }
 
         // The inline story.
@@ -52,10 +84,8 @@ extension Strings {
 
         // The editor.
         public static let newStory = "New Story"
-        public static let drafts = "Drafts"
-        public static let photos = "Photos"
-        public static let camera = "Camera"
-        public static let fromConversations = "From conversations"
+        /// The library sheet's button: "Add", "Add 2".
+        public static let add = "Add"
         public static let text = "Text"
         public static let link = "Link"
         public static let stickers = "Stickers"
@@ -69,13 +99,50 @@ extension Strings {
         public static let invalidLink = "Enter an http or https link."
         public static let uploading = "Uploading…"
         public static let saveFailed = "Couldn't save the story"
-        public static let addFrame = "Add"
-        public static let noMedia = "Nothing to choose from yet"
+        public static let addFrame = "Add frame"
+        public static let discardChanges = "Discard changes?"
+        public static let discardDetail = "Your edits to this story will be lost."
+        public static let discard = "Discard"
+        public static let saveDraft = "Save draft"
+        public static let keepEditing = "Keep editing"
+        public static let deleteFrame = "Delete frame"
+        public static let saving = "Saving…"
+        public static let couldntOpen = "Couldn't open that photo or video"
+        public static let fill = "Fill"
+        public static let align = "Alignment"
+        public static let trash = "Delete"
+        public static let color = "Color"
+        public static let font = "Font"
+        public static let textSize = "Text size"
+        public static let frames = "Frames"
+        public static let useLatest = "Use the newer version"
+        public static let overwrite = "Keep my edits"
+        public static let newerVersionDetail = "It was saved somewhere else since you opened it."
+        public static func fontName(_ font: StoryTextFont) -> String {
+            switch font {
+            case .sanFrancisco: "San Francisco"
+            case .typewriter: "Typewriter"
+            case .avenirNext: "Avenir Next"
+            case .courierNew: "Courier New"
+            case .noteworthy: "Noteworthy"
+            case .georgia: "Georgia"
+            case .papyrus: "Papyrus"
+            case .snellRoundhand: "Snell Roundhand"
+            }
+        }
 
         // The sticker picker.
         public static let search = "Search"
         public static let recentlyUsed = "Recently used"
         public static let clearRecents = "Clear recently used"
         public static let noResults = "No stickers found"
+        public static let emojiPeople = "Smileys & People"
+        public static let emojiNature = "Animals & Nature"
+        public static let emojiFood = "Food & Drink"
+        public static let emojiActivity = "Activity"
+        public static let emojiTravel = "Travel & Places"
+        public static let emojiObjects = "Objects"
+        public static let emojiSymbols = "Symbols"
+        public static let emojiFlags = "Flags"
     }
 }

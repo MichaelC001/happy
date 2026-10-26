@@ -590,6 +590,10 @@ public actor StemCellsStore {
         edit { SidebarDocumentEdits.fold($0, nodeId) }
     }
 
+    public func removeSection(_ sectionId: String) {
+        edit { SidebarDocumentEdits.removeSection($0, sectionId) }
+    }
+
     public func relabel(_ sectionId: String, label: String) {
         edit { SidebarDocumentEdits.relabel($0, sectionId, label: label) }
     }
@@ -753,6 +757,15 @@ public actor StemCellsStore {
         }
     }
 
+    /// Archives a subtask; its row goes when the daemon says so.
+    public func archiveSubtask(_ agentId: String) {
+        let client = client
+        Task {
+            do { try await client.archiveAgent(agentId) }
+            catch { self.failed(error) }
+        }
+    }
+
     private func failed(_ error: Error) {
         snapshot.error = Self.describe(error)
         publish()
@@ -790,11 +803,6 @@ public actor StemCellsStore {
     }
 
     // MARK: Prioritizing
-
-    /// Turns Prioritizing on: the person's explicit choice, never automatic.
-    public func enablePrioritizing() {
-        setPrioritizing(true)
-    }
 
     /// Turns Prioritizing on or off, from Settings' switch; only ever the
     /// person's choice.
