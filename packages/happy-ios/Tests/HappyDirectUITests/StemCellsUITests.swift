@@ -714,6 +714,221 @@ final class StemCellsUITests: XCTestCase {
         pause(1.5)
     }
 
+    /// Conversations read ahead open drawn: several sidebar rows, each
+    /// pushed with its transcript on the push's first frame, timed from
+    /// the tap until it was on screen. `STEM_WARM=0` is the cold "before",
+    /// timed the same way.
+    func testWarmOpens() {
+        let warm = ProcessInfo.processInfo.environment["STEM_WARM"] != "0"
+        if !warm { app.launchEnvironment["STEM_WARM"] = "0" }
+        // Slowed for the recording, the screens take that much longer.
+        var slow = 1.0
+        if let drag = ProcessInfo.processInfo.environment["STEM_ANIMATION_DRAG"] {
+            app.launchEnvironment["UIAnimationDragCoefficient"] = drag
+            slow = Double(drag) ?? 1
+        }
+        app.launch()
+        home()
+        // Desktop's 1.5s before reading ahead, then one conversation at a time.
+        pause(6)
+        var opened: [String] = []
+        // Whatever rows show whole between the bar and the dock, top first,
+        // once each: other tests reorder the sidebar.
+        let dock = app.descendants(matching: .any)["stem-new-work"].frame.minY
+        let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-row:space:")).allElementsBoundByIndex
+            .filter { $0.frame.minY > 100 && $0.frame.maxY < dock - 30 }
+            .sorted { $0.frame.minY < $1.frame.minY }
+        var labels: [String] = []
+        for element in rows {
+            let label = String(element.identifier.dropFirst("stem-row:space:".count))
+            if !labels.contains(label) { labels.append(label) }
+        }
+        for label in labels {
+            let target = row("space", label).firstMatch
+            guard target.exists, target.isHittable else { continue }
+            target.tap()
+            let transcript = app.scrollViews["stem-transcript"]
+            XCTAssertTrue(transcript.waitForExistence(timeout: 8), "\(label) didn't open")
+            var value = ""
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                value = transcript.value as? String ?? ""
+                if !value.isEmpty { break }
+                pause(0.1)
+            }
+            print("STEM_TIMING \(warm ? "warm" : "cold") \(label): \(value)")
+            XCTAssertTrue(value.contains("rows="), "\(label) never showed its transcript")
+            if warm {
+                XCTAssertTrue(value.hasPrefix("first=true"), "\(label) opened without its transcript: \(value)")
+                // An empty one (a bot just made) is drawn too, with nothing in it.
+                if !value.hasSuffix("rows=0") {
+                    XCTAssertTrue(app.descendants(matching: .any)["stem-message"].firstMatch.exists, "\(label) has no message")
+                }
+            }
+            capture("warm-\(opened.count)")
+            opened.append(label)
+            pause(1.5 * slow)
+            app.tapBack()
+            pause(1.5 * slow)
+            if opened.count == 4 { break }
+        }
+        XCTAssertGreaterThanOrEqual(opened.count, 3, "too few conversations on screen: \(opened)")
+        // One left a moment ago comes back drawn too.
+        if warm, let first = opened.first {
+            row("space", first).firstMatch.tap()
+            let transcript = app.scrollViews["stem-transcript"]
+            XCTAssertTrue(transcript.waitForExistence(timeout: 8))
+            var value = ""
+            for _ in 0..<100 where value.isEmpty {
+                value = transcript.value as? String ?? ""
+                if value.isEmpty { pause(0.1) }
+            }
+            print("STEM_TIMING warm \(first) again: \(value)")
+            XCTAssertTrue(value.hasPrefix("first=true"), "\(first) came back without its transcript: \(value)")
+            pause(1.5 * slow)
+            app.tapBack()
+        }
+    }
+
+    /// The header's capsule runs to the right edge and opens the
+    /// conversation's detail, never a rename: its model, effort and start;
+    /// what it shared (a grid of its pictures, recordings and files, each
+    /// opened whole, then its links); at the top level no family but its
+    /// children; nested, its parent, siblings and children, each opening
+    /// its conversation. Needs `shared_fixture.py`'s links and pictures.
+    func testSessionDetail() {
+        home()
+        pause(1)
+        let bot = row("space", "Research Assistant")
+        XCTAssertTrue(bot.waitForExistence(timeout: 5))
+        bringIntoView(bot)
+        bot.tap()
+        let title = app.descendants(matching: .any)["stem-chat-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 8))
+        pause(1)
+        capture("detail-header")
+        // The capsule's far right, well past the name, still opens it.
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.width - 30, dy: title.frame.midY)).tap()
+        let detail = app.descendants(matching: .any)["stem-detail"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), "the capsule's right end didn't open the detail")
+        XCTAssertFalse(app.textFields["stem-chat-title-field"].exists, "the header renamed")
+        XCTAssertEqual(app.staticTexts["stem-detail-name"].label, "Research Assistant")
+        assertTiles()
+        // At the top level: no section, no siblings.
+        let family = app.descendants(matching: .any)["stem-detail-family"]
+        if family.exists {
+            let tops = family.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-row:space:")).allElementsBoundByIndex.map(\.identifier)
+            XCTAssertEqual(tops, ["stem-row:space:Research Assistant"], "a top-level conversation showed siblings")
+        }
+        XCTAssertFalse(family.exists && family.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-row:section:")).firstMatch.exists, "a top-level conversation showed its section")
+        // What it shared: its media first, a grid.
+        let cells = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-detail-media:"))
+        XCTAssertTrue(cells.firstMatch.waitForExistence(timeout: 10), "no shared media")
+        pause(1.5)
+        capture("detail-top")
+        let first = cells.element(boundBy: 0).frame
+        let second = cells.element(boundBy: 1).frame
+        XCTAssertEqual(first.width, first.height, accuracy: 1, "a cell isn't square")
+        XCTAssertEqual(second.minY, first.minY, accuracy: 1, "the grid isn't in rows")
+        bringIntoView(cells.firstMatch)
+        pause(1)
+        capture("detail-media")
+        let more = app.descendants(matching: .any)["stem-detail-media-more"]
+        if more.exists {
+            let before = cells.count
+            bringIntoView(more)
+            more.tap()
+            XCTAssertTrue(until(10) { cells.count > before }, "Show more showed no more")
+            pause(1.5)
+            capture("detail-media-more")
+        }
+        // A picture opens whole, paging through the rest.
+        let picture = cells.matching(NSPredicate(format: "label ENDSWITH %@ OR label == %@", ".png", "Picture")).firstMatch
+        XCTAssertTrue(picture.exists, "no picture among the media")
+        bringIntoView(picture)
+        picture.tap()
+        XCTAssertTrue(app.images["stem-picture-viewer"].waitForExistence(timeout: 5), "the picture didn't open")
+        pause(2)
+        capture("detail-viewer")
+        app.swipeLeft()
+        pause(1.5)
+        capture("detail-viewer-next")
+        app.buttons["Close"].tap()
+        XCTAssertTrue(until(3) { !self.app.images["stem-picture-viewer"].exists })
+        pause(1)
+        // Then its links, each a title over its address.
+        let link = app.descendants(matching: .any)["stem-detail-link:https://telegram.org/blog/shared-media"]
+        XCTAssertTrue(link.waitForExistence(timeout: 10), "no shared links")
+        XCTAssertEqual(link.label, "Telegram's shared media")
+        XCTAssertEqual(link.value as? String, "telegram.org/blog/shared-media")
+        XCTAssertTrue(app.descendants(matching: .any)["stem-detail-link:https://crdt.tech/"].exists)
+        bringIntoView(link)
+        pause(1)
+        capture("detail-links")
+        app.tapBack()
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "back didn't come back to the conversation")
+        pause(1)
+        app.tapBack()
+        pause(1)
+
+        // Nested: Day Trips, a subtask of Plan Lisbon trip.
+        let task = row("space", "Plan Lisbon trip")
+        if !task.waitForExistence(timeout: 3) { openFoldedSections() }
+        XCTAssertTrue(task.waitForExistence(timeout: 5))
+        bringIntoView(task)
+        let trips = row("session", "Day Trips")
+        if !(trips.exists && trips.isHittable) {
+            app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: task.frame.maxX - 25, dy: task.frame.midY)).tap()
+        }
+        XCTAssertTrue(until(5) { trips.exists && trips.isHittable }, "Day Trips isn't under its task")
+        trips.tap()
+        XCTAssertTrue(title.waitForExistence(timeout: 8))
+        pause(1)
+        title.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), "the capsule didn't open the subtask's detail")
+        assertTiles()
+        XCTAssertTrue(family.waitForExistence(timeout: 5), "a subtask has no family")
+        for (id, what) in [("stem-row:space:Plan Lisbon trip", "its parent"), ("stem-row:session:Day Trips", "itself"), ("stem-row:session:Neighbourhoods", "its sibling"), ("stem-row:session:Best train day trip", "its child")] {
+            XCTAssertTrue(family.descendants(matching: .any)[id].exists, "the family lacks \(what)")
+        }
+        XCTAssertTrue(cells.firstMatch.waitForExistence(timeout: 10), "the subtask's pictures aren't shared")
+        XCTAssertEqual(cells.count, 3)
+        XCTAssertTrue(app.descendants(matching: .any)["stem-detail-link:https://www.visitcascais.com/en"].waitForExistence(timeout: 5))
+        pause(1.5)
+        capture("detail-nested-top")
+        bringIntoView(app.descendants(matching: .any)["stem-detail-links"])
+        pause(1)
+        capture("detail-nested-shared")
+        bringIntoView(family)
+        pause(1)
+        capture("detail-nested-family")
+        // A sibling opens its own conversation; back comes back here.
+        family.descendants(matching: .any)["stem-row:session:Neighbourhoods"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND label == %@", "stem-chat-title", "Neighbourhoods")).firstMatch.waitForExistence(timeout: 8), "the sibling didn't open")
+        pause(1.5)
+        app.tapBack()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), "back didn't come back to the detail")
+        pause(1)
+        app.tapBack()
+        pause(1)
+        app.tapBack()
+    }
+
+    /// Model, effort and when it started; nothing else counted.
+    private func assertTiles() {
+        let started = app.descendants(matching: .any)["stem-detail-tile:started"]
+        XCTAssertTrue(started.waitForExistence(timeout: 5), "no Started tile")
+        XCTAssertTrue(until(8) { (started.value as? String) != "—" }, "when it started never came")
+        for id in ["model", "effort", "started"] {
+            let tile = app.descendants(matching: .any)["stem-detail-tile:\(id)"]
+            print("STEM_DETAIL \(id) = \(tile.value as? String ?? "")")
+            XCTAssertNotEqual(tile.value as? String, "—", "\(id) never came")
+        }
+        for id in ["tokens", "messages", "subagents", "age"] {
+            XCTAssertFalse(app.descendants(matching: .any)["stem-detail-tile:\(id)"].exists, "\(id) is still counted")
+        }
+    }
+
     /// Every modal sheet closes from a button at its top right, as far
     /// from the top as from the side: settings' QR sheet, the link sheet
     /// "+" opens and the attach sheet. The link sheet's
@@ -1232,17 +1447,17 @@ final class StemCellsUITests: XCTestCase {
         capture("large-file")
     }
 
-    /// A task's name renamed where it stands in its conversation's bar: the
-    /// bar and the sidebar row wear it at once and the computer keeps it
-    /// (`STEM_RENAMED`, read back by the run). Renamed back after, so the
-    /// test can run again.
+    /// A task's name renamed from its conversation's detail, where the name
+    /// stands: the detail, the bar and the sidebar row wear it at once and
+    /// the computer keeps it (`STEM_RENAMED`, read back by the run). Renamed
+    /// back after, so the test can run again.
     func testRenameTitle() {
         home()
         pause(1.5)
         let old = ProcessInfo.processInfo.environment["STEM_RENAME_ROW"] ?? "Renew passport"
         let new = old + " by May"
         let titled = { (name: String) in self.app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND label == %@", "stem-chat-title", name)).firstMatch }
-        let field = app.textFields["stem-chat-title-field"]
+        let field = app.textFields["stem-detail-rename"]
         for (from, to) in [(old, new), (new, old)] {
             let task = row("space", from)
             XCTAssertTrue(task.waitForExistence(timeout: 10), "no row named \(from)")
@@ -1253,13 +1468,17 @@ final class StemCellsUITests: XCTestCase {
             pause(1)
             if to == new { capture("rename-before") }
             title.tap()
+            XCTAssertTrue(app.descendants(matching: .any)["stem-detail"].waitForExistence(timeout: 5), "the capsule didn't open the detail")
+            app.descendants(matching: .any)["stem-settings:rename"].tap()
             XCTAssertTrue(field.waitForExistence(timeout: 3), "the name never became a field")
             pause(0.8)
             if to == new { capture("rename-editing") }
             // The field opens with its name selected: typing replaces it.
             field.typeText(to + "\n")
-            XCTAssertTrue(titled(to).waitForExistence(timeout: 3), "the bar never showed \(to)")
+            XCTAssertEqual(app.staticTexts["stem-detail-name"].label, to, "the detail never showed \(to)")
             XCTAssertFalse(field.exists)
+            app.tapBack()
+            XCTAssertTrue(titled(to).waitForExistence(timeout: 3), "the bar never showed \(to)")
             pause(1)
             if to == new {
                 capture("rename-after")
@@ -1667,6 +1886,7 @@ final class StemCellsUITests: XCTestCase {
         capture("panel-models")
         let models = panel("stem-picker-models").frame
         XCTAssertLessThan(models.maxY, model.frame.minY, "the list isn't over its chip")
+        XCTAssertLessThanOrEqual(models.width, 250, "the list is wider than a menu")
         // A service's heading: its accounts over the list, where it stands.
         // The picked model's service, in view with it.
         let heading = app.descendants(matching: .any)["stem-picker-heading:claude"]
@@ -1703,6 +1923,17 @@ final class StemCellsUITests: XCTestCase {
         pause(1.5)
         capture("panel-models-opus")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        pause(1)
+        // iOS's own menu, the + sheet's permission, to set these beside.
+        openSheet()
+        app.descendants(matching: .any)["attach-permission"].tap()
+        XCTAssertTrue(menuRow("Read only").waitForExistence(timeout: 5), "no permission menu")
+        pause(1.5)
+        capture("native-menu")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).tap()
+        let close = app.buttons["attach-close"]
+        XCTAssertTrue(until(3) { !self.menuRow("Read only").exists && close.isHittable }, "the menu stayed")
+        close.tap()
         pause(1)
     }
 

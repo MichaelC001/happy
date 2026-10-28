@@ -16,8 +16,12 @@ final class StemCellsSession {
     let models: StemCellModelState
     /// What this computer last showed, for opening on it offline.
     let offline: StemCellsOfflineFile?
+    /// The composers' drafts, kept on this phone beside the computer's copy.
+    let drafts: StemCellDrafts
     /// Colours the code blocks its conversations show.
     let syntax = CodeSyntaxService()
+    /// The conversations read ahead and kept, so they open drawn.
+    let warm: StemCellsWarmChats
     private(set) var snapshot = StemCellsSnapshot()
     /// The row whose conversation was opened last; it stays selected.
     var selectedRowId: String?
@@ -43,6 +47,7 @@ final class StemCellsSession {
         StemCellFilePreview.removeAll()
         guard let session = sessions.removeValue(forKey: accountID) else { return }
         session.following?.cancel()
+        session.warm.stopAll()
         let store = session.store
         Task { await store.stop() }
     }
@@ -58,7 +63,9 @@ final class StemCellsSession {
             untitledSession: Strings.StemCells.untitledSession, widget: Strings.StemCells.prioritizing
         ))
         images = StemCellsImages(client: client, offline: offline)
+        warm = StemCellsWarmChats(client: client, store: store, syntax: syntax)
         models = StemCellModelState(client: client, offline: offline)
+        drafts = StemCellDrafts(offline: offline)
         models.load()
         let updates = store.updates
         following = Task { [weak self] in

@@ -128,9 +128,10 @@ final class ChatViewingUITests: XCTestCase {
         }
     }
 
-    /// The transcript stops at the composer: under it and beside it the
-    /// conversation's ground, one flat colour, never a message, light and
-    /// dark, read mid-transcript where messages go on past the composer.
+    /// Nothing of the transcript is legible under the composer, beside it
+    /// or in the last of the list above it, as on home: read mid-transcript,
+    /// where messages go on past the composer, light and dark, every stroke
+    /// there is blurred soft, where the transcript's own text is sharp.
     func testNothingUnderTheComposer() {
         openConversation()
         let card = element("stem-input")
@@ -143,33 +144,85 @@ final class ChatViewingUITests: XCTestCase {
             capture("ground-\(name)")
             let frame = card.frame
             // Under the card, clear of the home indicator in the middle,
-            // and the gap beside it.
+            // the gap beside it, and the list's last 12 above it.
             let under = CGRect(x: 2, y: frame.maxY + 2, width: 90, height: app.frame.height - frame.maxY - 4)
             let beside = CGRect(x: 1, y: frame.minY + 4, width: max(1, frame.minX - 2), height: frame.height - 8)
-            for (place, area) in [("under", under), ("beside", beside)] {
-                let ink = Self.ink(in: shot.image, area: area)
-                XCTAssertEqual(ink, 0, "\(name): \(ink) pixels of something show \(place) the composer")
+            let above = CGRect(x: 0, y: frame.minY - 12, width: app.frame.width, height: 10)
+            // The transcript's own lines, well clear of both edges: sharp.
+            let transcript = CGRect(x: 0, y: app.frame.height * 0.35, width: app.frame.width, height: app.frame.height * 0.3)
+            let sharp = Self.sharpEdges(in: shot.image, area: transcript)
+            XCTAssertGreaterThan(sharp, 500, "\(name): the transcript itself reads as blurred (\(sharp))")
+            for (place, area) in [("under", under), ("beside", beside), ("above", above)] {
+                let edges = Self.sharpEdges(in: shot.image, area: area)
+                print("STEM_EDGES \(name) \(place)=\(edges) transcript=\(sharp)")
+                XCTAssertLessThan(edges, 20, "\(name): \(edges) sharp strokes show \(place) the composer")
             }
         }
         theme("Adaptive")
     }
 
-    /// The pixels in `area` (in points) that stand out from the ground
-    /// read at its top left corner as text does: far more than the card's
-    /// soft shadow ever darkens it.
-    private static func ink(in image: UIImage, area: CGRect) -> Int {
+    /// The chat's edges beside home's, light and dark: each scrolled so
+    /// its content runs under the glass header and under the composer.
+    /// Pictures for the eye (`edges-*`); the composer's foot is checked by
+    /// `testNothingUnderTheComposer`.
+    func testEdgesLikeHome() {
+        openConversation()
+        for name in ["Light", "Dark"] {
+            theme(name)
+            // At the newest, the transcript runs on under the header.
+            capture("edges-chat-newest-\(name)")
+            scrollUp(1)
+            pause(1.5)
+            capture("edges-chat-\(name)")
+            // Scrolled slowly the rest of the way, for the video.
+            for _ in 0..<2 {
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65)).press(
+                    forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)),
+                    withVelocity: .slow, thenHoldForDuration: 0.4
+                )
+                pause(0.6)
+            }
+            app.tapBack()
+            pause(1.5)
+            // Home's list a little down, so rows are under its header and its dock.
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).press(
+                forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)),
+                withVelocity: .slow, thenHoldForDuration: 0.4
+            )
+            pause(1.5)
+            capture("edges-home-\(name)")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).press(
+                forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7)),
+                withVelocity: .slow, thenHoldForDuration: 0.4
+            )
+            pause(1)
+            let happy = element("stem-row:space:Happy")
+            XCTAssertTrue(happy.waitForExistence(timeout: 5))
+            happy.tap()
+            XCTAssertTrue(composer.waitForExistence(timeout: 5))
+            pause(2)
+        }
+        theme("Adaptive")
+    }
+
+    /// The pixels in `area` (in points) where the image steps by more than
+    /// 40 of 255 within two pixels across or down, as a glyph's stroke
+    /// does: a blur, a scrim's feather or the card's soft shadow never do.
+    private static func sharpEdges(in image: UIImage, area: CGRect) -> Int {
         guard let cg = image.cgImage, let data = cg.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else { return -1 }
         let scale = CGFloat(cg.width) / image.size.width
         let pixels = CGRect(x: area.minX * scale, y: area.minY * scale, width: area.width * scale, height: area.height * scale).integral
             .intersection(CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
         let step = cg.bitsPerPixel / 8
-        func color(_ x: Int, _ y: Int) -> [Int] { (0..<3).map { Int(bytes[y * cg.bytesPerRow + x * step + $0]) } }
-        let ground = color(Int(pixels.minX), Int(pixels.minY))
+        func luma(_ x: Int, _ y: Int) -> Int {
+            let at = y * cg.bytesPerRow + x * step
+            return (Int(bytes[at]) * 299 + Int(bytes[at + 1]) * 587 + Int(bytes[at + 2]) * 114) / 1000
+        }
         var count = 0
-        for y in Int(pixels.minY)..<Int(pixels.maxY) {
-            for x in Int(pixels.minX)..<Int(pixels.maxX) {
-                let here = color(x, y)
-                if (0..<3).contains(where: { abs(here[$0] - ground[$0]) > 48 }) { count += 1 }
+        for y in Int(pixels.minY)..<(Int(pixels.maxY) - 2) {
+            for x in Int(pixels.minX)..<(Int(pixels.maxX) - 2) {
+                let here = luma(x, y)
+                if abs(luma(x + 2, y) - here) > 40 || abs(luma(x, y + 2) - here) > 40 { count += 1 }
             }
         }
         return count
@@ -273,5 +326,155 @@ final class ChatViewingUITests: XCTestCase {
         XCTAssertFalse(viewer.exists, "a drag down didn't close it")
         XCTAssertTrue(composer.exists)
         capture("viewer-closed")
+    }
+
+    // MARK: Composer
+
+    private var composerText: String { composer.value as? String ?? "" }
+
+    /// Waits for the composer to read `text`.
+    private func waitForComposer(_ text: String, timeout: TimeInterval = 10, _ message: String) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, composerText != text { pause(0.3) }
+        XCTAssertEqual(composerText, text, message)
+    }
+
+    /// Clears Happy's draft from the desktop's side, so the composer starts
+    /// empty, as a clear made on another device arrives.
+    private func clearDraft() {
+        print("STEM_STEP draft-clear")
+        waitForComposer("", "a draft cleared on the computer stayed on the phone")
+    }
+
+    /// The draft as the computer keeps it: typed here, it is there when
+    /// the conversation opens again, and after a cold launch; written on
+    /// the desktop, it shows here while the conversation is open.
+    func testDraftSync() {
+        openConversation()
+        clearDraft()
+        let typed = "Draft typed on the phone"
+        composer.tap()
+        composer.typeText(typed)
+        pause(1)
+        capture("draft-typed")
+        app.tapBack()
+        pause(1.5)
+        // The daemon's copy, for the log.
+        print("STEM_STEP draft-check")
+        let happy = element("stem-row:space:Happy")
+        XCTAssertTrue(happy.waitForExistence(timeout: 5))
+        happy.tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        waitForComposer(typed, timeout: 5, "the draft didn't come back on reopening")
+        capture("draft-reopened")
+
+        app.terminate()
+        app.launch()
+        let again = element("stem-row:space:Happy")
+        XCTAssertTrue(again.waitForExistence(timeout: 20))
+        again.tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        waitForComposer(typed, timeout: 5, "the draft didn't survive a cold launch")
+        pause(1)
+
+        print("STEM_STEP draft-desktop")
+        waitForComposer("Written on the desktop", "the desktop's draft never showed on the phone")
+        pause(1)
+        capture("draft-from-desktop")
+        clearDraft()
+    }
+
+    /// Past five lines the composer offers its text full screen: the
+    /// button at the text's top right opens it with the same text, and the
+    /// one there puts it back with what was typed full screen.
+    func testExpandEditor() {
+        openConversation()
+        clearDraft()
+        let expand = app.buttons["composer-expand"]
+        composer.tap()
+        composer.typeText("One\nTwo\nThree\nFour\nFive")
+        pause(0.8)
+        XCTAssertFalse(expand.exists, "five lines offered the full-screen editor")
+        composer.typeText("\nSix\nSeven\nEight")
+        XCTAssertTrue(expand.waitForExistence(timeout: 3), "no expand button past five lines")
+        let card = element("stem-input")
+        XCTAssertEqual(expand.frame.maxX, card.frame.maxX - 18, accuracy: 1.5, "the expand button isn't at the text's right")
+        XCTAssertLessThan(expand.frame.minY - card.frame.minY, 30, "the expand button isn't at the text's top")
+        capture("expand-offered")
+
+        expand.tap()
+        let editor = app.textViews["composer-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 3), "the full-screen editor never opened")
+        pause(0.8)
+        XCTAssertEqual(editor.value as? String, "One\nTwo\nThree\nFour\nFive\nSix\nSeven\nEight")
+        XCTAssertGreaterThan(editor.frame.height, app.frame.height * 0.3, "the editor isn't full screen")
+        // XCUITest's hasFocus reads false for either text view once a
+        // screen has been presented over the chat: typing is the proof.
+        XCTAssertTrue(app.keyboards.firstMatch.exists, "the keyboard went down")
+        capture("expand-editor")
+        // The caret is where it was in the card: at the end.
+        editor.typeText("\nNine, typed full screen")
+        pause(0.5)
+        capture("expand-editor-typed")
+        app.buttons["composer-collapse"].tap()
+        pause(1)
+        XCTAssertFalse(editor.exists)
+        XCTAssertEqual(composerText, "One\nTwo\nThree\nFour\nFive\nSix\nSeven\nEight\nNine, typed full screen")
+        XCTAssertTrue(app.keyboards.firstMatch.exists, "the keyboard went down on collapsing")
+        composer.typeText(" and after")
+        XCTAssertTrue(composerText.hasSuffix("full screen and after"), "the caret didn't come back where it was left")
+        capture("expand-collapsed")
+
+        // A draft written on the desktop while the text is full screen
+        // shows there, and goes back to the card with it.
+        expand.tap()
+        XCTAssertTrue(editor.waitForExistence(timeout: 3))
+        pause(1.5)
+        print("STEM_STEP draft-desktop")
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline, editor.value as? String != "Written on the desktop" { pause(0.3) }
+        XCTAssertEqual(editor.value as? String, "Written on the desktop", "the desktop's draft didn't reach the full-screen editor")
+        capture("expand-editor-desktop")
+        app.buttons["composer-collapse"].tap()
+        pause(1)
+        XCTAssertEqual(composerText, "Written on the desktop", "collapsing put back an older text")
+        clearDraft()
+    }
+
+    /// Steering sent while the agent works waits under the working line,
+    /// as next in line, dimmed; when the agent takes it up it goes into
+    /// the transcript above the line.
+    func testSteeringWaitsUnderTheWorkingLine() {
+        openConversation()
+        clearDraft()
+        composer.tap()
+        composer.typeText("Run `sleep 25` with your shell tool, one call, then say only: first done.")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(working.waitForExistence(timeout: 20), "the agent never started")
+        pause(3)
+        composer.typeText("Then say only: steering taken (STEER-\(Int(Date().timeIntervalSince1970) % 1000))")
+        let token = composerText.components(separatedBy: "(").last?.dropLast() ?? ""
+        app.buttons["Send"].tap()
+        let steer = app.descendants(matching: .any).matching(identifier: "stem-message").matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "Then say only", String(token))).firstMatch
+        XCTAssertTrue(steer.waitForExistence(timeout: 5), "the steering never showed")
+        pause(1)
+        XCTAssertTrue(working.exists, "the turn ended before the steering could wait")
+        XCTAssertGreaterThanOrEqual(steer.frame.minY, working.frame.maxY - 1, "waiting steering isn't under the working line")
+        print("STEM_FRAMES queued working=\(working.frame) steer=\(steer.frame)")
+        capture("steering-queued")
+
+        let deadline = Date().addingTimeInterval(180)
+        while Date() < deadline, working.exists, steer.frame.minY >= working.frame.maxY - 1 { pause(0.5) }
+        pause(1.5)
+        if working.exists {
+            XCTAssertLessThanOrEqual(steer.frame.maxY, working.frame.minY + 1, "taken steering isn't above the working line")
+            print("STEM_FRAMES taken working=\(working.frame) steer=\(steer.frame)")
+        }
+        capture("steering-taken")
+        while Date() < deadline, working.exists { pause(1) }
+        pause(1)
+        let reply = app.descendants(matching: .any).matching(identifier: "stem-message").matching(NSPredicate(format: "label CONTAINS[c] %@", "steering taken")).allElementsBoundByIndex
+        XCTAssertTrue(reply.contains { $0.frame.minY > steer.frame.maxY - 1 && !$0.label.contains("Then say only") }, "the agent's answer to the steering isn't under it")
+        capture("steering-answered")
     }
 }
