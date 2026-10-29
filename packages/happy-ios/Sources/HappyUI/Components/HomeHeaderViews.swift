@@ -16,9 +16,14 @@ final class PartialBlurView: UIVisualEffectView {
     var presence: CGFloat = 1 {
         didSet {
             guard presence != oldValue else { return }
-            animator?.fractionComplete = fraction * presence
-            // A paused animator at 0 draws the whole material, not none.
+            // A paused animator made at 0 draws the whole material, not
+            // none, whatever it is moved to after: none is no animator.
             isHidden = presence <= 0
+            if animator == nil || presence <= 0 {
+                rebuild()
+            } else {
+                animator?.fractionComplete = fraction * presence
+            }
         }
     }
 
@@ -47,7 +52,9 @@ final class PartialBlurView: UIVisualEffectView {
         animator?.stopAnimation(true)
         animator = nil
         effect = nil
-        guard window != nil else { return }
+        let target = fraction * presence
+        isHidden = target <= 0
+        guard window != nil, target > 0 else { return }
         // expo-blur names the material for the app's theme, not the system's.
         let style: UIBlurEffect.Style = traitCollection.userInterfaceStyle == .dark
             ? .systemUltraThinMaterialDark
@@ -94,7 +101,18 @@ final class HeaderGlassView: UIView {
         super.layoutSubviews()
         let radius = bounds.height / 2
         layer.cornerRadius = radius
-        layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: radius).cgPath
+        let path = UIBezierPath(roundedRect: bounds, cornerRadius: radius).cgPath
+        // Inside an animation the shadow goes with the shape, not ahead of it.
+        let duration = UIView.inheritedAnimationDuration
+        if duration > 0, let from = layer.presentation()?.shadowPath ?? layer.shadowPath, from != path {
+            let animation = CABasicAnimation(keyPath: "shadowPath")
+            animation.fromValue = from
+            animation.toValue = path
+            animation.duration = duration
+            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(animation, forKey: "shadowPath")
+        }
+        layer.shadowPath = path
         // `staticMaterialClip` fills the padding box, inside the rim.
         let inner = bounds.insetBy(dx: HomeHeaderLayout.Metrics.controlBorder, dy: HomeHeaderLayout.Metrics.controlBorder)
         blur.frame = inner
@@ -111,30 +129,99 @@ final class HeaderGlassView: UIView {
     }
 }
 
-/// MobileHeaderScrim.tsx, home variant: a light blur and a dim wash, both
-/// at full strength at the screen's edge and feathered out over the last
-/// 36pt towards the content. The header's runs down from the top; the
-/// dock's (`edge="bottom"`) runs up from the foot.
+/// A blur and nothing else: the system's blur with its material's tint,
+/// saturation and brightness taken out, so over a plain ground it draws
+/// that ground exactly and only what is under it softens. Were UIKit ever
+/// to build its blur another way, it draws nothing rather than a tinted
+/// material.
+final class EdgeBlurView: UIVisualEffectView {
+    /// The blur's radius, in points.
+    var radius: CGFloat {
+        didSet { if radius != oldValue { strip() } }
+    }
+
+    init(radius: CGFloat) {
+        self.radius = radius
+        super.init(effect: UIBlurEffect(style: .regular))
+        isUserInteractionEnabled = false
+        // A new style rebuilds the material, hidden or not.
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in
+            self.strip()
+            self.setNeedsLayout()
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        strip()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        strip()
+    }
+
+    /// UIKit sets its effect up again as it sees fit: each time, only the
+    /// backdrop's gaussian blur is kept, at `radius`, and the material's
+    /// overlays go.
+    private func strip() {
+        for view in subviews where view !== contentView {
+            let filters = (view.layer.filters as? [NSObject]) ?? []
+            let named = filters.first { $0.responds(to: Selector(("name"))) && ($0.value(forKey: "name") as? String) == "gaussianBlur" }
+            guard let found = named, let blur = found.copy() as? NSObject else {
+                view.isHidden = true
+                continue
+            }
+            // A fresh filter, so the backdrop redraws at the new radius.
+            blur.setValue(radius, forKey: "inputRadius")
+            view.layer.filters = [blur]
+            view.isHidden = false
+        }
+    }
+}
+
+/// An edge where content scrolls under chrome, as Telegram treats its
+/// two (`HeaderScrim`): a fade into the screen's own `ground`, so with
+/// nothing under it the edge is that ground. The header's (`.top`) runs
+/// down from the top, nearly whole with a light blur, and feathers out
+/// over its last 36pt; the dock's and the composer's (`.bottom`) are a
+/// light fade at the screen's foot and no blur.
 final class HeaderScrimView: UIView {
     enum Edge {
         case top
         case bottom
     }
 
-    private let blur = PartialBlurView(fraction: HeaderScrim.edgeBlurFraction)
-    private let blurMask = CAGradientLayer()
-    private let tint = CAGradientLayer()
+    let edge: Edge
+    /// The screen's ground the edge fades into.
+    var ground: UIColor = UIColor(Palette.surface) {
+        didSet { setNeedsLayout() }
+    }
+
+    private let blur: EdgeBlurView?
+    private let feather = HeaderScrimFeatherView()
+    private let fade = CAGradientLayer()
 
     init(edge: Edge = .top) {
+        self.edge = edge
+        blur = edge == .top ? EdgeBlurView(radius: HeaderScrim.topBlurRadius) : nil
         super.init(frame: .zero)
         isUserInteractionEnabled = false
-        blur.layer.mask = blurMask
-        addSubview(blur)
-        layer.addSublayer(tint)
-        for gradient in [blurMask, tint] {
+        for gradient in [feather.gradient, fade] {
             gradient.startPoint = CGPoint(x: 0.5, y: edge == .top ? 0 : 1)
             gradient.endPoint = CGPoint(x: 0.5, y: edge == .top ? 1 : 0)
         }
+        if let blur {
+            // A visual effect view feathers by a mask view, not its layer's mask.
+            blur.mask = feather
+            addSubview(blur)
+        }
+        layer.addSublayer(fade)
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in
             self.setNeedsLayout()
         }
@@ -145,23 +232,17 @@ final class HeaderScrimView: UIView {
         fatalError("init(coder:) is not supported")
     }
 
-    /// MobileHeaderScrim's `overlayOpacity`: scales the wash, never the
-    /// blur. The chat's header strengthens it once content is under it,
-    /// animating it in a transaction of its own.
-    var overlayOpacity: Float = 1 {
-        didSet { tint.opacity = overlayOpacity * Float(presence) }
-    }
-
-    /// How present the scrim is, 0 to 1, set a frame at a time: the wash's
-    /// opacity and the blur's strength, never this view's alpha, which
-    /// would turn the blur off.
+    /// How present the edge is, 0 to 1, set a frame at a time: the fade's
+    /// opacity and the blur's radius, never this view's alpha, which would
+    /// turn the blur off.
     var presence: CGFloat = 1 {
         didSet {
             guard presence != oldValue else { return }
-            blur.presence = presence
+            blur?.radius = HeaderScrim.topBlurRadius * presence
+            blur?.isHidden = presence <= 0
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            tint.opacity = overlayOpacity * Float(presence)
+            fade.opacity = Float(presence)
             CATransaction.commit()
         }
     }
@@ -170,19 +251,32 @@ final class HeaderScrimView: UIView {
         super.layoutSubviews()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        blur.frame = bounds
-        blurMask.frame = blur.bounds
-        tint.frame = bounds
-        let dark = traitCollection.userInterfaceStyle == .dark
-        let base = UIColor(Palette.headerScrimTint).resolvedColor(with: traitCollection)
-        let tintStops = HeaderScrim.stops(height: bounds.height, peak: dark ? HeaderScrim.strongPeakDark : HeaderScrim.strongPeakLight)
-        tint.colors = tintStops.map { base.withAlphaComponent($0.alpha).cgColor }
-        tint.locations = tintStops.map { NSNumber(value: $0.location) }
-        let maskStops = HeaderScrim.stops(height: bounds.height, peak: 1)
-        blurMask.colors = maskStops.map { UIColor.white.withAlphaComponent($0.alpha).cgColor }
-        blurMask.locations = maskStops.map { NSNumber(value: $0.location) }
+        fade.frame = bounds
+        let ground = ground.resolvedColor(with: traitCollection)
+        let stops: [HeaderScrim.Stop]
+        switch edge {
+        case .top:
+            stops = HeaderScrim.stops(height: bounds.height)
+            fade.colors = stops.map { ground.withAlphaComponent($0.alpha * HeaderScrim.topPeak).cgColor }
+        case .bottom:
+            stops = HeaderScrim.footStops()
+            fade.colors = stops.map { ground.withAlphaComponent($0.alpha).cgColor }
+        }
+        fade.locations = stops.map { NSNumber(value: $0.location) }
+        if let blur {
+            blur.frame = bounds
+            feather.frame = blur.bounds
+            feather.gradient.colors = stops.map { UIColor.white.withAlphaComponent($0.alpha).cgColor }
+            feather.gradient.locations = fade.locations
+        }
         CATransaction.commit()
     }
+}
+
+/// The blur's mask: whole where the edge holds, clear past its feather.
+private final class HeaderScrimFeatherView: UIView {
+    override class var layerClass: AnyClass { CAGradientLayer.self }
+    var gradient: CAGradientLayer { layer as! CAGradientLayer }
 }
 
 /// StatusDot.tsx: a dot that breathes between full and 0.3 opacity while
@@ -256,6 +350,20 @@ final class HomeHeaderView: UIView {
     let settingsButton = HeaderIconButton(.ionicons("settings-outline"), size: 22, label: Strings.Settings.title)
     /// Stem Cells' search, in the pill's first slot.
     let searchButton = HeaderIconButton(.ionicons("search-outline"), size: 22, label: Strings.StemCells.search)
+    /// What search is typed into: the pill grows into it, after the glyph.
+    let searchField = UITextField()
+    /// The glass circle at the right that ends the search.
+    let searchCancel = HeaderGlassView()
+    let searchCancelButton = HeaderIconButton(.ionicons("close-outline"), size: 26, label: Strings.Common.cancel)
+    /// A computer's search is open in the header: the pill is its field,
+    /// the logo and title give way. Set inside an animation to grow it.
+    var isSearching = false {
+        didSet {
+            guard isSearching != oldValue else { return }
+            applySearching()
+            setNeedsLayout()
+        }
+    }
     /// A computer's home: the pill is search alone, and the picture is the
     /// way to settings, so there is no gear (and no filter: a computer's
     /// home has nothing to group).
@@ -307,12 +415,63 @@ final class HomeHeaderView: UIView {
             actions.addSubview(view)
         }
         searchButton.isHidden = true
+        searchField.font = StemCellsFonts.ui(.regular, size: 17)
+        searchField.textColor = UIColor(Palette.text)
+        searchField.tintColor = UIColor(Palette.stemCellsSettingsPrimary)
+        searchField.placeholder = Strings.StemCells.search
+        searchField.returnKeyType = .search
+        searchField.enablesReturnKeyAutomatically = false
+        searchField.clearButtonMode = .whileEditing
+        searchField.autocorrectionType = .no
+        searchField.autocapitalizationType = .none
+        searchField.spellCheckingType = .no
+        searchField.accessibilityIdentifier = "stem-search-field"
+        actions.addSubview(searchField)
+        searchCancel.addSubview(searchCancelButton)
+        searchCancelButton.accessibilityIdentifier = "stem-search-cancel"
         titleLabel.string = Strings.Home.sessionsTitle
         titleLabel.accessibilityTraits = .header
-        for view in [scrim, logoControl, actions, titleLabel, statusDot, statusLabel] {
+        // The title sits under the pill, which grows over it into the field.
+        for view in [scrim, logoControl, titleLabel, statusDot, statusLabel, actions, searchCancel] {
             addSubview(view)
         }
         applyStatus()
+        applySearching()
+    }
+
+    /// What shows for the search's state. In an animation the circle
+    /// grows with the pill, while the logo and title are gone before the
+    /// glass reaches them (it's clear enough to show them through) and the
+    /// field comes in after; closing, the other way round.
+    private func applySearching() {
+        let searching = isSearching
+        let quiet: [UIView] = [logoControl, titleLabel, statusDot, statusLabel]
+        // What goes, then what comes.
+        let going = { for view in (searching ? quiet : [self.searchField]) { view.alpha = 0 } }
+        let coming = { for view in (searching ? [self.searchField] : quiet) { view.alpha = 1 } }
+        if UIView.inheritedAnimationDuration > 0 {
+            UIView.animate(withDuration: 0.08, delay: 0, options: [.beginFromCurrentState, .curveEaseOut, .overrideInheritedDuration, .overrideInheritedCurve], animations: going)
+            UIView.animate(withDuration: 0.2, delay: 0.1, options: [.beginFromCurrentState, .curveEaseIn, .overrideInheritedDuration, .overrideInheritedCurve], animations: coming)
+        } else {
+            going()
+            coming()
+        }
+        searchCancel.alpha = searching ? 1 : 0
+        searchCancel.transform = searching ? .identity : CGAffineTransform(scaleX: 0.6, y: 0.6)
+        // The glyph stays as the field's own; the field takes its touches.
+        searchButton.isUserInteractionEnabled = !isSearching
+        searchButton.isAccessibilityElement = !isSearching
+        logoControl.isUserInteractionEnabled = !isSearching && logoInteractive
+        for view in [logoControl, titleLabel] as [UIView] { view.accessibilityElementsHidden = isSearching }
+        searchCancel.isUserInteractionEnabled = isSearching
+        searchCancel.accessibilityElementsHidden = !isSearching
+        searchField.isUserInteractionEnabled = isSearching
+        searchField.accessibilityElementsHidden = !isSearching
+    }
+
+    /// Whether the logo takes taps when search isn't open over it.
+    var logoInteractive = false {
+        didSet { logoControl.isUserInteractionEnabled = logoInteractive && !isSearching }
     }
 
     @available(*, unavailable)
@@ -324,6 +483,7 @@ final class HomeHeaderView: UIView {
     /// list scroll.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         if logoControl.frame.contains(point) || actions.frame.contains(point) { return true }
+        if isSearching, searchCancel.frame.contains(point) { return true }
         guard let accessory, !accessory.isHidden else { return false }
         return accessory.point(inside: convert(point, to: accessory), with: event)
     }
@@ -361,6 +521,7 @@ final class HomeHeaderView: UIView {
         input.titleX = titleX
         input.backdropExtension = backdropExtension
         input.singleAction = stemCellsActions
+        input.searching = isSearching
         return HomeHeaderLayout(input)
     }
 
@@ -384,6 +545,11 @@ final class HomeHeaderView: UIView {
         let second = layout.settingsButton.offsetBy(dx: -origin.x, dy: -origin.y)
         searchButton.setLayoutFrame(first)
         filterButton.setLayoutFrame(first)
+        searchField.setLayoutFrame(layout.searchField.offsetBy(dx: -origin.x, dy: -origin.y))
+        // Its transform scales it in: the frame goes through its bounds and centre.
+        searchCancel.bounds = CGRect(origin: .zero, size: layout.searchCancel.size)
+        searchCancel.center = CGPoint(x: layout.searchCancel.midX, y: layout.searchCancel.midY)
+        searchCancelButton.frame = searchCancel.bounds
         actionDivider.setLayoutFrame(layout.actionDivider.offsetBy(dx: -origin.x, dy: -origin.y))
         settingsButton.setLayoutFrame(second)
         titleLabel.setLayoutFrame(layout.title)

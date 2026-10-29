@@ -5,7 +5,8 @@ import HappyWire
 /// happy-desktop's `messageReferencesCreate` (`messageReferences.ts`), over
 /// the bots and tasks this phone holds. An agent reads as its conversation's
 /// name (a bot's or task's own as the bot's or task's), a workspace as the
-/// bot, task or subtask it holds, an artifact as its current title. What
+/// bot, task or subtask it holds, an artifact as its current title, a
+/// person as "@" and their name, set apart when it is the reader. What
 /// the lists don't hold (archived, a project, a service, a kind this build
 /// doesn't know) is inert words that say what it was.
 public struct StemCellReferences: Equatable, Sendable {
@@ -22,15 +23,33 @@ public struct StemCellReferences: Equatable, Sendable {
         case missing
     }
 
+    /// An HTML artifact whose latest version asks to be shown inline at its
+    /// full height (`display` `inline_expanded`): the version and entry the
+    /// conversation's web view loads, and the colour behind it, if any.
+    public struct Page: Equatable, Sendable {
+        public var version: Int
+        public var entry: String
+        public var background: String?
+
+        public init(version: Int, entry: String, background: String? = nil) {
+            self.version = version
+            self.entry = entry
+            self.background = background
+        }
+    }
+
     public enum View: Equatable, Sendable {
         /// Opens: a name to tap. `reading` while an artifact's title is on its way.
         case link(String, reading: Bool = false)
         /// Opens nothing: plain words.
         case text(String)
+        /// A person named in the message: "@" and their name, set apart,
+        /// and more so when it is the person reading (`me`).
+        case mention(String, me: Bool)
 
         public var label: String {
             switch self {
-            case .link(let label, _), .text(let label): label
+            case .link(let label, _), .text(let label), .mention(let label, _): label
             }
         }
     }
@@ -38,9 +57,17 @@ public struct StemCellReferences: Equatable, Sendable {
     public var agents: [String: Entity] = [:]
     public var workspaces: [String: Entity] = [:]
     public var artifacts: [String: Artifact] = [:]
+    /// The artifacts read so far that want to be shown inline, by ID.
+    public var pages: [String: Page] = [:]
     /// The conversation's own subagents, by ID, as titled ("" untitled):
     /// a hidden one reads as its title, and opens nothing.
     public var subagents: [String: String] = [:]
+    /// The people a message may mention, by user ID, as named.
+    public var users: [String: String] = [:]
+    /// The person reading: their mentions are set apart.
+    public var me: String?
+    /// People the daemon doesn't know; any other unnamed one is still being read.
+    public var missingUsers: Set<String> = []
 
     public init(agents: [String: Entity] = [:], workspaces: [String: Entity] = [:], artifacts: [String: Artifact] = [:]) {
         self.agents = agents
@@ -86,11 +113,36 @@ public struct StemCellReferences: Equatable, Sendable {
         return .active(title: title, type: object["type"]?.stringValue ?? "", latestVersion: Int(object["latestVersion"]?.numberValue ?? 1))
     }
 
+    /// An artifact object as a page the conversation shows inline: an active
+    /// HTML artifact of files (not a live URL) whose latest version asks for
+    /// `inline_expanded`. Nil for anything else, which stays a card.
+    public static func page(_ object: JSONValue) -> Page? {
+        guard object["status"]?.stringValue != "deleted", object["type"]?.stringValue == "html",
+              object["display"]?.stringValue == "inline_expanded",
+              object["live"] == nil || object["live"] == .null,
+              let entry = object["entry"]?["path"]?.stringValue, let version = object["latestVersion"]?.numberValue else { return nil }
+        // `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`, and nothing else.
+        let background = object["background"]?.stringValue.flatMap { value in
+            value.range(of: "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$", options: .regularExpression) != nil ? value.lowercased() : nil
+        }
+        return Page(version: Int(version), entry: entry, background: background)
+    }
+
     /// The artifacts `text` names whose titles haven't been read.
     public func unread(in text: String) -> [String] {
         guard text.contains("<happy-artifact") else { return [] }
         var ids: [String] = []
         for case .reference(let reference, _) in HappyReferences.parse(text) where reference.kind == "artifact" && artifacts[reference.id] == nil && !ids.contains(reference.id) {
+            ids.append(reference.id)
+        }
+        return ids
+    }
+
+    /// The people `text` mentions whose names haven't been read.
+    public func unknownUsers(in text: String) -> [String] {
+        guard text.contains("<happy-user") else { return [] }
+        var ids: [String] = []
+        for case .reference(let reference, _) in HappyReferences.parse(text) where reference.kind == "user" && users[reference.id] == nil && !ids.contains(reference.id) {
             ids.append(reference.id)
         }
         return ids
@@ -121,6 +173,11 @@ public struct StemCellReferences: Equatable, Sendable {
             }
             let label = entity.label.trimmingCharacters(in: .whitespacesAndNewlines)
             return .link(label.isEmpty ? "Untitled \(reference.kind)" : label)
+        case "user":
+            guard let name = users[reference.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+                return missingUsers.contains(reference.id) ? inert : .mention("@…", me: reference.id == me)
+            }
+            return .mention("@" + name, me: reference.id == me)
         default:
             // Projects aren't on this phone; services open nowhere yet.
             return inert

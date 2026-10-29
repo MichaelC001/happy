@@ -289,6 +289,81 @@ final class StemCellsLayoutTests: XCTestCase {
         XCTAssertEqual(full.frames[0].minY, 180)
     }
 
+    /// ConversationView's keys, as MessageList takes them: an idle send by
+    /// a reader at the end is lifted, one by a reader further up moves
+    /// nothing; a send mid-turn is never lifted and carries a reader within
+    /// 80 of the end to it.
+    func testASendLiftsOnlyAReaderAtTheEnd() {
+        func send(_ working: Bool, _ following: Bool, _ distance: CGFloat) -> [Bool] {
+            let send = StemCellSendLift.Send(working: working, following: following, distanceFromEnd: distance)
+            return [send.lifts, send.follows]
+        }
+        XCTAssertEqual(send(false, true, 0), [true, true])
+        XCTAssertEqual(send(false, false, 40), [false, false])
+        XCTAssertEqual(send(true, true, 0), [false, true])
+        XCTAssertEqual(send(true, false, 80), [false, true])
+        XCTAssertEqual(send(true, false, 81), [false, false])
+    }
+
+    /// The room under a lift stays as the reader scrolls away and back; only
+    /// a viewport taken another height lets it go, once wholly out of view.
+    func testTheRoomUnderALiftGoesOnlyAfterAResizeOutOfView() {
+        XCTAssertFalse(StemCellSendLift.releases(resized: false, viewportBottom: 100, rowsEnd: 500))
+        XCTAssertFalse(StemCellSendLift.releases(resized: true, viewportBottom: 501, rowsEnd: 500))
+        XCTAssertTrue(StemCellSendLift.releases(resized: true, viewportBottom: 500, rowsEnd: 500))
+        XCTAssertFalse(StemCellSendLift.releases(resized: true, viewportBottom: 100, rowsEnd: nil))
+    }
+
+    /// A height laid out while a finger pulls past the end, or the scroll
+    /// bounces back from it, waits; the finger off and the scroll back
+    /// inside, it is given.
+    func testAHeightWaitsWhileTheScrollIsPastAnEnd() {
+        // 1000 high under a 600 viewport, insets 100 and 150: the end is at 550.
+        func scroll(_ offset: CGFloat, tracking: Bool = false, decelerating: Bool = false) -> StemCellChatScrollHold.Scroll {
+            .init(offset: offset, insetTop: 100, insetBottom: 150, contentHeight: 1000, viewport: 600, tracking: tracking, decelerating: decelerating)
+        }
+        XCTAssertEqual(scroll(550).end(), 550)
+        XCTAssertFalse(scroll(550.5).stretched())
+        XCTAssertTrue(scroll(551).stretched())
+        XCTAssertTrue(scroll(-101).stretched())
+        // Past the end at the new height only: a shorter height would clamp it.
+        XCTAssertTrue(scroll(500).stretched(contentHeight: 900))
+
+        var hold = StemCellChatScrollHold()
+        // At rest, given at once.
+        XCTAssertEqual(hold.laidOut(1024, scroll: scroll(550)), 1024)
+        // The same height: nothing to give.
+        XCTAssertNil(hold.laidOut(1000, scroll: scroll(580, tracking: true)))
+        XCTAssertNil(hold.held)
+        // Pulled past the end: held.
+        XCTAssertNil(hold.laidOut(1024, scroll: scroll(580, tracking: true)))
+        XCTAssertNil(hold.laidOut(1048, scroll: scroll(590, tracking: true)))
+        XCTAssertEqual(hold.held, 1048)
+        // Inside the ends, a finger on it: given, it moves nothing on screen.
+        var inside = StemCellChatScrollHold()
+        XCTAssertEqual(inside.laidOut(1024, scroll: scroll(300, tracking: true)), 1024)
+        // Still pulled: kept.
+        XCTAssertNil(hold.release(scroll: scroll(590, tracking: true)))
+        // Let go, bouncing back past the end: kept.
+        XCTAssertNil(hold.release(scroll: scroll(560, decelerating: true)))
+        // Back inside: given, once.
+        XCTAssertEqual(hold.release(scroll: scroll(550, decelerating: true)), 1048)
+        XCTAssertNil(hold.held)
+        XCTAssertNil(hold.release(scroll: scroll(550)))
+        // Following the end waits while anything moves the scroll.
+        XCTAssertTrue(StemCellChatScrollHold.follows(scroll(550)))
+        XCTAssertFalse(StemCellChatScrollHold.follows(scroll(550, tracking: true)))
+        XCTAssertFalse(StemCellChatScrollHold.follows(scroll(550, decelerating: true)))
+    }
+
+    /// An inline page sits under its artifact's card, across the column at its measured height.
+    func testAnInlinePageSitsUnderItsCard() {
+        let layout = StemCellMessageLayout.agent(width: 390, parts: [.card, .page(height: 132)])
+        let card = StemCellResultCardLayout.height
+        XCTAssertEqual(layout.parts, [.card(rect(16, 8, 358, card)), .page(rect(16, 8 + card + 8, 358, 132))])
+        XCTAssertEqual(layout.size, CGSize(width: 390, height: 8 + card + 8 + 132 + 8))
+    }
+
     func testAgentParagraphsSitOneGapApart() {
         let layout = StemCellMessageLayout.agent(width: 390, blocks: [.text(block(height: 24)), .text(block(height: 48))])
         XCTAssertEqual(layout.markdownOrigin, CGPoint(x: 16, y: 8))
@@ -311,11 +386,87 @@ final class StemCellsLayoutTests: XCTestCase {
         XCTAssertEqual(short.text, rect(322, 18, 40, 20))
         XCTAssertNil(short.status)
         XCTAssertEqual(short.size, CGSize(width: 390, height: 56))
-        // Long text wraps at 76% of the column, less the padding.
+        // Long text wraps at 36 from the left, less the padding: 314.
         let long = StemCellMessageLayout.user(width: 390, text: text(String(repeating: "a", count: 100), lineHeight: 20), showsStatus: true)
-        XCTAssertEqual(long.bubble, rect(102, 8, 272, 100))
-        XCTAssertEqual(long.text, rect(114, 18, 248, 80))
-        XCTAssertEqual(long.status, rect(16, 110, 358, 14))
-        XCTAssertEqual(long.size.height, 132)
+        XCTAssertEqual(long.bubble, rect(38, 8, 336, 80))
+        XCTAssertEqual(long.text, rect(50, 18, 312, 60))
+        XCTAssertEqual(long.status, rect(16, 90, 358, 14))
+        XCTAssertEqual(long.size.height, 112)
+        XCTAssertNil(long.foldControl)
+    }
+
+    /// As wide as Telegram's on a phone: 36 clear at the left, our 16 at
+    /// the right; a picture sent alone reaches as far.
+    func testAPersonsBubbleReachesTelegramsWidth() {
+        for (width, bubble) in [(375, 323), (402, 350), (440, 388)] as [(CGFloat, CGFloat)] {
+            let layout = StemCellMessageLayout.user(width: width, text: block(height: 24), showsStatus: false)
+            XCTAssertEqual(layout.bubble, rect(36, 8, bubble, 44), "at \(width)")
+            XCTAssertEqual(layout.text, rect(48, 18, bubble - 24, 24), "at \(width)")
+            let picture = StemCellMessageLayout.user(width: width, text: nil, pictures: [StemCellMediaFlow.Image(width: 4000, height: 2000, scale: nil)], showsStatus: false)
+            XCTAssertEqual(picture.pictures, [rect(36, 8, bubble, bubble / 2)], "at \(width)")
+        }
+    }
+
+    /// Desktop's fold: past ten lines the bubble shows ten, Show full 8
+    /// under them; opened, every line and Show less. Ten lines or fewer,
+    /// nothing folds.
+    func testALongMessageShowsTenLinesUntilOpened() {
+        let long = String(repeating: "a", count: 1200)
+        func layout(_ width: CGFloat, opened: Bool, _ string: String = long) -> StemCellMessageLayout {
+            StemCellMessageLayout.user(
+                width: width, text: text(string, lineHeight: 24),
+                fold: .init(preview: text(string, lineHeight: 24, maxLines: 10), control: fixed(60, 16), opened: opened, lineHeight: 24),
+                showsStatus: false
+            )
+        }
+        // 375: 37 a line, 33 lines; 402: 40, 30; 440: 45, 27.
+        for (width, x, line, lines) in [(375, 39, 296, 33), (402, 42, 320, 30), (440, 40, 360, 27)] as [(CGFloat, CGFloat, CGFloat, CGFloat)] {
+            let closed = layout(width, opened: false)
+            XCTAssertTrue(closed.cut)
+            XCTAssertEqual(closed.bubble, rect(x, 8, line + 24, 284), "at \(width)")
+            XCTAssertEqual(closed.text, rect(x + 12, 18, line, 240), "at \(width)")
+            XCTAssertEqual(closed.foldControl, rect(x + 12, 266, 60, 16), "at \(width)")
+            XCTAssertEqual(closed.size, CGSize(width: width, height: 300), "at \(width)")
+            let open = layout(width, opened: true)
+            XCTAssertFalse(open.cut)
+            XCTAssertEqual(open.bubble, rect(x, 8, line + 24, lines * 24 + 44), "at \(width)")
+            XCTAssertEqual(open.text, rect(x + 12, 18, line, lines * 24), "at \(width)")
+            XCTAssertEqual(open.foldControl, rect(x + 12, 18 + lines * 24 + 8, 60, 16), "at \(width)")
+            XCTAssertEqual(open.size.height, lines * 24 + 60, "at \(width)")
+        }
+        // Exactly ten lines at 402.
+        let ten = layout(402, opened: false, String(repeating: "a", count: 400))
+        XCTAssertFalse(ten.cut)
+        XCTAssertNil(ten.foldControl)
+        XCTAssertEqual(ten.bubble, rect(42, 8, 344, 260))
+        // Cut, it keeps the whole text's width: a wider line further down
+        // doesn't widen it on opening.
+        let narrowTop = StemCellMessageLayout.user(
+            width: 402, text: fixed(300, 720),
+            fold: .init(preview: fixed(200, 240), control: fixed(60, 16), opened: false, lineHeight: 24), showsStatus: false
+        )
+        XCTAssertEqual(narrowTop.bubble, rect(62, 8, 324, 284))
+        XCTAssertEqual(narrowTop.text, rect(74, 18, 300, 240))
+        // A cut line's ellipsis wider than any whole line widens it, cut
+        // and opened alike.
+        for opened in [false, true] {
+            let ellipsis = StemCellMessageLayout.user(
+                width: 402, text: fixed(300, 720),
+                fold: .init(preview: fixed(310, 240), control: fixed(60, 16), opened: opened, lineHeight: 24), showsStatus: false
+            )
+            XCTAssertEqual(ellipsis.bubble?.width, 334)
+            XCTAssertEqual(ellipsis.text?.width, 310)
+        }
+        // Ten lines tall or less, the preview is never measured.
+        let unmeasured = StemCellMessageLayout.user(
+            width: 402, text: fixed(300, 240),
+            fold: .init(preview: Measurable { _ in XCTFail("measured the preview"); return .zero }, control: fixed(60, 16), opened: false, lineHeight: 24),
+            showsStatus: false
+        )
+        XCTAssertNil(unmeasured.foldControl)
+        // A short message's Show full never widens it.
+        let short = layout(402, opened: false, "hi")
+        XCTAssertEqual(short.bubble, rect(346, 8, 40, 44))
+        XCTAssertNil(short.foldControl)
     }
 }

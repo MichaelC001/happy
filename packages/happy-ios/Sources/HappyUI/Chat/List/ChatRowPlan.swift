@@ -23,8 +23,10 @@ final class ChatRowPlan: @unchecked Sendable {
     /// Stem Cells sidebar proposals, which the screen keeps as live views
     /// over the row: each laid out, at its frame in row coordinates.
     let proposals: [(artifactId: String, layout: StemCellSidebarProposalLayout, frame: CGRect)]
+    /// What its tap toggles (Show full, Show less), as a VoiceOver action.
+    let toggles: String?
 
-    init(id: String, size: CGSize, items: [ChatDrawItem], hits: [ChatHit] = [], alpha: CGFloat = 1, accessibilityLabel: String? = nil, proposals: [(artifactId: String, layout: StemCellSidebarProposalLayout, frame: CGRect)] = []) {
+    init(id: String, size: CGSize, items: [ChatDrawItem], hits: [ChatHit] = [], alpha: CGFloat = 1, accessibilityLabel: String? = nil, proposals: [(artifactId: String, layout: StemCellSidebarProposalLayout, frame: CGRect)] = [], toggles: String? = nil) {
         self.id = id
         self.size = size
         self.items = items
@@ -32,6 +34,7 @@ final class ChatRowPlan: @unchecked Sendable {
         self.alpha = alpha
         self.accessibilityLabel = accessibilityLabel
         self.proposals = proposals
+        self.toggles = toggles
     }
 }
 
@@ -94,6 +97,16 @@ enum ChatDrawItem {
 enum ChatEmbed: Equatable, Sendable {
     /// A story, by its ID (`StoryInlineView`).
     case story(String)
+    /// An HTML artifact's page (`StemCellInlinePageView`).
+    case page(StemCellInlinePage)
+}
+
+/// An artifact's page shown inline in a Stem Cells conversation: the
+/// version and entry its web view loads through the paired computer.
+struct StemCellInlinePage: Equatable, Sendable {
+    var artifactId: String
+    var title: String
+    var page: StemCellReferences.Page
 }
 
 /// A diagram in a row: `index` is its place among the row's diagrams, so

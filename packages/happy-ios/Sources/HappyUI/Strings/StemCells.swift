@@ -11,10 +11,23 @@ extension Strings {
         // Rows (HappyAgentSpacesSidebar.tsx, AppHappyAgentView.tsx).
         public static let search = "Search"
         public static let create = "Create"
+
+        // Search in home's header: what it finds below the sidebar's rows,
+        // and the quick actions, as desktop's ⌘K palette names its own
+        // (commandPaletteResults.ts `actionRows`).
+        public static let quickActions = "Quick actions"
+        public static let settingsResults = "Settings"
+        public static let newWork = "New work"
+        public static let newWorkWithPicture = "New work with a picture"
+        public static let openSettingsAction = "Open settings"
         /// `happyAgentSpaceLabel`: work is "New" until it has a name.
         public static let untitled = "New"
         public static let untitledSession = "Untitled"
         public static let prioritizing = "Prioritizing"
+        /// A row someone looped the person into, not yet opened, for VoiceOver.
+        public static let newRow = "new"
+        /// A row whose title shimmers while its work runs, for VoiceOver.
+        public static let workingRow = "working"
 
         // Menus.
         public static let renameTask = "Rename task"
@@ -103,6 +116,9 @@ extension Strings {
         }
         public static let sending = "Sending…"
         public static let sendFailed = "Not sent. Tap to retry."
+        /// Under a long message cut to its first lines, and opened (desktop's).
+        public static let showFull = "Show full"
+        public static let showLess = "Show less"
 
 
         // A Surface on the phone: read, and a todo added.

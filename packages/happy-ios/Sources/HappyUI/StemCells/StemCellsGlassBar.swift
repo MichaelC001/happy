@@ -41,6 +41,11 @@ final class StemCellsGlassBar: UIView {
         }
     }
     var onClose: (() -> Void)?
+    /// The scrim under the row, keeping what scrolls under it legible.
+    /// Off for a screen with nothing on the row but its glass.
+    var scrims = true {
+        didSet { if scrims != oldValue { setNeedsLayout() } }
+    }
     var title: String? {
         didSet {
             guard title != oldValue else { return }
@@ -200,6 +205,8 @@ final class StemCellsGlassBar: UIView {
     }
 
     fileprivate func pin(to scroll: UIScrollView) {
+        // The blur comes in as the screen's content goes under the row.
+        scrim.presence = HeaderScrim.presence(scrolledUnder: scroll.contentOffset.y + scroll.adjustedContentInset.top)
         let frame = CGRect(origin: scroll.contentOffset, size: scroll.bounds.size)
         if self.frame.size != frame.size { setNeedsLayout() }
         if self.frame != frame { self.frame = frame }
@@ -217,8 +224,10 @@ final class StemCellsGlassBar: UIView {
         super.layoutSubviews()
         let layout = layout
         scrim.frame = layout.backdrop
+        // It fades into the screen's own ground, whatever that is.
+        if let ground = owner?.view.backgroundColor, scrim.ground != ground { scrim.ground = ground }
         // Nothing on the row, nothing to keep legible.
-        scrim.isHidden = leading == nil && !closes && title == nil && actions.isEmpty && !isSearching
+        scrim.isHidden = !scrims || (leading == nil && !closes && title == nil && actions.isEmpty && !isSearching)
         place(leadingGlass, layout.leading)
         leadingButton.frame = leadingGlass.bounds
         place(closeGlass, layout.close)

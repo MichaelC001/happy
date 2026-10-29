@@ -56,6 +56,11 @@ public final class DirectAgentClient: Sendable {
         try await decode(AgentWire.Health.self, "GET", "/v0/health")
     }
 
+    public func artifacts(pageCursor: String? = nil) async throws -> JSONValue {
+        let query = pageCursor.map { "?pageCursor=\(Self.escape($0))" } ?? ""
+        return try await decode(JSONValue.self, "GET", "/v0/artifacts\(query)")
+    }
+
     public func userSetting(_ key: String) async throws -> JSONValue? {
         struct Response: Decodable { let setting: AgentWire.Setting }
         do { return try await decode(Response.self, "GET", "/v0/user-settings/\(Self.escape(key))").setting.value }
@@ -117,9 +122,40 @@ public final class DirectAgentClient: Sendable {
         try await decode(JSONValue.self, "GET", "/v0/bots")["bots"]?.arrayValue ?? []
     }
 
-    /// The tasks the person joined, as sent.
+    /// The tasks the person joined, as sent, each holding the person's own
+    /// membership of it (`memberships[]`, matched by `taskId`) as `membership`.
     public func tasks() async throws -> [JSONValue] {
-        try await decode(JSONValue.self, "GET", "/v0/tasks?scope=joined")["tasks"]?.arrayValue ?? []
+        let answer = try await decode(JSONValue.self, "GET", "/v0/tasks?scope=joined")
+        var memberships: [String: JSONValue] = [:]
+        for membership in answer["memberships"]?.arrayValue ?? [] {
+            if let taskId = membership["taskId"]?.stringValue { memberships[taskId] = membership }
+        }
+        return (answer["tasks"]?.arrayValue ?? []).map { task in
+            guard var object = task.objectValue, let id = object["id"]?.stringValue, let membership = memberships[id] else { return task }
+            object["membership"] = membership
+            return .object(object)
+        }
+    }
+
+    // MARK: People
+
+    /// The person this device is paired as, and their name. Standalone,
+    /// `GET /v0/users` names only guests, so the reader's own name is read here.
+    public func profileUser() async throws -> (id: String, name: String)? {
+        let profile = try await decode(JSONValue.self, "GET", "/v0/profile")["profile"]
+        guard let id = profile?["userId"]?.stringValue else { return nil }
+        return (id, profile?["name"]?.stringValue ?? "")
+    }
+
+    /// People by ID (at most 100 a read), as named; unknown ones are left out.
+    public func userNames(_ ids: [String]) async throws -> [String: String] {
+        guard !ids.isEmpty else { return [:] }
+        let answer = try await decode(JSONValue.self, "GET", "/v0/users?ids=" + ids.prefix(100).map(Self.escape).joined(separator: ","))
+        var names: [String: String] = [:]
+        for user in answer["users"]?.arrayValue ?? [] {
+            if let id = user["id"]?.stringValue { names[id] = user["name"]?.stringValue ?? "" }
+        }
+        return names
     }
 
     public func renameTask(_ taskId: String, name: String) async throws {
@@ -325,6 +361,13 @@ public final class DirectAgentClient: Sendable {
     public func artifact(_ artifactId: String) async throws -> JSONValue {
         guard let artifact = try await decode(JSONValue.self, "GET", "/v0/artifacts/\(Self.escape(artifactId))")["artifact"] else { throw DirectAgentError.invalidResponse }
         return artifact
+    }
+
+    /// What the daemon serves every page beside its files: `api/v1/style.css`,
+    /// `client.js` and the rest (`GET /v0/artifacts/:id/api/v1/*`). `path` is
+    /// what follows `api/v1/`, escaped as the page wrote it.
+    public func artifactAPI(_ artifactId: String, path: String) async throws -> DirectHTTPResponse {
+        try await send("GET", "/v0/artifacts/\(Self.escape(artifactId))/api/v1/\(path)")
     }
 
     /// One version of an artifact, `nil` for the latest: its entry, its files

@@ -37,8 +37,15 @@ public struct StemCellsDockLayout: Equatable, Sendable {
     public init(size: CGSize, safeArea: LayoutInsets, cardHeight: (CGFloat) -> CGFloat) {
         let screen = StemCellChatScreenLayout(size: size, safeArea: safeArea, keyboardTop: size.height, cardHeight: cardHeight)
         card = screen.card
-        scrim = CGRect(x: 0, y: card.midY, width: max(0, size.width), height: max(0, size.height - card.midY))
+        scrim = Self.scrim(size: size, card: card)
         listBottom = screen.listBottom
+    }
+
+    /// The scrim under a composer `card` in a screen of `size`: from the
+    /// card's middle to the screen's foot, so its feather lies behind the
+    /// card and shows only on what has gone under it.
+    public static func scrim(size: CGSize, card: CGRect) -> CGRect {
+        CGRect(x: 0, y: card.midY, width: max(0, size.width), height: max(0, size.height - card.midY))
     }
 }
 
@@ -111,15 +118,27 @@ public struct StemCellsEmptyLayout: Equatable, Sendable {
     }
 }
 
-/// Search: the bar under the navigation bar, 4 in from the sides, and the
-/// list under it, scrolling the whole screen.
+/// Home while it searches, in place: the dock steps aside, so the list
+/// keeps clear of the keyboard (or, with it down, the home indicator)
+/// instead; and when nothing answers, a line says so, centred 24 in from
+/// the sides, `nothingFoundGap` under where the list starts.
 public struct StemCellsSearchLayout: Equatable, Sendable {
-    public var bar: CGRect
-    public var listInsets: LayoutInsets
+    public enum Metrics {
+        public static let sideInset: CGFloat = 24
+        public static let nothingFoundGap: CGFloat = 32
+    }
 
-    public init(width: CGFloat, safeArea: LayoutInsets, barHeight: CGFloat) {
-        bar = CGRect(x: 4, y: safeArea.top, width: max(0, width - 8), height: barHeight)
-        listInsets = LayoutInsets(top: bar.maxY, left: 0, bottom: safeArea.bottom, right: 0)
+    /// The room under the list, from the screen's foot.
+    public var listBottom: CGFloat
+    public var nothingFound: CGRect
+
+    /// `keyboardTop` is the keyboard's top in the screen, its height when down.
+    public init(size: CGSize, contentTop: CGFloat, safeBottom: CGFloat, keyboardTop: CGFloat, nothingFound label: Measurable) {
+        typealias M = Metrics
+        listBottom = max(safeBottom, size.height - keyboardTop)
+        let width = max(0, size.width - 2 * M.sideInset)
+        let text = label.size(fitting: width)
+        nothingFound = CGRect(x: ((size.width - text.width) / 2).rounded(), y: contentTop + M.nothingFoundGap, width: text.width, height: text.height)
     }
 }
 

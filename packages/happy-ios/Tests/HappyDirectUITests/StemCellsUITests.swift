@@ -232,7 +232,10 @@ final class StemCellsUITests: XCTestCase {
         pause(1)
         let sent = messages.element(boundBy: before)
         let viewport = input.frame.minY - 8 - top
-        let line = min(max((viewport * 0.3).rounded(), introLine), (viewport * 0.5).rounded())
+        // The intro's line raises the line only while the intro is on screen;
+        // scrolled away under the bar, the line is desktop's 30%.
+        let introShows = intro.frame.maxY > top + 1
+        let line = introShows ? min(max((viewport * 0.3).rounded(), introLine), (viewport * 0.5).rounded()) : (viewport * 0.3).rounded()
         XCTAssertEqual(sent.frame.minY - top, line, accuracy: 1.5, "the follow-up isn't lifted to the line (viewport \(viewport))")
         XCTAssertGreaterThan(input.frame.minY - sent.frame.maxY, 40, "no room held for the reply")
         capture("layout-follow-up")
@@ -276,7 +279,7 @@ final class StemCellsUITests: XCTestCase {
     func testHatch() {
         home()
         pause(1)
-        let cells = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND value == %@", "stem-row:space:", "stem cell"))
+        let cells = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND value BEGINSWITH %@", "stem-row:space:", "stem cell"))
         let before = cells.count
         app.descendants(matching: .any)["stem-new-work"].tap()
         let composer = app.textViews["stem-composer"]
@@ -588,16 +591,134 @@ final class StemCellsUITests: XCTestCase {
         }
     }
 
-    /// Search over every row.
-    func testSearch() {
+    /// Search in place, on home itself: the header's search button grows
+    /// into a field with the keyboard up and nothing pushed; typing narrows
+    /// the sidebar (a folded section's rows too), quick actions and
+    /// settings coming under it, or alone when no row answers; a setting
+    /// found opens Settings on its row; Cancel folds the field back and
+    /// the list is as it was, folds and scroll and all.
+    func testInlineSearch() {
         home()
+        pause(1.5)
+        // A fold to keep: Bots folded, its rows gone.
+        let bots = row("section", "Bots")
+        XCTAssertTrue(bots.waitForExistence(timeout: 5), "no Bots section")
+        bringIntoView(bots)
+        if row("space", "Chef").exists { bots.tap(); pause(1.5) }
+        XCTAssertFalse(row("space", "Chef").exists, "Bots didn't fold")
+        // And somewhere down the list, to come back to.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).press(
+            forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45)),
+            withVelocity: .slow, thenHoldForDuration: 0.5
+        )
+        pause(1.5)
+        let before = shownRows("stem-row:")
+        XCTAssertFalse(before.isEmpty)
+        capture("search-before")
+
+        let field = app.textFields["stem-search-field"]
         app.buttons["stem-search"].tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 3), "search didn't open in the header")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "no keyboard")
+        XCTAssertTrue(until(3) { field.value(forKey: "hasKeyboardFocus") as? Bool == true }, "the caret isn't in the field")
+        // The keyboard's first-run tip, on a fresh simulator.
+        if app.buttons["Continue"].waitForExistence(timeout: 1) { app.buttons["Continue"].tap(); pause(0.5) }
+        // Nothing pushed: home's rows are still the screen, with no back.
+        XCTAssertFalse(app.buttons["stem-glass-back"].exists, "search pushed a screen")
+        XCTAssertTrue(row("space", "Plan Lisbon trip").exists)
         pause(1)
-        app.typeText("happy")
-        pause(2)
-        capture("search")
-        app.tapBack()
+        capture("search-open")
+
+        app.typeText("lis")
+        XCTAssertTrue(until(3) { !self.row("space", "Renew passport").exists }, "the list didn't narrow")
+        XCTAssertTrue(row("space", "Plan Lisbon trip").exists, "the match went")
+        XCTAssertTrue(row("section", "Tasks").exists, "the match lost its section")
         pause(1)
+        capture("search-lis")
+
+        // A folded section's rows answer too.
+        clear(field)
+        app.typeText("chef")
+        XCTAssertTrue(row("space", "Chef").waitForExistence(timeout: 3), "a folded row isn't found")
+        XCTAssertTrue(row("section", "Bots").exists)
+
+        // Rows, then quick actions and settings under them.
+        clear(field)
+        app.typeText("re")
+        XCTAssertTrue(row("result", "Report an Issue").waitForExistence(timeout: 3), "no settings under the rows")
+        XCTAssertTrue(row("section", "Settings").exists)
+        XCTAssertTrue(row("section", "Quick actions").exists)
+        XCTAssertTrue(row("space", "Renew passport").exists)
+        XCTAssertLessThan(row("space", "Renew passport").frame.minY, row("section", "Quick actions").frame.minY, "the actions aren't under the rows")
+        XCTAssertLessThan(row("section", "Quick actions").frame.minY, row("section", "Settings").frame.minY, "settings aren't under the actions")
+        pause(1)
+        capture("search-both")
+        // Under the rows, the quick actions and then the settings; a drag
+        // puts the keyboard away and keeps what was found.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).press(
+            forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05)),
+            withVelocity: .slow, thenHoldForDuration: 0.3
+        )
+        pause(1)
+        XCTAssertTrue(until(3) { !self.app.keyboards.firstMatch.exists }, "a drag kept the keyboard")
+        XCTAssertTrue(row("result", "Report an Issue").isHittable)
+        capture("search-both-results")
+        field.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 3))
+
+        clear(field)
+        app.typeText("zzqx")
+        XCTAssertTrue(app.staticTexts["stem-search-nothing"].waitForExistence(timeout: 3), "nothing said nothing was found")
+        pause(0.5)
+        capture("search-nothing")
+
+        // No row answers: the settings alone.
+        clear(field)
+        app.typeText("theme")
+        let theme = row("result", "Theme")
+        XCTAssertTrue(theme.waitForExistence(timeout: 3), "no Theme setting")
+        XCTAssertTrue(shownRows("stem-row:space:").isEmpty && shownRows("stem-row:session:").isEmpty, "rows answered theme")
+        pause(1)
+        capture("search-settings-only")
+
+        // It opens Settings on its row.
+        theme.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["stem-settings"].waitForExistence(timeout: 5), "Settings didn't open")
+        let themeRow = app.descendants(matching: .any)["stem-settings:theme"]
+        XCTAssertTrue(themeRow.waitForExistence(timeout: 3))
+        XCTAssertTrue(until(3) { themeRow.isHittable }, "Theme isn't on screen")
+        pause(0.3)
+        capture("search-opened-setting")
+        pause(1.5)
+        closeSettings()
+        // Back on home, the search as it was left.
+        XCTAssertTrue(field.waitForExistence(timeout: 3))
+        XCTAssertEqual(field.value as? String, "theme")
+        XCTAssertTrue(theme.exists)
+
+        // Cancel: the field folds back, the list as it was.
+        app.buttons["stem-search-cancel"].tap()
+        XCTAssertTrue(until(3) { !field.exists || !field.isHittable }, "the field stayed")
+        XCTAssertTrue(until(3) { !self.app.keyboards.firstMatch.exists }, "the keyboard stayed")
+        pause(1.5)
+        capture("search-restored")
+        XCTAssertFalse(row("space", "Chef").exists, "the fold was lost")
+        let after = shownRows("stem-row:")
+        XCTAssertEqual(after.map(\.identifier), before.map(\.identifier), "other rows came back")
+        for (one, two) in zip(before, after) {
+            XCTAssertEqual(one.frame.minY, two.frame.minY, accuracy: 1, "\(one.identifier) moved: the scroll wasn't kept")
+        }
+        // Bots open again, as the daemon had it.
+        bringIntoView(bots)
+        bots.tap()
+        pause(1)
+    }
+
+    /// Empties the search field with the keyboard's delete.
+    private func clear(_ field: XCUIElement) {
+        let text = field.value as? String ?? ""
+        app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: text.count))
+        pause(0.4)
     }
 
     /// New work makes only new work: its intro offers no todo list,
@@ -648,6 +769,65 @@ final class StemCellsUITests: XCTestCase {
             if discard.waitForExistence(timeout: 3) { discard.tap() }
             pause(1)
         }
+    }
+
+    /// Two tasks set working on the computer (the driver's `work-rows`):
+    /// their titles shimmer, light and dark, while an idle row stays
+    /// still, and each stops once its turn ends. Rows say "working" in
+    /// their value exactly while they shimmer.
+    func testWorkingRowsShimmer() {
+        home()
+        pause(2)
+        // The computer's Theme, gone round to `name`; what it was before.
+        @discardableResult func theme(_ name: String) -> String {
+            app.descendants(matching: .any)["stem-settings-mark"].tap()
+            let row = app.descendants(matching: .any)["stem-settings:theme"]
+            XCTAssertTrue(row.waitForExistence(timeout: 5))
+            let was = row.label
+            for _ in 0..<3 where !row.label.contains(name) {
+                row.tap()
+                pause(0.8)
+            }
+            XCTAssertTrue(row.label.contains(name), "the theme never reached \(name)")
+            app.buttons["stem-glass-back"].firstMatch.tap()
+            pause(1.5)
+            return was
+        }
+        let was = theme("Light")
+        let env = ProcessInfo.processInfo.environment
+        let garden = row("space", env["STEM_WORK_ROW"] ?? "Plan the garden beds")
+        let flights = row("space", env["STEM_WORK_ROW_2"] ?? "Compare flight prices")
+        let idle = row("space", env["STEM_IDLE_ROW"] ?? "Draft the newsletter")
+        XCTAssertTrue(garden.waitForExistence(timeout: 8))
+        // Somewhere clear of the bars and the dock; the list may end too
+        // soon to bring it higher.
+        func show(_ row: XCUIElement) {
+            let height = app.frame.height
+            if row.frame.midY < height * 0.15 || row.frame.midY > height * 0.75 { bringIntoView(row) }
+        }
+        show(garden)
+        func shimmers(_ element: XCUIElement) -> Bool { (element.value as? String)?.contains("working") == true }
+        XCTAssertFalse(shimmers(garden), "the row shimmers before its turn")
+        capture("shimmer-before")
+        print("STEM_STEP work-rows")
+        XCTAssertTrue(until(30) { shimmers(garden) && shimmers(flights) }, "the working rows never shimmered")
+        XCTAssertFalse(shimmers(idle), "an idle row shimmers")
+        for frame in 0..<6 {
+            capture("shimmer-light-\(frame)")
+            pause(0.27)
+        }
+        theme("Dark")
+        show(garden)
+        for frame in 0..<6 {
+            capture("shimmer-dark-\(frame)")
+            pause(0.27)
+        }
+        XCTAssertTrue(shimmers(garden))
+        // The turn ends: the title stops.
+        XCTAssertTrue(until(120) { !shimmers(garden) && !shimmers(flights) }, "the rows kept shimmering after their turns")
+        pause(1)
+        capture("shimmer-ended")
+        for name in ["Adaptive", "Light", "Dark"] where was.contains(name) { theme(name); break }
     }
 
     /// An unread conversation opened and left reads as read: its row's
@@ -814,6 +994,7 @@ final class StemCellsUITests: XCTestCase {
         XCTAssertFalse(app.textFields["stem-chat-title-field"].exists, "the header renamed")
         XCTAssertEqual(app.staticTexts["stem-detail-name"].label, "Research Assistant")
         assertTiles()
+        assertPencil()
         // At the top level: no section, no siblings.
         let family = app.descendants(matching: .any)["stem-detail-family"]
         if family.exists {
@@ -888,6 +1069,11 @@ final class StemCellsUITests: XCTestCase {
         XCTAssertTrue(detail.waitForExistence(timeout: 5), "the capsule didn't open the subtask's detail")
         assertTiles()
         XCTAssertTrue(family.waitForExistence(timeout: 5), "a subtask has no family")
+        // First, right under its name, before the tiles.
+        let model = app.descendants(matching: .any)["stem-detail-tile:model"]
+        XCTAssertGreaterThan(family.frame.minY, app.staticTexts["stem-detail-subtitle"].frame.maxY, "the family isn't under the name")
+        XCTAssertLessThan(family.frame.maxY, model.frame.minY, "the family isn't before the tiles")
+        XCTAssertFalse(app.buttons["stem-detail-rename-button"].exists, "a subtask offered a rename")
         for (id, what) in [("stem-row:space:Plan Lisbon trip", "its parent"), ("stem-row:session:Day Trips", "itself"), ("stem-row:session:Neighbourhoods", "its sibling"), ("stem-row:session:Best train day trip", "its child")] {
             XCTAssertTrue(family.descendants(matching: .any)[id].exists, "the family lacks \(what)")
         }
@@ -912,6 +1098,314 @@ final class StemCellsUITests: XCTestCase {
         app.tapBack()
         pause(1)
         app.tapBack()
+    }
+
+    /// A 30-line message, sent: its bubble shows desktop's first ten lines
+    /// and Show full under them (10 + 10 × 24 + 8 + 16 + 10, 8 above and
+    /// below), a tap opens all 30 (some wrapped), and another cuts it back.
+    func testLongMessageFolds() {
+        home()
+        pause(1)
+        let bot = row("space", "Research Assistant")
+        XCTAssertTrue(bot.waitForExistence(timeout: 5))
+        bringIntoView(bot)
+        bot.tap()
+        let composer = app.textViews["stem-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        pause(2)
+        let mark = "Fold check \(Int(Date().timeIntervalSince1970))"
+        // Every third line runs past a bubble's width and wraps.
+        let text = ([mark] + (2...30).map { "Line \($0) of 30" + ($0 % 3 == 0 ? ", long enough to run the whole width of the bubble and wrap" : "") }).joined(separator: "\n")
+        composer.tap()
+        composer.typeText(text)
+        pause(1)
+        app.buttons["Send"].tap()
+        if app.buttons["Continue"].exists { app.buttons["Continue"].tap() }
+        let message = app.descendants(matching: .any).matching(identifier: "stem-message").matching(NSPredicate(format: "label BEGINSWITH %@", mark)).firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 10), "the message isn't in the chat")
+        // The keyboard dragged down, the message where it can be read.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).press(
+            forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)), withVelocity: .slow, thenHoldForDuration: 0.2
+        )
+        pause(2)
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "the keyboard is still up")
+        bringIntoView(message)
+        pause(1)
+        capture("fold-closed")
+        XCTAssertEqual(message.frame.height, 300, accuracy: 18, "the message isn't cut to ten lines")
+        message.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        pause(1.5)
+        bringIntoView(message)
+        capture("fold-open")
+        XCTAssertGreaterThan(message.frame.height, 780, "the tap didn't open all thirty lines")
+        message.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        pause(1.5)
+        XCTAssertEqual(message.frame.height, 300, accuracy: 18, "a second tap didn't cut it back")
+        app.tapBack()
+    }
+
+    /// Pulled past either end and held there, the finger still pulling
+    /// slowly a long way, three times over: the detail stretches under the
+    /// finger and settles back. The content never steps back against the
+    /// pull, and what sat on screen before the pulls sits in the same place
+    /// after them.
+    func testSessionDetailBounce() {
+        pullPastTheEnds(probe: "watch", distance: (0.72, 0.12), velocity: 120, hold: 2)
+    }
+
+    /// The same while the screen is laid out again on every frame, as a
+    /// working conversation lays it out (`STEM_DETAIL_PROBE=relayout`).
+    func testSessionDetailBounceWhileWorking() {
+        pullPastTheEnds(probe: "relayout", distance: (0.75, 0.3), velocity: 300, hold: 1.2)
+    }
+
+    private func pullPastTheEnds(probe: String, distance: (from: CGFloat, to: CGFloat), velocity: XCUIGestureVelocity, hold: TimeInterval) {
+        app.terminate()
+        app.launchEnvironment["STEM_DETAIL_PROBE"] = probe
+        app.launch()
+        home()
+        pause(1)
+        let bot = row("space", "Research Assistant")
+        XCTAssertTrue(bot.waitForExistence(timeout: 5))
+        bringIntoView(bot)
+        bot.tap()
+        let title = app.descendants(matching: .any)["stem-chat-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 8))
+        pause(1)
+        title.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["stem-detail"].waitForExistence(timeout: 5))
+        let media = app.descendants(matching: .any)["stem-detail-media"]
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-detail-media:")).firstMatch.waitForExistence(timeout: 10), "no shared media")
+        let scroll = app.scrollViews["stem-detail-scroll"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 5), "the probe isn't on")
+        pause(2)
+        let low = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: distance.from))
+        let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: distance.to))
+        let name = app.staticTexts["stem-detail-name"]
+        // Each end in turn: brought there, pulled past it three times and
+        // let go, the content where it was.
+        for (end, toEnd, from, to) in [("bottom", { self.app.swipeUp(velocity: .fast) }, low, high), ("top", { self.app.swipeDown(velocity: .fast) }, high, low)] {
+            for _ in 0..<8 { toEnd() }
+            pause(2)
+            let anchor = end == "top" ? name : media
+            let before = anchor.frame
+            capture("bounce-\(end)-before")
+            for _ in 0..<3 {
+                from.press(forDuration: 0.05, thenDragTo: to, withVelocity: velocity, thenHoldForDuration: hold)
+                pause(1.5)
+            }
+            capture("bounce-\(end)-after")
+            XCTAssertEqual(anchor.frame.minY, before.minY, accuracy: 0.5, "pulled past the \(end), the content didn't settle where it was")
+            XCTAssertEqual(anchor.frame.height, before.height, accuracy: 0.5)
+        }
+        let value = scroll.value as? String ?? ""
+        print("STEM_BOUNCE \(probe) \(value)")
+        let counts = Dictionary(uniqueKeysWithValues: value.split(separator: " ").compactMap { pair -> (String, Int)? in
+            let parts = pair.split(separator: "=")
+            guard parts.count == 2, let count = Int(parts[1]) else { return nil }
+            return (String(parts[0]), count)
+        })
+        XCTAssertGreaterThan(counts["stretched"] ?? 0, 60, "the pulls never stretched it: \(value)")
+        XCTAssertEqual(counts["backwards"], 0, "the content stepped back against the pull: \(value)")
+    }
+
+    /// The chat pulled past its newest row and held there, the finger still
+    /// pulling slowly, three times over, while a reply streams in: the
+    /// content never steps back against the pull, nothing writes the
+    /// transcript's height, inset or offset while it is held stretched, and
+    /// let go it settles on the newest line. Needs the e2e computer's fake
+    /// model (`fakellm.py`), which streams "stream P W": P paragraphs, W ms
+    /// a word, in the conversation `STEM_STREAM_ROW` (Stream Lab).
+    func testChatBounceWhileStreaming() {
+        let composer = openStreamLab(probe: "watch")
+        send(composer, "stream 40 30")
+        let working = app.descendants(matching: .any)["stem-working"]
+        XCTAssertTrue(working.waitForExistence(timeout: 15), "the reply never started")
+        let transcript = app.scrollViews["stem-transcript"]
+        // Long enough to scroll before the pulls.
+        pause(8)
+        dismissKeyboard()
+        toNewest()
+        capture("chat-bounce-before")
+        let low = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7))
+        let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
+        for _ in 0..<3 {
+            XCTAssertTrue(working.exists, "the reply ended before the pulls did")
+            low.press(forDuration: 0.05, thenDragTo: high, withVelocity: 120, thenHoldForDuration: 2)
+            pause(1.5)
+        }
+        capture("chat-bounce-after")
+        let counts = probeCounts(transcript)
+        print("STEM_CHAT_BOUNCE \(transcript.value as? String ?? "")")
+        XCTAssertGreaterThan(counts["stretched"] ?? 0, 60, "the pulls never stretched it")
+        XCTAssertEqual(counts["backwards"], 0, "the content stepped back against the pull")
+        XCTAssertEqual(counts["held"], 0, "the transcript was written while held stretched")
+        // Let go, it follows the reply again: the newest row ends over the composer.
+        let messages = app.descendants(matching: .any).matching(identifier: "stem-message")
+        let input = app.descendants(matching: .any)["stem-input"]
+        pause(1)
+        let newest = messages.element(boundBy: messages.count - 1).frame
+        XCTAssertLessThan(newest.maxY, input.frame.minY + 1, "the newest row went under the composer")
+        XCTAssertGreaterThan(newest.maxY, input.frame.minY - 120, "it didn't follow the reply once let go")
+        // The turn over, back as it was.
+        let deadline = Date().addingTimeInterval(120)
+        while Date() < deadline, working.exists { pause(1) }
+    }
+
+    /// Desktop's send lift, step by step against a streaming reply: an idle
+    /// send by a reader at the end is lifted to 30% down the transcript
+    /// with room held under it; the reply grows into that room without
+    /// moving the send, then, once it outgrows it, is followed at its end;
+    /// a send mid-turn waits at the end, lifted by nothing; another send
+    /// once idle is lifted again; and one sent by a reader scrolled up into
+    /// history moves nothing. Needs `fakellm.py` as above.
+    func testSendLiftMatchesDesktop() {
+        let composer = openStreamLab(probe: "watch")
+        let transcript = app.scrollViews["stem-transcript"]
+        let messages = app.descendants(matching: .any).matching(identifier: "stem-message")
+        let working = app.descendants(matching: .any)["stem-working"]
+        let input = app.descendants(matching: .any)["stem-input"]
+        // Each run's sends are its own: the conversation keeps the last run's.
+        let run = String(Int(Date().timeIntervalSince1970) % 100_000)
+        func say(_ text: String) -> XCUIElement {
+            send(composer, "\(text) \(run)")
+            return app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "stem-message", "\(text) \(run)")).firstMatch
+        }
+        func idle() {
+            let deadline = Date().addingTimeInterval(180)
+            while Date() < deadline, working.exists { pause(0.5) }
+            XCTAssertFalse(working.exists, "the turn never ended")
+            pause(1)
+        }
+        idle()
+        // 1. Idle, at the end: lifted, room held.
+        // The reply waits a moment before its first word: the lift is seen
+        // before the reply grows into the room.
+        let first = say("stream 4 120 wait 1500 first")
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        pause(0.3)
+        let counts = probeCounts(transcript)
+        let top = CGFloat(counts["top"] ?? 0)
+        let viewport = input.frame.minY - 8 - top
+        let line = (viewport * 0.3).rounded()
+        capture("lift-1-sent")
+        XCTAssertEqual(first.frame.minY - top, line, accuracy: 1.5, "the send isn't lifted to the line (viewport \(viewport))")
+        XCTAssertGreaterThan(input.frame.minY - first.frame.maxY, viewport / 3, "no room held for the reply")
+        // 2. The reply grows into the room, the send held, then followed.
+        let liftedAt = first.frame.minY
+        var held = 0
+        var followed = false
+        let deadline = Date().addingTimeInterval(60)
+        while Date() < deadline, working.exists {
+            let now = first.frame.minY
+            if abs(now - liftedAt) < 1 {
+                held += 1
+            } else {
+                XCTAssertLessThan(now, liftedAt, "the send moved down")
+                pause(0.3)
+                let end = max(messages.element(boundBy: messages.count - 1).frame.maxY, working.frame.maxY)
+                XCTAssertEqual(end, input.frame.minY - 8, accuracy: 4, "outgrown, the reply's end isn't followed")
+                followed = true
+                break
+            }
+            pause(0.3)
+        }
+        capture("lift-2-outgrown")
+        XCTAssertGreaterThan(held, 2, "the room under the send didn't hold")
+        XCTAssertTrue(followed, "the reply never outgrew the room")
+        // 3. Mid-turn: it waits at the end, nothing lifted.
+        let mid = say("stream 2 40 midturn")
+        XCTAssertTrue(mid.waitForExistence(timeout: 5))
+        pause(0.8)
+        capture("lift-3-midturn")
+        XCTAssertGreaterThan(mid.frame.minY - top, line + 40, "a send mid-turn was lifted")
+        XCTAssertLessThan(mid.frame.maxY, input.frame.minY + 1, "a send mid-turn is under the composer")
+        idle()
+        // 4. Idle again: lifted again.
+        let again = say("stream 2 120 wait 1500 again")
+        XCTAssertTrue(again.waitForExistence(timeout: 5))
+        pause(0.3)
+        capture("lift-4-again")
+        XCTAssertEqual(again.frame.minY - top, line, accuracy: 1.5, "the next idle send isn't lifted")
+        idle()
+        // 5. Scrolled up into history: a send moves nothing.
+        // The drag that puts the keyboard away takes the reader up too.
+        dismissKeyboard()
+        pause(1)
+        let anchor = mid
+        let parked = anchor.frame.minY
+        XCTAssertTrue(transcript.frame.contains(CGPoint(x: anchor.frame.midX, y: parked)), "the anchor isn't on screen")
+        composer.tap()
+        pause(1)
+        let parkedNow = anchor.frame.minY
+        _ = say("stream 1 40 parked")
+        pause(1.5)
+        capture("lift-5-parked")
+        XCTAssertEqual(anchor.frame.minY, parkedNow, accuracy: 1, "a send from history moved the reader (\(parked) before the keyboard)")
+        XCTAssertTrue(app.descendants(matching: .any)["stem-jump-latest"].exists, "no way back to the newest")
+        idle()
+    }
+
+    /// Stream Lab's conversation, with the transcript's probe on.
+    private func openStreamLab(probe: String) -> XCUIElement {
+        app.terminate()
+        app.launchEnvironment["STEM_CHAT_PROBE"] = probe
+        app.launch()
+        home()
+        pause(1)
+        let bot = row("space", ProcessInfo.processInfo.environment["STEM_STREAM_ROW"] ?? "Stream Lab")
+        XCTAssertTrue(bot.waitForExistence(timeout: 8), "no Stream Lab")
+        bringIntoView(bot)
+        bot.tap()
+        let composer = app.textViews["stem-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.scrollViews["stem-transcript"].waitForExistence(timeout: 5))
+        pause(2)
+        return composer
+    }
+
+    private func send(_ composer: XCUIElement, _ text: String) {
+        if !app.keyboards.firstMatch.exists { composer.tap() }
+        composer.typeText(text)
+        app.buttons["Send"].tap()
+    }
+
+    /// Dragged down into the keyboard, as a person puts it away.
+    private func dismissKeyboard() {
+        guard app.keyboards.firstMatch.exists else { return }
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).press(
+            forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)), withVelocity: .slow, thenHoldForDuration: 0.2
+        )
+        pause(1)
+    }
+
+    /// Back at the newest row, following it.
+    private func toNewest() {
+        let jump = app.descendants(matching: .any)["stem-jump-latest"]
+        if jump.exists, jump.isHittable { jump.tap() }
+        for _ in 0..<3 { app.swipeUp(velocity: .fast) }
+        pause(2.5)
+    }
+
+    /// The probe's counts, from the transcript's value.
+    private func probeCounts(_ transcript: XCUIElement) -> [String: Int] {
+        let value = transcript.value as? String ?? ""
+        return Dictionary(value.split(separator: " ").compactMap { pair -> (String, Int)? in
+            let parts = pair.split(separator: "=")
+            guard parts.count == 2, let count = Int(parts[1]) else { return nil }
+            return (String(parts[0]), count)
+        }, uniquingKeysWith: { _, last in last })
+    }
+
+    /// The pencil right after the name, on its line, and no Rename row.
+    private func assertPencil() {
+        let pencil = app.buttons["stem-detail-rename-button"]
+        let name = app.staticTexts["stem-detail-name"]
+        XCTAssertTrue(pencil.waitForExistence(timeout: 5), "no pencil after the name")
+        XCTAssertEqual(pencil.frame.midY, name.frame.midY, accuracy: 1.5, "the pencil isn't on the name's line")
+        XCTAssertGreaterThan(pencil.frame.midX, name.frame.maxX, "the pencil isn't after the name")
+        XCTAssertLessThan(pencil.frame.minX, name.frame.maxX + 12, "the pencil isn't next to the name")
+        XCTAssertFalse(app.descendants(matching: .any)["stem-settings:rename"].exists, "the Rename row is still there")
     }
 
     /// Model, effort and when it started; nothing else counted.
@@ -1076,7 +1570,7 @@ final class StemCellsUITests: XCTestCase {
         // The sidebar, untouched, while Prioritizing works: the stem cell
         // grows its icon and name at once, and the batch moves the row once
         // Prioritizing's turn ends.
-        let fresh = app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND value == %@", "stem-row:space:New", "stem cell"))
+        let fresh = app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND value BEGINSWITH %@", "stem-row:space:New", "stem cell"))
         deadline = Date().addingTimeInterval(180)
         while Date() < deadline, fresh.count > 0 { pause(2) }
         XCTAssertEqual(fresh.count, 0, "the new work never grew its icon and name")
@@ -1469,8 +1963,11 @@ final class StemCellsUITests: XCTestCase {
             if to == new { capture("rename-before") }
             title.tap()
             XCTAssertTrue(app.descendants(matching: .any)["stem-detail"].waitForExistence(timeout: 5), "the capsule didn't open the detail")
-            app.descendants(matching: .any)["stem-settings:rename"].tap()
+            let name = app.staticTexts["stem-detail-name"].frame
+            app.buttons["stem-detail-rename-button"].tap()
             XCTAssertTrue(field.waitForExistence(timeout: 3), "the name never became a field")
+            XCTAssertEqual(field.frame.midY, name.midY, accuracy: 1, "the field isn't where the name was")
+            XCTAssertFalse(app.buttons["stem-detail-rename-button"].exists && app.buttons["stem-detail-rename-button"].isHittable, "the pencil stayed while renaming")
             pause(0.8)
             if to == new { capture("rename-editing") }
             // The field opens with its name selected: typing replaces it.
@@ -1708,7 +2205,7 @@ final class StemCellsUITests: XCTestCase {
     }
 
     /// The header: the computer's picture at the left opens settings; the
-    /// name in the middle; search beside the filter at the right.
+    /// name in the middle; search at the right (`testInlineSearch`).
     func testHeader() {
         home()
         pause(1.5)
@@ -1718,13 +2215,6 @@ final class StemCellsUITests: XCTestCase {
         pause(1.5)
         capture("settings")
         closeSettings()
-        app.buttons["stem-search"].tap()
-        pause(1)
-        app.typeText("lisbon")
-        pause(2)
-        capture("header-search")
-        app.tapBack()
-        pause(1.5)
     }
 
     /// Settings from the picture: the QR sheet and its Scan, Edit name

@@ -121,13 +121,14 @@ public struct StemCellChatStackLayout: Equatable, Sendable {
 }
 
 /// Desktop's send lift (Message.tsx `sendLift`, `SEND_LIFT_TOP`): a message
-/// sent while the agent is idle is lifted to 30% down the viewport, the
-/// turns before it still in view above, and the room under it is held for
-/// the reply until the reply fills it (`StemCellChatStackLayout.Lift`). A
-/// lift only ever moves a send up: one already at the line or above it
-/// stays where it landed.
+/// sent while the agent is idle, by a reader at the end, is lifted to 30%
+/// down the viewport, the turns before it still in view above, and the
+/// room under it is held for the reply until the reply fills it
+/// (`StemCellChatStackLayout.Lift`). A lift only ever moves a send up: one
+/// already at the line or above it stays where it landed.
 ///
-/// Under a pinned intro the line is no higher than the intro's own line, so
+/// Under a pinned intro still on screen (`introLine`; once it has scrolled
+/// away the line is plain 30%) the line is no higher than its own line, so
 /// the first send, landing right under the intro, is already there and
 /// nothing moves; every later one is lifted to the same slot or lower.
 public struct StemCellSendLift: Equatable, Sendable {
@@ -136,6 +137,9 @@ public struct StemCellSendLift: Equatable, Sendable {
         public static let share: CGFloat = 0.3
         /// No lower than this share, however tall the intro: the reply's room.
         public static let lowest: CGFloat = 0.5
+        /// `SEND_FOLLOW_THRESHOLD`: a send made mid-turn this close to the
+        /// end carries the reader to it.
+        public static let follow: CGFloat = 80
     }
 
     /// From the viewport's top, where the send's top edge sits.
@@ -149,22 +153,138 @@ public struct StemCellSendLift: Equatable, Sendable {
 
     /// A send whose top is `shownAt` from the viewport's top, as it landed.
     public func lifts(shownAt: CGFloat) -> Bool { shownAt > line }
+
+    /// What a send does to the reader (ConversationView's `liftKey` and
+    /// `followKey`, MessageList's commit). Sent while the agent is idle,
+    /// it is lifted, but only for a reader following the newest row; one
+    /// reading further up stays where they are. Sent mid-turn, it waits
+    /// at the end, and a reader within `Metrics.follow` of the end is
+    /// carried there and follows it, with no room held.
+    public struct Send: Equatable, Sendable {
+        public var lifts: Bool
+        public var follows: Bool
+
+        public init(working: Bool, following: Bool, distanceFromEnd: CGFloat) {
+            if working {
+                lifts = false
+                follows = following || distanceFromEnd <= Metrics.follow
+            } else {
+                lifts = following
+                follows = following
+            }
+        }
+    }
+
+    /// The room a lift holds stays while the reader scrolls away and back
+    /// (`geometryExtent`), until the rows below the send fill it. Only
+    /// once the viewport has changed height under it (the keyboard, the
+    /// composer) does it go early: as soon as the reader is far enough up
+    /// that none of it shows (`geometryExtentOffscreenRelease`).
+    public static func releases(resized: Bool, viewportBottom: CGFloat, rowsEnd: CGFloat?) -> Bool {
+        guard resized, let rowsEnd else { return false }
+        return viewportBottom <= rowsEnd
+    }
+}
+
+/// The transcript's scroll while a finger drives it, or it bounces past an
+/// end on its own: nothing the screen lays out moves it then. A new content
+/// height that would take the scroll past an end, or bring it back inside
+/// one, waits; following the newest row waits too. Both are given once the
+/// finger lets go, the bounce is back inside, or the scroll is at rest. A
+/// height or an offset written mid-pull moves the content under the finger,
+/// and a reply streaming in lays the screen out many times a second.
+public struct StemCellChatScrollHold: Equatable, Sendable {
+    /// The scroll view as it stands, in its own coordinates.
+    public struct Scroll: Equatable, Sendable {
+        public var offset: CGFloat
+        public var insetTop: CGFloat
+        public var insetBottom: CGFloat
+        public var contentHeight: CGFloat
+        public var viewport: CGFloat
+        /// A finger is on it.
+        public var tracking: Bool
+        /// It moves on its own: momentum, or a bounce back from an end.
+        public var decelerating: Bool
+
+        public init(offset: CGFloat, insetTop: CGFloat, insetBottom: CGFloat, contentHeight: CGFloat, viewport: CGFloat, tracking: Bool, decelerating: Bool) {
+            self.offset = offset
+            self.insetTop = insetTop
+            self.insetBottom = insetBottom
+            self.contentHeight = contentHeight
+            self.viewport = viewport
+            self.tracking = tracking
+            self.decelerating = decelerating
+        }
+
+        /// The offset that shows the end, at `contentHeight` or its own.
+        public func end(contentHeight: CGFloat? = nil) -> CGFloat {
+            max(-insetTop, (contentHeight ?? self.contentHeight) + insetBottom - viewport)
+        }
+
+        /// Past either end, at `contentHeight` or its own.
+        public func stretched(contentHeight: CGFloat? = nil) -> Bool {
+            offset < -insetTop - 0.5 || offset > end(contentHeight: contentHeight) + 0.5
+        }
+
+        /// Driven by a finger or by its own motion.
+        public var moving: Bool { tracking || decelerating }
+    }
+
+    /// A height laid out and not yet given.
+    public private(set) var held: CGFloat?
+
+    public init() {}
+
+    /// Laid out at `height`: the height to give the scroll view now, or nil
+    /// to keep what it has (holding `height` when it would move the content).
+    public mutating func laidOut(_ height: CGFloat, scroll: Scroll) -> CGFloat? {
+        if height == scroll.contentHeight {
+            held = nil
+            return nil
+        }
+        if scroll.moving, scroll.stretched() || scroll.stretched(contentHeight: height) {
+            held = height
+            return nil
+        }
+        held = nil
+        return height
+    }
+
+    /// The held height, once nothing holds it: the finger is off and the
+    /// scroll isn't bouncing past an end with it.
+    public mutating func release(scroll: Scroll) -> CGFloat? {
+        guard let height = held, !scroll.tracking else { return nil }
+        if scroll.decelerating, scroll.stretched() || scroll.stretched(contentHeight: height) { return nil }
+        held = nil
+        return height == scroll.contentHeight ? nil : height
+    }
+
+    /// Following the newest row moves the offset only while nothing else does.
+    public static func follows(_ scroll: Scroll) -> Bool { !scroll.moving }
 }
 
 /// One message of a Stem Cells conversation, as desktop's `Message` sets
 /// it on a phone's width: 16 in from the sides and 8 above and below
 /// (desktop's 20 and 16, scaled), the agent's markdown with its blocks 8
-/// apart, the person's text in a bubble at the right, at most 76% of the
-/// column, 10 above and below its text and 12 beside it.
+/// apart, the person's text in a bubble at the right, 10 above and below
+/// its text and 12 beside it. The bubble reaches to 36 from the column's
+/// left, as far as Telegram lets one on a phone; past desktop's ten lines
+/// its text is cut there, "Show full" under it.
 public struct StemCellMessageLayout: Equatable, Sendable {
     public enum Metrics {
         public static let marginH: CGFloat = 16
         public static let marginV: CGFloat = 8
         public static let blockGap: CGFloat = 8
-        public static let bubbleMaxFraction: CGFloat = 0.76
+        /// The least room left of a person's bubble, and of their pictures.
+        public static let bubbleLeading: CGFloat = 36
         public static let bubblePaddingH: CGFloat = 12
         public static let bubblePaddingV: CGFloat = 10
         public static let bubbleRadius: CGFloat = 10
+        /// Desktop's `MESSAGE_PREVIEW_HEIGHT`: a person's message past this
+        /// many lines shows only them until opened.
+        public static let previewLines = 10
+        /// Between the text and its Show full / Show less line.
+        public static let foldGap: CGFloat = 8
         /// The status line under a person's message while it is on its way.
         public static let statusGap: CGFloat = 2
         public static let statusHeight: CGFloat = 14
@@ -181,6 +301,8 @@ public struct StemCellMessageLayout: Equatable, Sendable {
         case card
         /// A story drawn inline (`StoryCardLayout`).
         case story
+        /// An HTML artifact shown inline, across the column at the height its page measured.
+        case page(height: CGFloat)
         /// A sidebar Prioritizing proposed, at the column's left.
         case proposal(StemCellSidebarProposalLayout.Input)
     }
@@ -192,6 +314,7 @@ public struct StemCellMessageLayout: Equatable, Sendable {
         case tree(StemCellMediaTreeLayout, origin: CGPoint)
         case card(CGRect)
         case story(CGRect)
+        case page(CGRect)
         /// The card's frame; its insides are `layout`'s, from the frame's origin.
         case proposal(StemCellSidebarProposalLayout, frame: CGRect)
     }
@@ -201,6 +324,10 @@ public struct StemCellMessageLayout: Equatable, Sendable {
     public var bubble: CGRect?
     /// The person's text, drawn as written.
     public var text: CGRect?
+    /// The text is its first `previewLines`, cut (`Fold.preview`).
+    public var cut = false
+    /// Show full, or Show less, under a long message's text.
+    public var foldControl: CGRect?
     /// The pictures the person sent, under the bubble at the right.
     public var pictures: [CGRect]
     public var status: CGRect?
@@ -250,6 +377,9 @@ public struct StemCellMessageLayout: Equatable, Sendable {
                 let size = StoryCardLayout.size(width: inner)
                 placed.append(.story(CGRect(origin: CGPoint(x: left, y: y), size: size)))
                 y += size.height
+            case .page(let height):
+                placed.append(.page(CGRect(x: left, y: y, width: inner, height: height)))
+                y += height
             case .proposal(let input):
                 let proposal = StemCellSidebarProposalLayout(width: inner, input: input)
                 placed.append(.proposal(proposal, frame: CGRect(origin: CGPoint(x: left, y: y), size: proposal.size)))
@@ -259,24 +389,66 @@ public struct StemCellMessageLayout: Equatable, Sendable {
         return StemCellMessageLayout(size: CGSize(width: max(0, width), height: y + M.marginV), parts: placed, bubble: nil, text: nil, pictures: [], status: nil)
     }
 
+    /// A person's message that may be longer than `previewLines`.
+    public struct Fold {
+        /// The text cut to `previewLines`; shorter than the whole, it folds.
+        public var preview: Measurable
+        /// Show full, or, opened, Show less.
+        public var control: Measurable
+        public var opened: Bool
+        /// The text's line height: no taller than `previewLines` of it, the
+        /// preview is never measured.
+        public var lineHeight: CGFloat
+
+        public init(preview: Measurable, control: Measurable, opened: Bool, lineHeight: CGFloat) {
+            self.preview = preview
+            self.control = control
+            self.opened = opened
+            self.lineHeight = lineHeight
+        }
+    }
+
     /// `showsStatus` keeps a line under the bubble for a refusal. `text` is
     /// nil for pictures sent alone; `pictures` are drawn as desktop draws a
     /// message's photos: justified, against the right, at most four.
-    public static func user(width: CGFloat, maxContentWidth: CGFloat = .greatestFiniteMagnitude, text: Measurable?, pictures: [StemCellMediaFlow.Image] = [], showsStatus: Bool) -> StemCellMessageLayout {
+    public static func user(width: CGFloat, maxContentWidth: CGFloat = .greatestFiniteMagnitude, text: Measurable?, fold: Fold? = nil, pictures: [StemCellMediaFlow.Image] = [], showsStatus: Bool) -> StemCellMessageLayout {
         typealias M = Metrics
         let column = ChatColumn(rowWidth: width, maxContentWidth: maxContentWidth)
         let inner = max(0, column.width - 2 * M.marginH)
-        let maxBubble = (inner * M.bubbleMaxFraction).rounded(.down)
+        let maxBubble = max(0, column.width - M.marginH - M.bubbleLeading)
         let right = column.x + column.width - M.marginH
         var bottom = M.marginV
         var bubble: CGRect?
         var textFrame: CGRect?
+        var cut = false
+        var foldControl: CGRect?
         if let text {
-            let textSize = text.size(fitting: max(0, maxBubble - 2 * M.bubblePaddingH))
-            let bubbleWidth = textSize.width + 2 * M.bubblePaddingH
-            let frame = CGRect(x: right - bubbleWidth, y: bottom, width: bubbleWidth, height: textSize.height + 2 * M.bubblePaddingV)
+            let measure = max(0, maxBubble - 2 * M.bubblePaddingH)
+            var textSize = text.size(fitting: measure)
+            var contentWidth = textSize.width
+            var controlSize: CGSize?
+            if let fold, textSize.height > CGFloat(M.previewLines) * fold.lineHeight + 0.5 {
+                let preview = fold.preview.size(fitting: measure)
+                if preview.height < textSize.height {
+                    // As wide cut as whole, as desktop clips it: opening
+                    // it only grows it down. The cut line's ellipsis can
+                    // be the widest.
+                    textSize.width = max(textSize.width, preview.width)
+                    if !fold.opened { textSize.height = preview.height; cut = true }
+                    let control = fold.control.size(fitting: measure)
+                    controlSize = control
+                    contentWidth = max(textSize.width, control.width)
+                }
+            }
+            let contentHeight = textSize.height + (controlSize.map { M.foldGap + $0.height } ?? 0)
+            let bubbleWidth = contentWidth + 2 * M.bubblePaddingH
+            let frame = CGRect(x: right - bubbleWidth, y: bottom, width: bubbleWidth, height: contentHeight + 2 * M.bubblePaddingV)
             bubble = frame
-            textFrame = CGRect(x: frame.minX + M.bubblePaddingH, y: frame.minY + M.bubblePaddingV, width: textSize.width, height: textSize.height)
+            let placed = CGRect(x: frame.minX + M.bubblePaddingH, y: frame.minY + M.bubblePaddingV, width: textSize.width, height: textSize.height)
+            textFrame = placed
+            if let controlSize {
+                foldControl = CGRect(x: placed.minX, y: placed.maxY + M.foldGap, width: controlSize.width, height: controlSize.height)
+            }
             bottom = frame.maxY
         }
         var pictureFrames: [CGRect] = []
@@ -296,7 +468,7 @@ public struct StemCellMessageLayout: Equatable, Sendable {
         }
         return StemCellMessageLayout(
             size: CGSize(width: max(0, width), height: bottom + M.marginV),
-            parts: [], bubble: bubble, text: textFrame, pictures: pictureFrames, status: status
+            parts: [], bubble: bubble, text: textFrame, cut: cut, foldControl: foldControl, pictures: pictureFrames, status: status
         )
     }
 }
