@@ -32,11 +32,6 @@ final class StemCellChatViewController: UIViewController {
     /// What the push's first frame had: the transcript, or nothing yet.
     private var firstFrame: Bool?
     private let spaceId: String?
-    /// New work nobody named or wrote in, as its row says.
-    private var untouched: Bool
-    /// Named or written in here: kept, whatever the row says until the
-    /// store catches up.
-    private var kept = false
     private let opensFocused: Bool
     /// New work brings the keyboard up as it opens, unless it opens on the "+" sheet.
     var focusesOnOpen = true
@@ -62,11 +57,26 @@ final class StemCellChatViewController: UIViewController {
     private let planner: StemCellChatPlanner
     private let media: StemCellMediaLoader
     private let pictures: ComposerImagePicker
+    private var acceptingSend = false
 
     private let scrollView = UIScrollView()
     private let introView = StemCellIntroView()
+    /// The rows near the screen, the only ones that are views
+    /// (`StemCellChatMountedRows`), by plan id.
     private var rowViews: [String: ChatPlanView] = [:]
+    /// Rows gone from near the screen, hidden, for the next to come in.
+    private var spareRows: [ChatPlanView] = []
+    /// The proposal cards each row on screen hosts.
+    private var rowCards: [String: Set<String>] = [:]
     private var plans: [ChatRowPlan] = []
+    private var plansById: [String: ChatRowPlan] = [:]
+    /// The plans' rows as last laid out, top to bottom: their ids, their
+    /// frames, and where each id is in them.
+    private var stackedIds: [String] = []
+    private var stackedFrames: [CGRect] = []
+    private var stackedIndex: [String: Int] = [:]
+    /// The rows last mounted for: nothing to do while they stay the same.
+    private var mountedFor: StemCellChatMountedRows?
     private let working = StemCellWorkingView()
     /// Home's dock scrim, in its frame and always there, as home's is: one
     /// that came and went with the content under it flashed as a short
@@ -110,6 +120,9 @@ final class StemCellChatViewController: UIViewController {
     private var sidebarRows: [StemCellsRow] = []
     /// What the references messages make read as and open.
     private var references = StemCellReferences()
+    /// The messages' words looked through for references not read yet, by
+    /// item, and what references read as then.
+    private var scanned = (references: StemCellReferences(), texts: [String: String]())
     /// Inline pages' heights as they measured themselves.
     private var pageHeights: [String: CGFloat] = [:]
     /// The references with this conversation's own subagents, which the
@@ -123,7 +136,11 @@ final class StemCellChatViewController: UIViewController {
     private var modelsWatch: StemCellsWatch?
     private var copied: (id: String, until: Task<Void, Never>)?
     /// The newest row is in view: what arrives keeps it there.
-    private var followsNewest = true
+    private var followsNewest = true {
+        didSet { if followsNewest != oldValue { tellReadsNewest(moving: scrollView.isTracking || gliding) } }
+    }
+    /// What the conversation was last told by `tellReadsNewest`.
+    private var toldReadsNewest: Bool?
     /// How far the end has grown under a follower while the scroll moved and
     /// nothing followed it: still following until at rest, however far.
     private var grownUnfollowed: CGFloat = 0
@@ -172,7 +189,6 @@ final class StemCellChatViewController: UIViewController {
         self.intro = intro
         self.previewing = previewing
         opensFocused = creation != nil
-        untouched = creation != nil
         focusPending = creation != nil
         if creation == nil {
             let held = session.warm.hold(agentId)
@@ -190,7 +206,7 @@ final class StemCellChatViewController: UIViewController {
         proposals = StemCellSidebarProposals(client: session.client, store: session.store)
         media = StemCellMediaLoader(client: session.client, agentId: agentId)
         let files = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("StemCells", isDirectory: true)
-        pictures = ComposerImagePicker(staging: ComposerAttachmentStaging(filesDirectory: files))
+        pictures = ComposerImagePicker(staging: ComposerAttachmentStaging(filesDirectory: files), maxFileBytes: DirectAttachmentRules.maxFileBytes)
         super.init(nibName: nil, bundle: nil)
         self.title = title
         titleView.text = title
@@ -233,7 +249,9 @@ final class StemCellChatViewController: UIViewController {
         pictures.host = { [weak self] in self }
         pictures.onChange = { [weak self] in
             guard let self else { return }
-            card.configuration.attachments = pictures.images.map { AgentInputAttachmentPreview(id: $0.id, fileURL: $0.attachment.fileURL) }
+            card.configuration.attachments = pictures.images.map {
+                AgentInputAttachmentPreview(id: $0.id, fileURL: $0.attachment.fileURL, name: $0.attachment.name, mimeType: $0.attachment.mimeType)
+            }
             updatePrimary()
         }
         view.addSubview(composerScrim)
@@ -297,7 +315,8 @@ final class StemCellChatViewController: UIViewController {
             let drafts = session.drafts
             Task { await conversation.useDrafts(drafts) }
         }
-        modelsWatch = session.models.watch { [weak self] in self?.updateChips() }
+        // A failure card names the models it offers from the catalog.
+        modelsWatch = session.models.watch { [weak self] in self?.updateChips(); self?.replan() }
         session.models.load()
         updateChips()
         if opensOverHome {
@@ -319,6 +338,8 @@ final class StemCellChatViewController: UIViewController {
         navigationController?.setNavigationBarHidden(true, animated: animated)
         let conversation = conversation
         Task { await conversation.setVisible(true) }
+        toldReadsNewest = nil
+        tellReadsNewest(moving: false)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -342,7 +363,12 @@ final class StemCellChatViewController: UIViewController {
         // Leaving keeps a name being typed, as a tap away does.
         titleView.finishEditing()
         picker?.close(animated: false)
-        if isMovingFromParent { putAwayIfEmpty() }
+        // Left holding something, new work isn't offered again as empty.
+        if isMovingFromParent, !previewing, let spaceId {
+            let holding = !composerIsEmpty
+            let store = session.store
+            Task { await store.leftHolding(spaceId, holding) }
+        }
         if !previewing {
             let conversation = conversation
             Task { await conversation.flushDraft() }
@@ -352,25 +378,6 @@ final class StemCellChatViewController: UIViewController {
         // A screen pushed over this one has the bar it expects.
         if !previewing, !isMovingFromParent, let top = navigationController?.topViewController, top !== self, !(top is StemCellChatViewController), !(top is StemCellSessionDetailViewController) {
             navigationController?.setNavigationBarHidden(false, animated: animated)
-        }
-    }
-
-    /// New work left with nothing in it goes: off the sidebar as the screen
-    /// starts to go, so the sidebar comes back without it, and off the
-    /// computer once it has gone. A swipe back let go of halfway keeps it.
-    private func putAwayIfEmpty() {
-        guard !previewing, let spaceId, untouched, !kept, chat.loaded, chat.items.isEmpty, !card.hasContent else { return }
-        putAway = true
-        let store = session.store
-        Task { await store.putAway(spaceId, true) }
-        guard let coordinator = transitionCoordinator else {
-            Task { await store.discard(spaceId) }
-            return
-        }
-        coordinator.animate(alongsideTransition: nil) { context in
-            // Read now: the context doesn't outlive this call.
-            let cancelled = context.isCancelled
-            Task { cancelled ? await store.putAway(spaceId, false) : await store.discard(spaceId) }
         }
     }
 
@@ -389,7 +396,7 @@ final class StemCellChatViewController: UIViewController {
             proposals.stop()
             // Read ahead, it stays read for a quick way back.
             if let warm {
-                session.warm.release(warm.chat, token: warm.token, opened: !previewing, putAway: putAway)
+                session.warm.release(warm.chat, token: warm.token, opened: !previewing)
             } else {
                 Task { await conversation.stop() }
             }
@@ -405,7 +412,6 @@ final class StemCellChatViewController: UIViewController {
         let agentId = media.agentId
         card.blur()
         let detail = StemCellSessionDetailViewController(session: session, agentId: agentId, title: title ?? "", spaceId: spaceId)
-        detail.onRenamed = { [weak self] in self?.kept = true }
         navigationController?.pushViewController(detail, animated: true)
     }
 
@@ -505,16 +511,9 @@ final class StemCellChatViewController: UIViewController {
             sidebarRows = snapshot.allRows
             proposals.spacesChanged()
         }
-        // Under a folded section too.
-        if let spaceId, let row = snapshot.allRows.first(where: { $0.spaceId == spaceId }) { untouched = row.isUntouchedStemCell }
         guard let spaceId, let row = snapshot.allRows.first(where: { $0.spaceId == spaceId }) else { return }
-        if title != row.label { title = row.label }
-        titleView.text = row.label
-        if previewing, previewTitle.text != row.label {
-            previewTitle.text = row.label
-            previewPill.accessibilityLabel = row.label
-            view.setNeedsLayout()
-        }
+        rowName = (row.label, row.titled)
+        applyTitle()
         let next: Intro? = switch row.mark {
         case .stemCell(let seed): .stemCell(seed: seed)
         case .clay(let slug): .clay(slug)
@@ -523,6 +522,23 @@ final class StemCellChatViewController: UIViewController {
         if next != intro {
             intro = next
             applyIntro()
+        }
+    }
+
+    /// The row's name as the sidebar has it, and whether it is one of its own.
+    private var rowName: (label: String, titled: Bool)?
+
+    /// The row's name, or, while it has none ("New"), the conversation's
+    /// own title once the daemon has written one, as desktop's header reads it.
+    private func applyTitle() {
+        guard let rowName else { return }
+        let label = rowName.titled ? rowName.label : chat.title.flatMap { $0.isEmpty ? nil : $0 } ?? rowName.label
+        if title != label { title = label }
+        if titleView.text != label { titleView.text = label }
+        if previewing, previewTitle.text != label {
+            previewTitle.text = label
+            previewPill.accessibilityLabel = label
+            view.setNeedsLayout()
         }
     }
 
@@ -538,8 +554,6 @@ final class StemCellChatViewController: UIViewController {
     private func showIntro() {
         introView.isHidden = intro == nil || reading(chat) || (!chat.items.isEmpty && !planShown)
     }
-    /// Left empty and put away as the screen went: nothing to keep of it.
-    private var putAway = false
 
     /// New work the daemon hasn't made yet: it has no detail to open.
     private var creating = false
@@ -558,6 +572,7 @@ final class StemCellChatViewController: UIViewController {
     private func apply(_ snapshot: StemCellChatSnapshot) {
         let wasSettled = settled(chat)
         chat = snapshot
+        applyTitle()
         if picked == snapshot.mode { picked = nil }
         media.register(snapshot.items)
         if snapshot.draftArrivals != draftArrivals {
@@ -650,15 +665,26 @@ final class StemCellChatViewController: UIViewController {
         Strings.StemCells.permissionName(mode?.permissionMode ?? session.models.catalog?.defaultPermissionMode ?? "auto")
     }
 
-    /// The whole library, photos only: a message carries text and pictures alone.
+    /// Photos and videos from the whole library, uploaded through the
+    /// direct connection: in the library sheet when the person has let the
+    /// app read their library, else in the system's picker, which asks
+    /// nothing.
     private func presentLibrary() {
         let room = pictures.room()
         guard room > 0 else { return settleFocus(added: false) }
-        let picker = LibraryPicker.present(from: self, options: .init(limit: room, videos: false)) { [weak self] picks in self?.take(picks) }
-        picker.onCancel = { [weak self] in self?.settleFocus(added: false) }
+        let options = LibraryPicker.Options(limit: room)
+        let onPick: ([LibraryPick]) -> Void = { [weak self] picks in
+            guard let self else { return LibraryPicker.discard(picks) }
+            take(picks)
+        }
+        if StemCellAttachSheetViewController.mayReadLibrary {
+            LibraryPicker.present(from: self, options: options, onPick: onPick).onCancel = { [weak self] in self?.settleFocus(added: false) }
+        } else {
+            LibrarySystemPicker.present(from: self, options: options, onPick: onPick).onCancel = { [weak self] in self?.settleFocus(added: false) }
+        }
     }
 
-    /// Photos picked in the sheet's strip, read in full off the main thread.
+    /// Photos and videos picked in the sheet's strip, read in full off the main thread.
     private func add(assets ids: [String]) {
         Task { [weak self] in
             let found = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
@@ -750,26 +776,23 @@ final class StemCellChatViewController: UIViewController {
         present(alert, animated: true)
     }
 
-    /// What the sheet, the library or Files gave: pictures wait in the
-    /// composer; any other file is said, not sent (the daemon takes text
-    /// and image blocks alone).
+    /// Preserve the library's order and copy every file before its temporary
+    /// representation is discarded. Direct uploads accept videos and documents.
     private func take(_ picks: [LibraryPick]) {
-        pictures.add(pictures: picks.compactMap { if case .image(let data, _) = $0.media { data } else { nil } })
-        let others = picks.filter { if case .image = $0.media { false } else { true } }
-        LibraryPicker.discard(others)
-        let added = picks.count > others.count
-        if !others.isEmpty {
-            let names = others.compactMap { pick -> String? in
+        let before = pictures.images.count
+        Task {
+            for pick in picks {
                 switch pick.media {
-                case .file(let url, _), .video(let url): url.lastPathComponent
-                case .image: nil
+                case .image(let data, _): await pictures.add(picture: data)
+                case .video(let url):
+                    let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "video/mp4"
+                    await pictures.add(file: url, name: url.lastPathComponent, mimeType: mime)
+                case .file(let url, let type):
+                    await pictures.add(file: url, name: url.lastPathComponent, mimeType: type.preferredMIMEType ?? "application/octet-stream")
                 }
             }
-            let alert = UIAlertController(title: Strings.StemCells.filesNotSent(names), message: Strings.StemCells.filesNotSentDetail, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: Strings.StemCells.done, style: .default) { [weak self] _ in self?.settleFocus(added: added) })
-            present(alert, animated: true)
-        } else {
-            settleFocus(added: added)
+            LibraryPicker.discard(picks)
+            settleFocus(added: pictures.images.count > before)
         }
     }
 
@@ -791,12 +814,43 @@ final class StemCellChatViewController: UIViewController {
             // Held here at once, so the chips read it before the conversation says so.
             self?.picked = next
             self?.updateChips()
+            // A failure card offers to continue on what was picked.
+            self?.replan()
             Task { await conversation.setMode(next) }
         }
     }
 
     private var planKey: StemCellChatPlanner.Key {
-        StemCellChatPlanner.Key(width: view.bounds.width, maxContentWidth: ContentWidth.maxWidth, environment: traitCollection.textEnvironment, references: subagentReferences, subagentTitles: chat.subagentTitles, pageHeights: pageHeights)
+        var key = StemCellChatPlanner.Key(width: view.bounds.width, maxContentWidth: ContentWidth.maxWidth, environment: traitCollection.textEnvironment, references: subagentReferences, subagentTitles: chat.subagentTitles, pageHeights: pageHeights)
+        // Only a failure card reads the composer's model; without one the
+        // key stays the warm chat's, so its rows planned ahead are taken.
+        if chat.items.contains(where: { if case .failure = $0.role { true } else { false } }) {
+            key.switchTarget = switchTarget
+            key.modelNames = Dictionary((session.models.catalog?.models ?? []).map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        }
+        return key
+    }
+
+    /// The composer's model, named as its picker names it.
+    private var switchTarget: StemCellChatPlanner.SwitchTarget? {
+        guard let mode else { return nil }
+        return StemCellChatPlanner.SwitchTarget(mode: mode, label: session.models.catalog?.model(mode)?.name ?? mode.modelId)
+    }
+
+    /// A failure card's action: the turn again, or continued on the
+    /// composer's model. What went wrong doing it is said, not swallowed.
+    private func resolveFailure(_ failure: StemCellFailure) {
+        guard let action = StemCellChatPlanner.action(failure, target: switchTarget) else { return }
+        let conversation = conversation
+        let mode: AgentWire.Mode? = if case .switchTo(let target) = action { target.mode } else { nil }
+        Task { [weak self] in
+            do { try await conversation.resolveFailure(failure.messageId, switchTo: mode) }
+            catch {
+                let alert = UIAlertController(title: Strings.Common.error, message: StemCellsStore.describe(error), preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: Strings.Common.ok, style: .default))
+                self?.present(alert, animated: true)
+            }
+        }
     }
 
     /// Plans the rows off the main thread, then shows them in one frame.
@@ -805,8 +859,13 @@ final class StemCellChatViewController: UIViewController {
         // Nothing is planned from history not yet read.
         guard key.width > 0, !reading(chat) else { return }
         let items = chat.items
+        // Only words not looked through yet, as of what references read as
+        // now: a long conversation isn't read again on every layout pass.
+        if scanned.references != references { scanned = (references, [:]) }
+        let fresh = items.filter { scanned.texts[$0.id] != $0.text }
+        for item in fresh { scanned.texts[item.id] = item.text }
         // Artifacts the messages name are read for their titles, once each.
-        let unread = items.flatMap { references.unread(in: $0.text) }
+        let unread = fresh.flatMap { references.unread(in: $0.text) }
         if !unread.isEmpty {
             let store = session.store
             Task { await store.readArtifacts(unread) }
@@ -821,7 +880,7 @@ final class StemCellChatViewController: UIViewController {
             Task { await store.readArtifacts(pages) }
         }
         // So are the names of the people they mention.
-        let people = items.flatMap { references.unknownUsers(in: $0.text) }
+        let people = fresh.flatMap { references.unknownUsers(in: $0.text) }
         if !people.isEmpty {
             let store = session.store
             Task { await store.readUsers(people) }
@@ -867,80 +926,142 @@ final class StemCellChatViewController: UIViewController {
     }
 
     private func show(_ plans: [ChatRowPlan]) {
+        #if DEBUG || HAPPY_FIXTURES
+        GymFrameMeter.noteApply(rows: plans.count, changed: plans.filter { plan in rowViews[plan.id].map { $0.plan !== plan } ?? false }.count)
+        #endif
         self.plans = plans
+        plansById = Dictionary(plans.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
         planShown = true
         showIntro()
-        var seen = Set<String>()
-        var hosted = Set<String>()
-        for plan in plans {
-            seen.insert(plan.id)
-            let row = rowViews[plan.id] ?? {
+        // Only the rows near the screen are views: they show their new
+        // plans here, and layout brings in and sends off the others.
+        for id in Array(rowViews.keys) {
+            if let plan = plansById[id], let row = rowViews[id] { configure(row, plan) } else { unmount(id) }
+        }
+        mountedFor = nil
+        layoutTranscript()
+        timeShown()
+    }
+
+    /// Brings in the rows near the screen and sends off those gone far
+    /// from it (`StemCellChatMountedRows`), as the transcript scrolls or
+    /// is laid out again.
+    private func mountRows() {
+        // What shows, in the transcript: a tall row has views only there.
+        let band = CGRect(x: 0, y: scrollView.contentOffset.y, width: scrollView.bounds.width, height: scrollView.bounds.height)
+        for row in rowViews.values { row.band = band.offsetBy(dx: 0, dy: -row.frame.minY) }
+        let rows = StemCellChatMountedRows(frames: stackedFrames, top: band.minY, height: band.height)
+        guard rows != mountedFor else { return }
+        mountedFor = rows
+        for id in Array(rowViews.keys) where !(stackedIndex[id].map(rows.keep.contains) ?? false) {
+            unmount(id)
+        }
+        for index in rows.mount where rowViews[stackedIds[index]] == nil {
+            let id = stackedIds[index]
+            guard let plan = plansById[id] else { continue }
+            // A row that was this one, if it is still spare, has nothing to draw again.
+            let row = spareRows.firstIndex { $0.plan?.id == id }.map { spareRows.remove(at: $0) } ?? spareRows.popLast() ?? {
                 let row = ChatPlanView()
+                row.onChunksPlaced = { [weak self, weak row] in
+                    guard let self, let row, let plan = row.plan else { return }
+                    self.reads(row, plan)
+                }
                 row.drawsStaticContent = true
+                row.cutsTallPlans = true
+                row.drawsTextOffMain = true
                 row.isAccessibilityElement = true
                 row.accessibilityIdentifier = "stem-message"
                 scrollView.addSubview(row)
-                rowViews[plan.id] = row
                 return row
             }()
-            row.apply(plan)
-            row.accessibilityLabel = plan.accessibilityLabel
-            // A long message reads whole; it opens or closes by an action.
-            let id = plan.id
-            let toggles = plan.toggles.map { name in
-                [UIAccessibilityCustomAction(name: name) { [weak self] _ in self?.toggle(id); return true }]
-            }
-            row.accessibilityCustomActions = toggles
-            var cardsHosted: [UIView] = []
-            for (artifactId, layout, frame) in plan.proposals {
-                guard let shown = shownProposals[artifactId] else { continue }
-                let key = "\(plan.id)#\(artifactId)"
-                hosted.insert(key)
-                let card = proposalViews[key] ?? makeProposal(artifactId, key: key)
-                if card.superview !== row { row.addSubview(card) }
-                card.setLayoutFrame(frame)
-                card.apply(shown, layout: layout)
-                cardsHosted.append(card)
-            }
-            // A row with media reads as its message, then each picture or
-            // recording on its own, and each card as what it opens.
-            let cards = plan.hits.sorted { $0.frame.minY < $1.frame.minY }.compactMap { hit -> UIAccessibilityElement? in
-                guard let label = self.cardLabel(hit.action) else { return nil }
-                let card = UIAccessibilityElement(accessibilityContainer: row)
-                card.accessibilityLabel = label
-                card.accessibilityTraits = .button
-                card.accessibilityIdentifier = "stem-card"
-                card.accessibilityFrameInContainerSpace = hit.frame
-                return card
-            }
-            let media: [Any] = (row.mediaViews as [Any]) + (cards as [Any]) + (cardsHosted as [Any])
-            row.isAccessibilityElement = media.isEmpty
-            if media.isEmpty {
-                row.accessibilityElements = nil
-            } else if let label = plan.accessibilityLabel, !label.isEmpty {
-                // The message covers its words, never its media.
-                let message = UIAccessibilityElement(accessibilityContainer: row)
-                message.accessibilityLabel = label
-                message.accessibilityIdentifier = "stem-message"
-                message.accessibilityCustomActions = toggles
-                message.accessibilityFrameInContainerSpace = plan.items.reduce(CGRect.null) { frame, item in
-                    item.wordsFrame.map { frame.union($0) } ?? frame
-                }
-                row.accessibilityElements = [message] + media
-            } else {
-                row.accessibilityElements = media
-            }
+            row.isHidden = false
+            rowViews[id] = row
+            // Where it is first: a tall row then brings in only its chunks there.
+            row.setLayoutFrame(stackedFrames[index])
+            row.band = band.offsetBy(dx: 0, dy: -row.frame.minY)
+            configure(row, plan)
         }
-        for (id, row) in rowViews where !seen.contains(id) {
+    }
+
+    /// A row sent off: kept hidden for the next to come in, a few of them.
+    private func unmount(_ id: String) {
+        guard let row = rowViews.removeValue(forKey: id) else { return }
+        for key in rowCards.removeValue(forKey: id) ?? [] {
+            proposalViews.removeValue(forKey: key)?.removeFromSuperview()
+        }
+        // Off screen: none of a tall row's chunks.
+        row.band = .null
+        if spareRows.count < 8 {
+            row.isHidden = true
+            spareRows.append(row)
+        } else {
             row.removeFromSuperview()
-            rowViews.removeValue(forKey: id)
         }
-        for (key, card) in proposalViews where !hosted.contains(key) {
-            card.removeFromSuperview()
-            proposalViews.removeValue(forKey: key)
+    }
+
+    /// `row` shows `plan`, and reads as it.
+    private func configure(_ row: ChatPlanView, _ plan: ChatRowPlan) {
+        // The same plan, with no cards that may have moved: as it was.
+        if row.plan === plan, plan.proposals.isEmpty, rowCards[plan.id] == nil { return }
+        row.apply(plan)
+        row.accessibilityLabel = plan.accessibilityLabel
+        // A long message reads whole; it opens or closes by an action.
+        let id = plan.id
+        var hosted = Set<String>()
+        for (artifactId, layout, frame) in plan.proposals {
+            guard let shown = shownProposals[artifactId] else { continue }
+            let key = "\(plan.id)#\(artifactId)"
+            hosted.insert(key)
+            let card = proposalViews[key] ?? makeProposal(artifactId, key: key)
+            if card.superview !== row { row.addSubview(card) }
+            card.setLayoutFrame(frame)
+            card.apply(shown, layout: layout)
         }
-        layoutTranscript()
-        timeShown()
+        for key in (rowCards[id] ?? []).subtracting(hosted) {
+            proposalViews.removeValue(forKey: key)?.removeFromSuperview()
+        }
+        rowCards[id] = hosted.isEmpty ? nil : hosted
+        reads(row, plan)
+    }
+
+    /// What VoiceOver reads of `row`: what of it is a view now, a tall
+    /// row's chunks near the screen included. Its cards stay over its chunks.
+    private func reads(_ row: ChatPlanView, _ plan: ChatRowPlan) {
+        let id = plan.id
+        let toggles = plan.toggles.map { name in
+            [UIAccessibilityCustomAction(name: name) { [weak self] _ in self?.toggle(id); return true }]
+        }
+        row.accessibilityCustomActions = toggles
+        let cardsHosted: [UIView] = plan.proposals.compactMap { proposalViews["\(id)#\($0.artifactId)"] }.filter { $0.superview === row }
+        for card in cardsHosted { row.bringSubviewToFront(card) }
+        // A row with media reads as its message, then each picture or
+        // recording on its own, and each card as what it opens.
+        let cards = plan.hits.sorted { $0.frame.minY < $1.frame.minY }.compactMap { hit -> UIAccessibilityElement? in
+            guard let label = self.cardLabel(hit.action) else { return nil }
+            let card = UIAccessibilityElement(accessibilityContainer: row)
+            card.accessibilityLabel = label
+            card.accessibilityTraits = .button
+            card.accessibilityIdentifier = "stem-card"
+            card.accessibilityFrameInContainerSpace = hit.frame
+            return card
+        }
+        let media: [Any] = (row.mediaViews as [Any]) + (cards as [Any]) + (cardsHosted as [Any])
+        row.isAccessibilityElement = media.isEmpty
+        if media.isEmpty {
+            row.accessibilityElements = nil
+        } else if let label = plan.accessibilityLabel, !label.isEmpty {
+            // The message covers its words, never its media.
+            let message = UIAccessibilityElement(accessibilityContainer: row)
+            message.accessibilityLabel = label
+            message.accessibilityIdentifier = "stem-message"
+            message.accessibilityCustomActions = toggles
+            message.accessibilityFrameInContainerSpace = plan.items.reduce(CGRect.null) { frame, item in
+                item.wordsFrame.map { frame.union($0) } ?? frame
+            }
+            row.accessibilityElements = [message] + media
+        } else {
+            row.accessibilityElements = media
+        }
     }
 
     private func makeProposal(_ artifactId: String, key: String) -> StemCellSidebarProposalView {
@@ -1048,9 +1169,9 @@ final class StemCellChatViewController: UIViewController {
     /// The newest message, taller than the card, shows from its start.
     private func showNewestFromItsStart() {
         guard previewing else { return }
-        let views: [UIView] = [introView] + plans.compactMap { rowViews[$0.id] }
-        if let newest = views.last(where: { $0.frame.height > 0 }), newest.frame.minY - scrollView.contentOffset.y < scrollView.contentInset.top {
-            scrollView.contentOffset.y = newest.frame.minY - scrollView.contentInset.top
+        let frames = [introView.frame] + plans.compactMap { plan in stackedIndex[plan.id].map { stackedFrames[$0] } }
+        if let newest = frames.last(where: { $0.height > 0 }), newest.minY - scrollView.contentOffset.y < scrollView.contentInset.top {
+            scrollView.contentOffset.y = newest.minY - scrollView.contentInset.top
         }
         // Nothing scrolled under the title: nothing to fade, and the first line stays whole.
         previewFade.isHidden = scrollView.contentOffset.y <= -scrollView.contentInset.top + 0.5
@@ -1080,10 +1201,12 @@ final class StemCellChatViewController: UIViewController {
         // The intro stays under the bar, as desktop's leading header.
         let pins = introLayout != nil && !previewing
         let first = introLayout == nil ? 0 : 1
-        func row(_ id: String) -> Int? {
-            if let index = settled.firstIndex(where: { $0.id == id }) { return first + index }
-            return waiting.firstIndex { $0.id == id }.map { first + settled.count + 1 + $0 }
-        }
+        // The plans' rows in the stack, past the intro and, for those
+        // waiting, the working line.
+        let stackRows = settled.indices.map { first + $0 } + waiting.indices.map { first + settled.count + 1 + $0 }
+        let stackedIds = (settled + waiting).map(\.id)
+        let stackRow = Dictionary(zip(stackedIds, stackRows), uniquingKeysWith: { first, _ in first })
+        func row(_ id: String) -> Int? { stackRow[id] }
         func stacked() -> StemCellChatStackLayout {
             let held = lift.flatMap { lift in row(lift.id).map { StemCellChatStackLayout.Lift(row: $0, line: lift.line) } }
             return StemCellChatStackLayout(heights: heights, width: width, viewport: viewport, pinsFirst: pins, lift: held)
@@ -1124,9 +1247,14 @@ final class StemCellChatViewController: UIViewController {
         // there as the line moves under it.
         let taken = !queuedShown.subtracting(queuedIds).isEmpty && view.window != nil
         queuedShown = queuedIds
+        let frames = stackRows.map { stack.frames[$0] }
+        if frames != stackedFrames || stackedIds != self.stackedIds { mountedFor = nil }
+        self.stackedIds = stackedIds
+        self.stackedFrames = frames
+        self.stackedIndex = Dictionary(zip(stackedIds, frames.indices), uniquingKeysWith: { first, _ in first })
         let place = {
-            for plan in self.plans {
-                if let index = row(plan.id) { self.rowViews[plan.id]?.setLayoutFrame(stack.frames[index]) }
+            for (id, view) in self.rowViews {
+                if let index = row(id) { view.setLayoutFrame(stack.frames[index]) }
             }
             self.working.frame = stack.frames[first + settled.count]
         }
@@ -1150,6 +1278,7 @@ final class StemCellChatViewController: UIViewController {
             setOffset(newestOffset)
         }
         showNewestFromItsStart()
+        mountRows()
         updateJump()
         updateHeaderScrim()
     }
@@ -1193,11 +1322,20 @@ final class StemCellChatViewController: UIViewController {
         max(-scrollView.contentInset.top, scrollView.contentSize.height + scrollView.contentInset.bottom - scrollView.bounds.height)
     }
 
+    /// Gliding after a fling, or moved by the performance gym's scripted
+    /// scroll (`GymFrameMeter`), which stands for one.
+    private var gliding: Bool {
+        #if DEBUG || HAPPY_FIXTURES
+        if GymFrameMeter.scrolling { return true }
+        #endif
+        return scrollView.isDecelerating
+    }
+
     private var scrollState: StemCellChatScrollHold.Scroll {
         StemCellChatScrollHold.Scroll(
             offset: scrollView.contentOffset.y, insetTop: scrollView.contentInset.top, insetBottom: scrollView.contentInset.bottom,
             contentHeight: scrollView.contentSize.height, viewport: scrollView.bounds.height,
-            tracking: scrollView.isTracking, decelerating: scrollView.isDecelerating
+            tracking: scrollView.isTracking, decelerating: gliding
         )
     }
 
@@ -1205,7 +1343,7 @@ final class StemCellChatViewController: UIViewController {
         #if DEBUG
         probe?.wrote(from, height)
         #endif
-        if followsNewest, scrollView.isTracking || scrollView.isDecelerating {
+        if followsNewest, scrollView.isTracking || gliding {
             grownUnfollowed += max(0, height - scrollView.contentSize.height)
         }
         scrollView.contentSize.height = height
@@ -1242,6 +1380,7 @@ final class StemCellChatViewController: UIViewController {
             }
             return
         }
+        defer { tellReadsNewest(moving: false) }
         if let height = scrollHold.release(scroll: scroll) { setContentHeight(height, "size-settle") }
         grownUnfollowed = 0
         // Shorter than where it rests (a section folded meanwhile): no gap under the end.
@@ -1274,6 +1413,18 @@ final class StemCellChatViewController: UIViewController {
         }
     }
 
+    /// Tells the conversation, when it changes, whether the reader is at the
+    /// newest message with the scroll at rest: only then may a run's end trim
+    /// the runs above (desktop's `trimHistory` on a watched session), so
+    /// nothing moves under a finger or a glide.
+    private func tellReadsNewest(moving: Bool) {
+        let reads = followsNewest && !moving && !jumping
+        guard reads != toldReadsNewest else { return }
+        toldReadsNewest = reads
+        let conversation = conversation
+        Task { await conversation.setReadsNewest(reads) }
+    }
+
     /// Back to the newest message, following it from there.
     @objc private func jumpToLatest() {
         // To the end as it is, not as it was held while the scroll moved.
@@ -1295,11 +1446,12 @@ final class StemCellChatViewController: UIViewController {
     }
 
     private func send() {
+        guard !acceptingSend else { return }
         let text = card.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let picked = pictures.images.map(\.attachment)
+        let pickedIDs = pictures.images.map(\.id)
         guard !text.isEmpty || !picked.isEmpty else { return }
-        kept = true
-        card.setText("", selection: NSRange(location: 0, length: 0))
+        acceptingSend = true
         StemCellsHaptics.play(.send)
         // Idle, a reader at the end sees it lifted; mid-turn it waits under
         // the reply at the end, which a reader near it follows. One reading
@@ -1312,13 +1464,19 @@ final class StemCellChatViewController: UIViewController {
         let store = session.store
         let staged = pictures
         Task {
-            // Read off the main thread; the staged files go once they are read.
-            let photos = await Task.detached {
-                picked.compactMap { attachment in (try? Data(contentsOf: attachment.fileURL)).map { (mimeType: attachment.mimeType, data: $0) } }
-            }.value
-            staged.clear()
             await store.attentionInput()
-            await conversation.send(id: id, text: text, pictures: photos)
+            let accepted = await conversation.send(id: id, text: text, attachments: picked)
+            acceptingSend = false
+            if accepted {
+                if card.text.trimmingCharacters(in: .whitespacesAndNewlines) == text {
+                    card.setText("", selection: NSRange(location: 0, length: 0))
+                }
+                staged.removeSent(pickedIDs)
+            } else {
+                let alert = UIAlertController(title: Strings.Common.error, message: "The message could not be saved. Your text and attachments are still here.", preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: Strings.Common.ok, style: .default))
+                present(alert, animated: true)
+            }
         }
     }
 
@@ -1405,6 +1563,11 @@ final class StemCellChatViewController: UIViewController {
                 UIPasteboard.general.string = text
                 showCopied(id)
             case .retry(let localId):
+                // A failure card's action names its service message.
+                if let item = chat.items.first(where: { $0.id == localId }), case .failure(let failure) = item.role {
+                    resolveFailure(failure)
+                    return
+                }
                 let conversation = conversation
                 Task { await conversation.retry(localId) }
             case .openMedia(let key):
@@ -1613,7 +1776,7 @@ extension StemCellChatViewController: UIImagePickerControllerDelegate, UINavigat
         for extra in urls.dropFirst(room) { try? FileManager.default.removeItem(at: extra) }
         let urls = Array(urls.prefix(room))
         Task { [weak self] in
-            let picks = await Task.detached(priority: .userInitiated) { urls.compactMap { LibraryPicker.document($0, videos: false) } }.value
+            let picks = await Task.detached(priority: .userInitiated) { urls.compactMap { LibraryPicker.document($0, videos: true) } }.value
             guard let self else { return LibraryPicker.discard(picks) }
             take(picks)
         }
@@ -1662,10 +1825,12 @@ extension StemCellChatViewController: UIScrollViewDelegate {
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         fingerOnKeyboard = true
         jumping = false
+        tellReadsNewest(moving: true)
     }
 
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
         jumping = false
+        tellReadsNewest(moving: false)
         view.setNeedsLayout()
     }
 
@@ -1688,14 +1853,21 @@ extension StemCellChatViewController: UIScrollViewDelegate {
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        #if DEBUG || HAPPY_FIXTURES
+        GymFrameMeter.noteScroll()
+        #endif
+        mountRows()
         updateJump()
         updateHeaderScrim()
         #if DEBUG
         probe?.watch()
         #endif
-        let moving = scrollView.isTracking || scrollView.isDecelerating
+        let moving = scrollView.isTracking || gliding
         // At the end of the height on screen, before a held one is given.
-        if moving { updateFollowing() }
+        if moving {
+            updateFollowing()
+            tellReadsNewest(moving: true)
+        }
         // Back inside its ends after a bounce: what was held is given.
         if scrollHold.held != nil, let height = scrollHold.release(scroll: scrollState) { setContentHeight(height, "size-scroll") }
         guard moving else { return }

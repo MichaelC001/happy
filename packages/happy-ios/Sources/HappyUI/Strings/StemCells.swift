@@ -43,6 +43,8 @@ extension Strings {
         public static let filesNotSentDetail = "A message to an agent carries text and pictures only for now."
         public static let closeNewWork = "Close new work"
         public static let leaveTask = "Leave task"
+        /// A Surface's, as desktop's menu says it.
+        public static let leaveSurface = "Leave"
         public static let archiveTask = "Archive task"
         public static let archiveBot = "Archive bot"
         public static let archiveSubtask = "Archive subtask"
@@ -116,6 +118,13 @@ extension Strings {
         }
         public static let sending = "Sending…"
         public static let sendFailed = "Not sent. Tap to retry."
+        /// A failed turn's card (happyAgentConversationProject.ts, conversationFailureText.ts).
+        public static let failure = "Failure"
+        public static let retry = "Retry"
+        public static let retried = "Retried"
+        public static let handled = "Handled"
+        public static func switchAndContinue(_ target: String) -> String { "Switch to \(target) and continue" }
+        public static func switched(_ target: String) -> String { "Switched to \(target)" }
         /// Under a long message cut to its first lines, and opened (desktop's).
         public static let showFull = "Show full"
         public static let showLess = "Show less"

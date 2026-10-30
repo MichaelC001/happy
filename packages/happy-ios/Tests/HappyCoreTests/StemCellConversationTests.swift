@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import HappyWire
 @testable import HappyCore
 
 /// `message.delta` applied exactly as happy-agent's API asks.
@@ -55,6 +56,86 @@ final class StemCellConversationTests: XCTestCase {
         XCTAssertEqual(StemCellConversation.inboundText("Message from agent c2: Done.", agentId: "c1"), "Message from agent c2: Done.")
     }
 
+    /// The phone keeps a conversation's newest page of runs, as desktop keeps
+    /// one nobody reads; what is pending stays whatever run it is in.
+    func testThePhoneKeepsTheNewestRuns() {
+        let runs = (0..<150).map { (id: "r\($0)", messageIds: ["u\($0)", "a\($0)"]) }
+        var messages = Dictionary(uniqueKeysWithValues: runs.flatMap(\.messageIds).map { ($0, AgentWire.Message(id: $0, role: "user", createdAt: 0, content: [.text($0)])) })
+        messages["p"] = AgentWire.Message(id: "p", role: "user", createdAt: 0, content: [.text("p")])
+        let kept = StemCellConversation.kept(runs: runs, messages: messages, pending: ["p", "u3"])
+        XCTAssertTrue(kept.trimmed)
+        XCTAssertEqual(kept.runs.map(\.id), (50..<150).map { "r\($0)" })
+        XCTAssertEqual(Set(kept.messages.keys), Set((50..<150).flatMap { ["u\($0)", "a\($0)"] } + ["p", "u3"]))
+        // A short one is kept whole.
+        let short = StemCellConversation.kept(runs: Array(runs.prefix(100)), messages: messages, pending: [])
+        XCTAssertFalse(short.trimmed)
+        XCTAssertEqual(short.runs.count, 100)
+        XCTAssertEqual(short.messages.count, messages.count)
+    }
+
+    /// desktop's `trimHistory`: left, a long conversation keeps its newest
+    /// runs in memory too, and can page the rest in again.
+    func testALeftConversationKeepsTheNewestRuns() async throws {
+        let client = DirectAgentClient(transport: LongHistoryServer(runs: 150), token: "t")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let engine = DirectSyncEngine(client: client, directory: root)
+        let conversation = StemCellConversation(client: client, store: engine.spaces, agentId: "long")
+        var updates = conversation.updates.makeAsyncIterator()
+        func asked(_ users: Int) async -> StemCellChatSnapshot? {
+            while let snapshot = await updates.next() {
+                if snapshot.loaded, snapshot.items.filter({ $0.role == .user }).count == users { return snapshot }
+            }
+            return nil
+        }
+        await conversation.start()
+        await conversation.setVisible(true)
+        let open = await asked(150)
+        XCTAssertEqual(open?.hasMore, false)
+        await conversation.setVisible(false)
+        let left = await asked(100)
+        XCTAssertEqual(left?.hasMore, true)
+        XCTAssertEqual(left?.items.first { $0.role == .user }?.text, "asked 50")
+        await conversation.stop()
+    }
+
+    /// desktop's `trimHistory` on a watched session: past twice the window,
+    /// a run's end trims an open conversation to its newest runs, but only
+    /// while its reader follows the newest message.
+    func testAnOpenConversationPastTwiceTheWindowKeepsTheNewestRunsWhileFollowed() async throws {
+        let client = DirectAgentClient(transport: LongHistoryServer(runs: 250), token: "t")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let engine = DirectSyncEngine(client: client, directory: root)
+        let conversation = StemCellConversation(client: client, store: engine.spaces, agentId: "long")
+        var updates = conversation.updates.makeAsyncIterator()
+        func asked(_ users: Int) async -> StemCellChatSnapshot? {
+            while let snapshot = await updates.next() {
+                if snapshot.loaded, snapshot.items.filter({ $0.role == .user }).count == users { return snapshot }
+            }
+            return nil
+        }
+        let finished: JSONValue = .object(["type": .string("run.finished"), "payload": .object(["agentId": .string("long"), "runId": .string("r249")])])
+        await conversation.start()
+        await conversation.setVisible(true)
+        let open = await asked(250)
+        XCTAssertEqual(open?.hasMore, false)
+        // Read up in history: nothing goes.
+        await conversation.setReadsNewest(false)
+        await engine.spaces.externalEvent(finished)
+        await engine.spaces.externalEvent(.object(["type": .string("message.created"), "payload": .object(["agentId": .string("long"), "runId": .string("r249"),
+            "message": .object(["id": .string("again"), "role": .string("user"), "createdAt": .number(250), "metadata": .object([:]),
+                                "content": .array([.object(["type": .string("text"), "text": .string("asked again")])])])])]))
+        // Seen after the run's end: every run is still there.
+        let unfollowed = await asked(251)
+        XCTAssertEqual(unfollowed?.hasMore, false)
+        // At the newest message: the next run's end trims it.
+        await conversation.setReadsNewest(true)
+        await engine.spaces.externalEvent(finished)
+        let followed = await asked(101)
+        XCTAssertEqual(followed?.hasMore, true)
+        XCTAssertEqual(followed?.items.first { $0.role == .user }?.text, "asked 150")
+        await conversation.stop()
+    }
+
     func testAMessageWithoutAPictureBytesStillDecodes() throws {
         let json = #"{"id":"m","role":"user","createdAt":1,"content":[{"type":"text","text":"hi"},{"type":"image","mimeType":"image/png"}],"metadata":{}}"#
         let decoded = try JSONDecoder().decode(AgentWire.Message.self, from: Data(json.utf8))
@@ -91,4 +172,29 @@ final class StemCellMarkdownTests: XCTestCase {
     func testAListItemRunsOnLazily() {
         XCTAssertEqual(join("- first\n  more\n- second"), "- first more\n- second")
     }
+}
+
+/// A daemon with one conversation of `runs` runs, all on its first page.
+private actor LongHistoryServer: DirectTransport {
+    let runs: Int
+    init(runs: Int) { self.runs = runs }
+
+    func request(method: String, path: String, credential: String, body: Data?, headers: [String: String]) throws -> DirectHTTPResponse {
+        let value: JSONValue
+        if path.contains("/messages?") {
+            value = .object(["hasMore": .bool(false), "runs": .array((0..<runs).map { index in
+                .object(["id": .string("r\(index)"), "status": .string("completed"), "startedAt": .number(Double(index)), "messages": .array([
+                    .object(["id": .string("u\(index)"), "role": .string("user"), "createdAt": .number(Double(index)), "metadata": .object([:]),
+                             "content": .array([.object(["type": .string("text"), "text": .string("asked \(index)")])])]),
+                ])])
+            })])
+        } else if path.hasSuffix("/bootstrap") {
+            value = .object(["agent": .object(["id": .string("long"), "workspaceId": .string("w"), "status": .string("idle")]), "pending": .array([])])
+        } else {
+            value = .object([:])
+        }
+        return .init(status: 200, body: try JSONEncoder().encode(value))
+    }
+
+    func close() {}
 }

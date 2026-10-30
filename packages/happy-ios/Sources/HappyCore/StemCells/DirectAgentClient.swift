@@ -20,7 +20,7 @@ public enum DirectAgentError: Error, Equatable, Sendable {
 /// one a device token may use (happy-agent `API.md`, "Mobile connector").
 public final class DirectAgentClient: Sendable {
     let transport: any DirectTransport
-    private let token: String
+    let token: String
 
     init(transport: any DirectTransport, token: String) {
         self.transport = transport
@@ -31,9 +31,20 @@ public final class DirectAgentClient: Sendable {
 
     // MARK: Requests
 
+    #if DEBUG
+    /// `STEM_SLOW_WRITES` seconds before every write, for a test that
+    /// watches what shows before the computer answers.
+    private static let slowWrites = ProcessInfo.processInfo.environment["STEM_SLOW_WRITES"].flatMap(Double.init)
+    #endif
+
     /// `raw` is sent as is, in place of `json` (an upload's bytes).
     func send(_ method: String, _ path: String, json: JSONValue? = nil, raw: Data? = nil, headers: [String: String] = [:]) async throws -> DirectHTTPResponse {
-        let body = try raw ?? json.map { try JSONEncoder().encode($0) }
+        #if DEBUG
+        if method != "GET", let slow = Self.slowWrites { try await Task.sleep(for: .seconds(slow)) }
+        #endif
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        let body = try raw ?? json.map { try encoder.encode($0) }
         let response = try await transport.request(method: method, path: path, credential: token, body: body, headers: headers)
         if response.status == 401 { throw DirectAgentError.revoked }
         guard (200..<300).contains(response.status) || response.status == 304 || response.status == 206 else {
@@ -206,6 +217,11 @@ public final class DirectAgentClient: Sendable {
 
     // MARK: Surfaces
 
+    /// Takes a Surface out of the reader's sidebar; its content stays for everyone.
+    public func leaveSurface(_ surfaceId: String) async throws {
+        _ = try await send("POST", "/v0/surfaces/\(Self.escape(surfaceId))/leave", json: .object(["mutationId": .string(ClientID.make())]))
+    }
+
     /// The joined Surfaces; nil where the daemon serves none (`404`, `501`).
     public func surfaces() async throws -> [AgentWire.Surface]? {
         struct Response: Decodable { let surfaces: [Lossy<AgentWire.Surface>] }
@@ -235,7 +251,8 @@ public final class DirectAgentClient: Sendable {
     // MARK: Conversations
 
     public func agent(_ agentId: String) async throws -> AgentWire.Agent {
-        try await decode(AgentWire.Agent.self, "GET", "/v0/agents/\(Self.escape(agentId))")
+        struct Response: Decodable { let agent: AgentWire.Agent }
+        return try await decode(Response.self, "GET", "/v0/agents/\(Self.escape(agentId))").agent
     }
 
     public func bootstrap(_ agentId: String) async throws -> AgentWire.Bootstrap {
@@ -248,7 +265,10 @@ public final class DirectAgentClient: Sendable {
     }
 
     /// Newest runs first page, or the runs before `before`, or the messages after `after`.
-    public func messages(_ agentId: String, before: String? = nil, after: String? = nil, limit: Int = 50) async throws -> AgentWire.MessagesResponse {
+    /// `limit` is desktop's page (`DEFAULT_HISTORY_LIMIT`). Tool data is left
+    /// out: the phone shows none of a tool's input or output, only its pictures,
+    /// which come on their own (`media`).
+    public func messages(_ agentId: String, before: String? = nil, after: String? = nil, limit: Int = 100) async throws -> AgentWire.MessagesResponse {
         var query = "limit=\(limit)&omitToolData=true"
         if let before { query += "&before=\(Self.escape(before))" }
         if let after { query += "&after=\(Self.escape(after))" }
@@ -294,11 +314,17 @@ public final class DirectAgentClient: Sendable {
     /// Always steering, as desktop sends: mid-turn it is taken at the next
     /// boundary rather than waiting behind the run; idle, it starts one.
     public func sendMessage(_ agentId: String, id: String, text: String, images: [(mimeType: String, data: Data)], mode: AgentWire.Mode) async throws {
+        guard images.allSatisfy({ $0.data.count <= DirectAttachmentRules.maxInlineImageBytes }),
+              images.reduce(0, { $0 + $1.data.count }) <= DirectAttachmentRules.maxInlineImageTotalBytes else {
+            throw DirectAttachmentRules.invalid("Inline images exceed the model's image limit.")
+        }
+        let caption = text.isEmpty && !images.isEmpty ? (images.count == 1 ? "Attached image." : "Attached images.") : text
         var object: [String: JSONValue] = [
-            "id": .string(id), "text": .string(text), "delivery": .string("steer"),
+            "id": .string(id), "text": .string(caption), "delivery": .string("steer"),
             "clientMetadata": .object(["composer": .string("mobile")]),
         ]
         if !images.isEmpty {
+            // /send prepends its required top-level text to these rich blocks.
             object["content"] = .array(images.map {
                 .object(["type": .string("image"), "mimeType": .string($0.mimeType), "data": .string($0.data.base64EncodedString())])
             })
@@ -324,6 +350,20 @@ public final class DirectAgentClient: Sendable {
 
     public func abort(_ agentId: String) async throws {
         _ = try await send("POST", "/v0/agents/\(Self.escape(agentId))/abort", json: .object([:]))
+    }
+
+    /// A failed turn run again (`…/messages/:id/retry`), or moved to another
+    /// model and continued there (`…/switch`): the failure's message, now
+    /// carrying its resolution. The continued run comes as events.
+    public func resolveFailure(_ agentId: String, messageId: String, switchTo mode: AgentWire.Mode?, mutationId: String) async throws -> AgentWire.Message {
+        struct Response: Decodable { var message: AgentWire.Message }
+        var body: [String: JSONValue] = ["mutationId": .string(mutationId)]
+        if let mode {
+            body["providerId"] = .string(mode.providerId)
+            body["modelId"] = .string(mode.modelId)
+        }
+        let path = "/v0/agents/\(Self.escape(agentId))/messages/\(Self.escape(messageId))/\(mode == nil ? "retry" : "switch")"
+        return try await decode(Response.self, "POST", path, json: .object(body)).message
     }
 
     public func markRead(_ agentId: String) async throws {

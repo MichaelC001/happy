@@ -1,6 +1,7 @@
 #if canImport(UIKit)
 import HappyCore
 import HappyLayout
+import OSLog
 import UIKit
 
 /// Stories on Stem Cells home, in the header as Telegram's chat list has
@@ -25,6 +26,7 @@ import UIKit
 /// while it glides, so the list never jumps.
 @MainActor
 final class StoriesHomeController {
+    private static let log = Logger(subsystem: "engineering.happy", category: "stories")
     /// How the room above the list changed: as the list was let go of or
     /// came to rest (the list stays where it is), on its own as the stories
     /// were seen or new ones came (the list follows, animated), or as home
@@ -37,6 +39,11 @@ final class StoriesHomeController {
 
     let view = StoriesHeaderView()
     var onInsetChange: ((Change) -> Void)?
+    /// The sidebar's rings changed: by agent, or nil while agent stories
+    /// are off (Stories off, or a daemon without them).
+    var onRings: (([String: StoryRing]?) -> Void)?
+    /// The sidebar's rings, as last drawn.
+    private(set) var rings: [String: StoryRing]?
     /// The list the stories open above.
     weak var list: UIScrollView?
     /// A row is being carried: the list's own scrolling then is the carry's.
@@ -171,6 +178,11 @@ final class StoriesHomeController {
     private func draw(_ next: StoriesSnapshot) {
         let hadUnseen = StoriesRow.hasUnseen(items)
         snapshot = next
+        let rings = next.isOn ? StoriesRow.rings(next.feed) : nil
+        if rings != self.rings {
+            self.rings = rings
+            onRings?(rings)
+        }
         items = next.isOn ? StoriesRow.items(next.feed, myStory: Strings.Stories.myStory) : []
         view.apply(items)
         view.isHidden = !isShown
@@ -408,6 +420,66 @@ final class StoriesHomeController {
                 guard let self, self.settleWhenBack else { return }
                 self.settle()
             }
+        }
+    }
+
+    // MARK: Rings
+
+    /// A sidebar row's ring was tapped: the viewer plays that agent's ring,
+    /// oldest first from its first new story, grown out of the ring and
+    /// closing back into it, then closes.
+    ///
+    /// A tap on a ring always gets its viewer: a header circle still loading
+    /// gives way, a viewer that went without saying so is forgotten, a ring
+    /// not yet in this feed is read from the session's, and anything left
+    /// presented is put away first. What can't open is logged.
+    func openRing(agentId: String, name: String, from ring: UIView) {
+        if let viewer, viewer.presentingViewController == nil, !viewer.isBeingPresented { release() }
+        guard !viewerUp else { return Self.log.info("ring \(agentId, privacy: .public): a viewer is up") }
+        stopOpening()
+        guard let session, let host else { return Self.log.error("ring \(agentId, privacy: .public): no stories session") }
+        guard let stories = rings?[agentId] ?? StoriesRow.rings(session.snapshot.feed)?[agentId] else {
+            return Self.log.error("ring \(agentId, privacy: .public): not in the feed")
+        }
+        if let presented = host.presentedViewController {
+            // The tap reached the list, so nothing presented covers it: what
+            // is left (a sheet on its way out, one left behind) goes first,
+            // and the ring opens once it has.
+            Self.log.info("ring \(agentId, privacy: .public): \(String(describing: type(of: presented)), privacy: .public) put away first")
+            let reopen = { [weak self, weak ring] in
+                guard let self, let ring, ring.window != nil else { return }
+                guard host.presentedViewController == nil else {
+                    return Self.log.error("ring \(agentId, privacy: .public): \(String(describing: type(of: presented)), privacy: .public) stayed up")
+                }
+                self.openRing(agentId: agentId, name: name, from: ring)
+            }
+            if presented.isBeingDismissed, let coordinator = presented.transitionCoordinator {
+                coordinator.animate(alongsideTransition: nil) { _ in reopen() }
+            } else {
+                presented.presentingViewController?.dismiss(animated: false) { reopen() }
+            }
+            return
+        }
+        let author = StoriesRow.ringAuthor(stories, name: name)
+        var feed = StoryFeed(authors: [author], stories: session.snapshot.stories, cursor: "")
+        feed.stories.merge(snapshot.feed?.stories ?? [:]) { held, _ in held }
+        if !stories.storyIds.contains(where: { feed.stories[$0] != nil }) {
+            Self.log.error("ring \(agentId, privacy: .public): none of its \(stories.storyIds.count) stories are read yet")
+        }
+        let image = (ring.superview as? StemCellsRowView)?.markImage
+        guard let viewer = StoriesViewerPresenter.present(session: session, feed: feed, authorIndex: 0, from: host, origin: ring, ringImage: image) else {
+            return Self.log.error("ring \(agentId, privacy: .public): the viewer didn't present")
+        }
+        hideTooltip()
+        launching = false
+        self.viewer = viewer
+        viewer.onClosing = { [weak self, weak viewer] in
+            guard let self, let viewer, viewer === self.viewer else { return }
+            self.release()
+        }
+        viewer.onClose = { [weak self, weak viewer] in
+            guard let self, let viewer, viewer === self.viewer else { return }
+            self.release()
         }
     }
 

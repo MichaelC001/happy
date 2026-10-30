@@ -125,6 +125,8 @@ extension AgentWire {
             public var sidebarAttachments: Bool?
             public var stories: Bool?
             public var stickers: Bool?
+            /// Agents' stories, their rings and status lines.
+            public var agentStories: Bool?
         }
         public var ready: Bool
         public var capabilities: Capabilities?
@@ -160,6 +162,17 @@ extension AgentWire {
         }
     }
 
+    /// The one line an agent last wrote about where its work stands (`set_status`).
+    public struct AgentStatusLine: Equatable, Sendable, Codable {
+        public var text: String
+        public var updatedAt: Double
+
+        public init(text: String, updatedAt: Double) {
+            self.text = text
+            self.updatedAt = updatedAt
+        }
+    }
+
     public struct AgentSubagents: Equatable, Sendable, Codable {
         public var total: Int?
         public var running: Int?
@@ -180,8 +193,13 @@ extension AgentWire {
         public let version: String?
         public let retrying: AgentRetrying?
         public let subagents: AgentSubagents?
+        public let statusLine: AgentStatusLine?
+        /// When the agent last did something the person would want to know
+        /// about (current daemons); older ones send only `updatedAt`.
+        public let lastActivityAt: Double?
+        public let updatedAt: Double?
 
-        public init(id: String, workspaceId: String, parentAgentId: String? = nil, title: String? = nil, status: String = "idle", wait: AgentWait? = nil, subtasks: [Agent]? = nil, pendingQuestionId: String? = nil, unread: AgentUnread? = nil, canSendMessages: Bool? = nil, archivedAt: Double? = nil, version: String? = nil, retrying: AgentRetrying? = nil, subagents: AgentSubagents? = nil) {
+        public init(id: String, workspaceId: String, parentAgentId: String? = nil, title: String? = nil, status: String = "idle", wait: AgentWait? = nil, subtasks: [Agent]? = nil, pendingQuestionId: String? = nil, unread: AgentUnread? = nil, canSendMessages: Bool? = nil, archivedAt: Double? = nil, version: String? = nil, retrying: AgentRetrying? = nil, subagents: AgentSubagents? = nil, statusLine: AgentStatusLine? = nil, lastActivityAt: Double? = nil, updatedAt: Double? = nil) {
             self.id = id
             self.workspaceId = workspaceId
             self.parentAgentId = parentAgentId
@@ -196,6 +214,9 @@ extension AgentWire {
             self.version = version
             self.retrying = retrying
             self.subagents = subagents
+            self.statusLine = statusLine
+            self.lastActivityAt = lastActivityAt
+            self.updatedAt = updatedAt
         }
 
         public static func == (lhs: Agent, rhs: Agent) -> Bool {
@@ -203,7 +224,17 @@ extension AgentWire {
                 && lhs.wait == rhs.wait && lhs.subtasks == rhs.subtasks && lhs.pendingQuestionId == rhs.pendingQuestionId
                 && lhs.unread == rhs.unread && lhs.canSendMessages == rhs.canSendMessages && lhs.archivedAt == rhs.archivedAt
                 && lhs.parentAgentId == rhs.parentAgentId && lhs.version == rhs.version
-                && lhs.retrying == rhs.retrying && lhs.subagents == rhs.subagents
+                && lhs.retrying == rhs.retrying && lhs.subagents == rhs.subagents && lhs.statusLine == rhs.statusLine
+                && lhs.lastActivityAt == rhs.lastActivityAt && lhs.updatedAt == rhs.updatedAt
+        }
+
+        /// When its row's time counts from: the daemon's last activity, else
+        /// the later of its last status and its last change (desktop's
+        /// `conversationActivityAt`). Nil when none is known.
+        public var activityAt: Double? {
+            if let lastActivityAt { return lastActivityAt }
+            let latest = max(statusLine?.updatedAt ?? 0, updatedAt ?? 0)
+            return latest > 0 ? latest : nil
         }
 
         public var isWorking: Bool { status != "idle" }
@@ -407,8 +438,12 @@ extension AgentWire {
         public var status: String?
         public var runId: String?
         public var metadata: MessageMetadata?
+        /// An error service message's diagnostics (`error`) and typed
+        /// failure (`failure`), kept as sent; `StemCellFailure` reads them.
+        public var error: JSONValue?
+        public var failure: JSONValue?
 
-        public init(id: String, role: String, createdAt: Double, content: [Block], status: String? = nil, runId: String? = nil, metadata: MessageMetadata? = nil) {
+        public init(id: String, role: String, createdAt: Double, content: [Block], status: String? = nil, runId: String? = nil, metadata: MessageMetadata? = nil, error: JSONValue? = nil, failure: JSONValue? = nil) {
             self.id = id
             self.role = role
             self.createdAt = createdAt
@@ -416,6 +451,8 @@ extension AgentWire {
             self.status = status
             self.runId = runId
             self.metadata = metadata
+            self.error = error
+            self.failure = failure
         }
     }
 

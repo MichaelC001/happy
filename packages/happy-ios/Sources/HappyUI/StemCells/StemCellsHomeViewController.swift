@@ -36,7 +36,9 @@ final class StemCellsHomeViewController: UIViewController {
     private var directHome = DirectHomeSnapshot()
     private var directWatch: Task<Void, Never>?
     private var usesSpaces: Bool { directHome.usesSpaces && session?.snapshot.availability != .unsupported }
-    private var creating = false
+    /// New work on its way to the screen, by the store's ask: a second tap
+    /// meanwhile gets the same and opens nothing more.
+    private var opening: Set<UUID> = []
     /// Stories, in home's header: open under it, or closed into its title.
     /// Nothing at all while Stories are off.
     private lazy var stories = StoriesHomeController(host: self)
@@ -144,6 +146,12 @@ final class StemCellsHomeViewController: UIViewController {
         sidebar.onDragging = { [weak self] active in self?.dragging(active) }
         sidebar.delegate = self
         stories.onInsetChange = { [weak self] change in self?.storiesMoved(change) }
+        // Agent stories turn the conversations' rows into story rows.
+        stories.onRings = { [weak self] _ in self?.showRows() }
+        sidebar.onOpenStory = { [weak self] row, ring in
+            guard let agentId = row.agentId else { return }
+            self?.stories.openRing(agentId: agentId, name: row.label, from: ring)
+        }
         stories.list = sidebar
         empty.onPair = { [weak self] in
             guard let self else { return }
@@ -156,7 +164,6 @@ final class StemCellsHomeViewController: UIViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         attach()
-        sidebar.selectedRowId = session?.selectedRowId
         if let store = session?.store { Task { await store.attentionVisibleUpdate(true) } }
     }
 
@@ -169,6 +176,12 @@ final class StemCellsHomeViewController: UIViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        // The row opened stays lit while its screen comes in, then lets go,
+        // as Telegram's chat list does: coming back, by the back button or
+        // a swipe, finds nothing selected. This list is never beside the
+        // conversation it opened (on iPad too it is pushed over), so there
+        // is no open chat for a selection to show.
+        sidebar.selectedRowId = nil
         if let store = session?.store { Task { await store.attentionVisibleUpdate(false) } }
     }
 
@@ -197,7 +210,6 @@ final class StemCellsHomeViewController: UIViewController {
         snapshot = StemCellsSnapshot()
         directHome = DirectHomeSnapshot()
         if let session {
-            sidebar.selectedRowId = session.selectedRowId
             watch = session.watch { [weak self] snapshot in self?.apply(snapshot) }
             directWatch = Task { [weak self, engine = session.engine] in
                 for await snapshot in await engine.snapshots() {
@@ -356,7 +368,7 @@ final class StemCellsHomeViewController: UIViewController {
             self.search?.narrowed = false
             self.search?.results = [:]
             nothingFound.isHidden = true
-            sidebar.apply(drawn)
+            sidebar.apply(StemCellsRows.withStories(drawn, rings: stories.rings))
             if wasNarrowed, let fromTop = self.search?.fromTop { restore(fromTop: fromTop) }
             return
         }
@@ -539,13 +551,11 @@ final class StemCellsHomeViewController: UIViewController {
             makeNewWork()
         case .space where row.targetKind == "surface":
             guard let surfaceId = row.targetId else { return }
-            session.selectedRowId = row.id
             sidebar.selectedRowId = row.id
             let surface = AgentWire.Surface(id: surfaceId, type: row.surfaceType ?? "", name: row.label)
             navigationController?.pushViewController(StemCellsSurfaceViewController(session: session, surface: surface), animated: animated)
         case .space, .session:
             guard let agentId = row.agentId else { return }
-            session.selectedRowId = row.id
             sidebar.selectedRowId = row.id
             session.warm.tap(agentId)
             let space = row.spaceId.flatMap { id in snapshotSpace(id) }
@@ -598,17 +608,22 @@ final class StemCellsHomeViewController: UIViewController {
     /// at once, and the conversation opens over home without going anywhere
     /// (`StemCellsNewWorkTransition`): the composer rides the keyboard up from
     /// the dock as the intro fades in, or, from the dock's "+", stays and the
-    /// "+" sheet comes up over it.
+    /// "+" sheet comes up over it. Leaving new work never closes it, so
+    /// new work already standing empty is opened instead, where it is
+    /// (desktop's rule): from the dock any, newest first; from a heading's
+    /// "+" only one under that heading.
     func makeNewWork(in sectionId: String? = nil, library: Bool = false) {
-        guard let session, !creating, navigationController?.topViewController === parent || navigationController?.topViewController === self else { return }
-        creating = true
-        StemCellsHaptics.play(.newWork)
+        guard let session, navigationController?.topViewController === parent || navigationController?.topViewController === self else { return }
         let store = session.store
         Task { @MainActor in
-            let creation = await store.createStemCell(sectionId: sectionId)
-            creating = false
+            let going = await store.goToNewWork(under: sectionId)
+            guard opening.insert(going.id).inserted else { return }
+            StemCellsHaptics.play(.newWork)
+            let creation = await going.work.value
+            opening.remove(going.id)
+            // Another ask got to the screen first.
+            guard navigationController?.topViewController === parent || navigationController?.topViewController === self else { return }
             let rowId = "space:\(creation.spaceId)"
-            session.selectedRowId = rowId
             sidebar.selectedRowId = rowId
             let chat = StemCellChatViewController(session: session, agentId: creation.agentId, title: Strings.StemCells.untitled, spaceId: creation.spaceId, stemCell: .stemCell(seed: creation.spaceId), creation: creation)
             chat.focusesOnOpen = !library
@@ -683,11 +698,11 @@ final class StemCellsHomeViewController: UIViewController {
 
     /// How a row's work is put away, as desktop offers it: new work nobody
     /// named closes; a task is left, and archived too when the person may;
-    /// a bot is archived. Never Happy.
+    /// a bot is archived; a Surface is left. Never Happy.
     private func closing(_ row: StemCellsRow) -> [(title: String, icon: String, destructive: Bool, run: () -> Void)] {
         guard let store = session?.store, !row.isHappy else { return [] }
         if row.kind == .session, let agentId = row.agentId {
-            return [(Strings.StemCells.archiveSubtask, "archive", true, { Task { await store.archiveSubtask(agentId) } })]
+            return [(Strings.StemCells.archiveSubtask, "archive", true, { Task { await store.archiveSubtask(agentId, nodeId: row.nodeId) } })]
         }
         guard row.kind == .space else { return [] }
         if row.isUntouchedStemCell, let spaceId = row.spaceId {
@@ -697,14 +712,16 @@ final class StemCellsHomeViewController: UIViewController {
         switch row.targetKind {
         case "task":
             var acts: [(title: String, icon: String, destructive: Bool, run: () -> Void)] = [
-                (Strings.StemCells.leaveTask, "close", false, { Task { await store.leave(taskId: targetId) } }),
+                (Strings.StemCells.leaveTask, "close", false, { Task { await store.leave(taskId: targetId, nodeId: row.nodeId) } }),
             ]
             if row.canArchive {
-                acts.append((Strings.StemCells.archiveTask, "archive", true, { Task { await store.archive(kind: "task", id: targetId) } }))
+                acts.append((Strings.StemCells.archiveTask, "archive", true, { Task { await store.archive(kind: "task", id: targetId, nodeId: row.nodeId) } }))
             }
             return acts
         case "bot":
-            return [(Strings.StemCells.archiveBot, "archive", true, { Task { await store.archive(kind: "bot", id: targetId) } })]
+            return [(Strings.StemCells.archiveBot, "archive", true, { Task { await store.archive(kind: "bot", id: targetId, nodeId: row.nodeId) } })]
+        case "surface":
+            return [(Strings.StemCells.leaveSurface, "close", false, { Task { await store.leave(surfaceId: targetId, nodeId: row.nodeId) } })]
         default:
             return []
         }
@@ -775,11 +792,13 @@ extension StemCellsHomeViewController: UIScrollViewDelegate {
         warmUp()
     }
 
-    /// The sidebar's conversations and those on screen, for reading ahead.
+    /// The rows the sidebar shows and where it is scrolled, for reading
+    /// ahead what is on screen and around it.
     private func warmUp() {
         guard let session, !snapshot.allRows.isEmpty else { return }
         sidebar.layoutIfNeeded()
-        session.warm.update(rows: snapshot.allRows, visible: sidebar.visibleRows, references: snapshot.references)
+        let shown = sidebar.shownRows
+        session.warm.update(rows: shown.isEmpty ? snapshot.rows : shown, visible: shown.isEmpty ? nil : sidebar.visibleRange, references: snapshot.references)
     }
 }
 
