@@ -40,14 +40,11 @@ import com.slopus.happy.ui.machine.MachineScreen
 import com.slopus.happy.ui.machine.MachineScreenActions
 import com.slopus.happy.ui.machine.recentMachineSessions
 import com.slopus.happy.ui.onboarding.LinkComputerChecklist
-import com.slopus.happy.ui.onboarding.OnboardingLinkComputer
-import com.slopus.happy.ui.onboarding.OnboardingSettingsRoute
 import com.slopus.happy.ui.session.DuplicateSheet
 import com.slopus.happy.ui.session.SessionInfoActions
 import com.slopus.happy.ui.session.SessionInfoLive
 import com.slopus.happy.ui.session.SessionInfoRoute
 import com.slopus.happy.ui.session.SessionInfoScreen
-import com.slopus.happy.ui.settings.AppearanceRoute
 import com.slopus.happy.ui.settings.ChangelogRoute
 import com.slopus.happy.ui.theme.HappyTheme
 import kotlinx.coroutines.Dispatchers
@@ -58,9 +55,7 @@ import kotlinx.serialization.json.JsonObject
 /** Where the home list's taps lead: the same for the phone home and the tablet sidebar. */
 class HomeNavigation(
     val onSettings: () -> Unit,
-    val onAppearance: () -> Unit,
     val onWhatsNew: () -> Unit,
-    val onOnboardingSettings: () -> Unit,
     val onOpenSession: (String) -> Unit,
     val onOpenMachine: (String) -> Unit,
     val onTroubleshoot: () -> Unit,
@@ -68,11 +63,9 @@ class HomeNavigation(
     val onDetails: (String) -> Unit,
 ) {
     companion object {
-        fun of(nav: NavHostController, onOpenSession: (String) -> Unit, onTroubleshoot: () -> Unit) = HomeNavigation(
+        fun of(graph: AppGraph, nav: NavHostController, onOpenSession: (String) -> Unit, onTroubleshoot: () -> Unit) = HomeNavigation(
             onSettings = { nav.navigate(SettingsRoute) },
-            onAppearance = { nav.navigate(AppearanceRoute) },
             onWhatsNew = { nav.navigate(ChangelogRoute) },
-            onOnboardingSettings = { nav.navigate(OnboardingSettingsRoute) },
             onOpenSession = onOpenSession,
             onOpenMachine = { id -> nav.navigate(MachineRoute(id)) },
             onTroubleshoot = onTroubleshoot,
@@ -100,7 +93,7 @@ fun NavGraphBuilder.homeRoutes(
         if (LocalHomeInSidebar.current) {
             Box(Modifier.fillMaxSize().background(HappyTheme.colors.grouped.background).testTag(HomeTags.TABLET_BLANK))
         } else {
-            HomeListHost(graph, remember(nav) { HomeNavigation.of(nav, onOpenSession, onTroubleshoot) }, withDock = true) { host ->
+            HomeListHost(graph, remember(nav) { HomeNavigation.of(graph, nav, onOpenSession, onTroubleshoot) }, withDock = true) { host ->
                 HomeScreen(
                     state = host.state,
                     connectionStatus = host.connectionStatus,
@@ -108,12 +101,14 @@ fun NavGraphBuilder.homeRoutes(
                     callbacks = host.callbacks,
                     actions = host.actions,
                     update = host.update,
-                    linkContent = { OnboardingLinkComputer(graph, onSettings = host.navigation.onOnboardingSettings) },
                     offlineContent = { computers, onShowArchived ->
                         LinkComputerChecklist(graph, computers = computers, onTroubleshoot = host.navigation.onTroubleshoot, onShowArchived = onShowArchived)
                     },
                     dock = host.dock?.state,
                     dockActions = host.dock?.actions,
+                    accounts = rememberAccountMenu(graph),
+                    listState = host.listState,
+                    syncing = host.syncing,
                 )
             }
         }

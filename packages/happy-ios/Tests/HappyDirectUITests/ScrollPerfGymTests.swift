@@ -3,7 +3,7 @@ import ObjectiveC
 import XCTest
 
 /// The transcript and the working line never idle for XCUITest's wait
-/// around every action; as StemCellsUITests does, the private wait goes.
+/// around every action; as UITests does, the private wait goes.
 private let skipsQuiescence: Bool = {
     guard let process = NSClassFromString("XCUIApplicationProcess") else { return false }
     var replaced = false
@@ -21,7 +21,7 @@ private let skipsQuiescence: Bool = {
 }()
 
 /// The iOS performance gym (`docs/PERF-GYM.md`): scripted workloads on a
-/// long Stem Cells conversation against a throwaway Happy Agent, each
+/// long V2 conversation against a throwaway Happy Agent, each
 /// measured by the app's own frame meter (`GymFrameMeter`: frame intervals,
 /// dropped frames, hitch time, main-thread time per frame, memory) and by
 /// XCTest's hitch metrics. Each prints `GYM_RESULT <workload> <pairs>`,
@@ -33,6 +33,13 @@ private let skipsQuiescence: Bool = {
 /// metrics (default 3).
 @MainActor
 final class ScrollPerfGymTests: XCTestCase {
+    /// The transcript, whichever renderer drew it: the agents' chat draws
+    /// on UltraList, which is not a scroll view, so it is found by its
+    /// identifier rather than by kind.
+    var transcriptElement: XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "transcript").firstMatch
+    }
+
     private let app = XCUIApplication()
     private var environment: [String: String] { ProcessInfo.processInfo.environment }
     private var chat: String { environment["GYM_CHAT"] ?? "Gym Long Chat" }
@@ -41,18 +48,39 @@ final class ScrollPerfGymTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
         print("ScrollPerfGymTests skips quiescence: \(skipsQuiescence)")
-        app.launchEnvironment["STEM_DIRECT"] = "1"
-        app.launchEnvironment["STEM_GYM_METER"] = "1"
-        app.launchArguments += ["-stemCells.direct", "YES"]
+        app.launchEnvironment["HAPPY_GYM_METER"] = "1"
+        app.launchArguments += ["-v2.direct", "YES"]
     }
 
     // MARK: Workloads
+
+    /// Rendered evidence of the actual agent transcript's header, at the
+    /// oldest loaded row and with content under it, then with the keyboard.
+    func testAgentHeaderEdges() {
+        app.launchEnvironment["HAPPY_GYM_SCRIPT"] = "top wait*3"
+        launch()
+        open(chat)
+        runScript("top wait*3")
+        func keep(_ name: String) {
+            let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        keep("agent-header-top")
+        transcriptElement.swipeUp(velocity: .slow)
+        pause(1)
+        keep("agent-header-scrolled")
+        app.textViews["composer"].tap()
+        pause(1)
+        keep("agent-header-keyboard")
+    }
 
     /// Not a workload: reads the gym's conversations back to their first
     /// message, as someone who has read their long chats has them, so every
     /// workload after it starts from the whole history on the phone.
     func testPrime() {
-        app.launchEnvironment["STEM_GYM_SCRIPT"] = "dragdown top wait*8"
+        app.launchEnvironment["HAPPY_GYM_SCRIPT"] = "dragdown top wait*8"
         launch()
         for title in [chat, environment["GYM_IMAGES"] ?? "Gym Pictures"] {
             open(title)
@@ -70,7 +98,7 @@ final class ScrollPerfGymTests: XCTestCase {
                 rows = now
             }
             print("GYM_PRIME \(title) rows=\(rows)")
-            app.buttons["stem-chat-back"].firstMatch.tap()
+            app.buttons["chat-back"].firstMatch.tap()
             pause(2)
         }
     }
@@ -92,7 +120,7 @@ final class ScrollPerfGymTests: XCTestCase {
         launch()
         open(chat)
         pause(3)
-        app.buttons["stem-chat-back"].firstMatch.tap()
+        app.buttons["chat-back"].firstMatch.tap()
         pause(2)
         let row = find(chat)
         resetMeter()
@@ -137,14 +165,14 @@ final class ScrollPerfGymTests: XCTestCase {
     /// A reply streaming into the long chat while the reader flings and
     /// drags up into history and back down.
     func testScrollWhileStreaming() {
-        app.launchEnvironment["STEM_GYM_SCRIPT"] = "up dragdown up dragdown up dragdown down*4"
+        app.launchEnvironment["HAPPY_GYM_SCRIPT"] = "up dragdown up dragdown up dragdown down*4"
         launch()
         open(environment["GYM_STREAM"] ?? chat)
-        let composer = app.textViews["stem-composer"]
+        let composer = app.textViews["composer"]
         composer.tap()
         composer.typeText("stream 30 40 \(Int(Date().timeIntervalSince1970) % 100_000)")
         app.buttons["Send"].tap()
-        let working = app.descendants(matching: .any)["stem-working"]
+        let working = app.descendants(matching: .any)["working"]
         XCTAssertTrue(working.waitForExistence(timeout: 20), "the reply never started")
         pause(3)
         dismissKeyboard()
@@ -164,7 +192,7 @@ final class ScrollPerfGymTests: XCTestCase {
             fling(down: false)
             fling(down: true)
         }
-        let headings = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-row:section:"))
+        let headings = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "row:section:"))
         XCTAssertTrue(headings.firstMatch.waitForExistence(timeout: 5), "no section headings")
         for index in (0..<min(2, headings.count)).reversed() {
             let heading = headings.element(boundBy: index)
@@ -212,7 +240,7 @@ final class ScrollPerfGymTests: XCTestCase {
         pause(1)
         print("GYM_POST_STORY \(task)")
         pause(8)
-        app.buttons["stem-chat-back"].firstMatch.tap()
+        app.buttons["chat-back"].firstMatch.tap()
         row = find(task)
         watchRing(row, "posted in its chat")
     }
@@ -250,22 +278,21 @@ final class ScrollPerfGymTests: XCTestCase {
     /// install, then Direct chosen and its button tapped. It stays on
     /// linking a computer, not that computer's home or a chat on it.
     func testLeftoverComputerLinks() {
-        app.launchEnvironment.removeValue(forKey: "STEM_DIRECT")
         app.launchArguments = []
         app.launch()
-        let link = app.descendants(matching: .any)["stem-link"]
+        let link = app.descendants(matching: .any)["link"]
         XCTAssertTrue(link.waitForExistence(timeout: 15), "a fresh install didn't open on linking a computer")
-        app.segmentedControls["stem-link-method"].buttons.matching(NSPredicate(format: "label BEGINSWITH 'Direct'")).firstMatch.tap()
+        app.segmentedControls["link-method"].buttons.matching(NSPredicate(format: "label BEGINSWITH 'Direct'")).firstMatch.tap()
         let scan = app.buttons["Scan QR code"]
         XCTAssertTrue(scan.waitForExistence(timeout: 5), "Direct didn't show its way to link")
         pause(2)
-        let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-row:"))
+        let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "row:"))
         XCTAssertTrue(link.exists, "choosing Direct left linking")
-        XCTAssertFalse(app.descendants(matching: .any)["stem-new-work"].exists || rows.firstMatch.exists, "choosing Direct opened the last install's computer")
+        XCTAssertFalse(app.descendants(matching: .any)["new-work"].exists || rows.firstMatch.exists, "choosing Direct opened the last install's computer")
         scan.tap()
         pause(2)
-        XCTAssertFalse(app.descendants(matching: .any)["stem-new-work"].exists, "Scan opened the last install's computer")
-        XCTAssertFalse(app.scrollViews["stem-transcript"].exists, "Scan opened a chat")
+        XCTAssertFalse(app.descendants(matching: .any)["new-work"].exists, "Scan opened the last install's computer")
+        XCTAssertFalse(transcriptElement.exists, "Scan opened a chat")
     }
 
     /// The ring on `row` turns new, opens its viewer at a tap, and is seen once closed.
@@ -276,7 +303,7 @@ final class ScrollPerfGymTests: XCTestCase {
         row.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 7 + 29, dy: row.frame.height / 2)).tap()
         let viewer = app.descendants(matching: .any)["story-viewer-page"]
         XCTAssertTrue(viewer.waitForExistence(timeout: 10), "\(when): a tap on the ring opened no viewer")
-        XCTAssertFalse(app.scrollViews["stem-transcript"].exists, "\(when): the ring opened the chat")
+        XCTAssertFalse(transcriptElement.exists, "\(when): the ring opened the chat")
         pause(2)
         app.descendants(matching: .any)["story-close"].firstMatch.tap()
         XCTAssertTrue(until(10) { !viewer.exists }, "\(when): the viewer never closed")
@@ -296,15 +323,17 @@ final class ScrollPerfGymTests: XCTestCase {
     /// (`GymFrameMeter`'s scripted scroll), and reports it as `workload`.
     private func scripted(_ workload: String, _ title: String, _ script: String, before: String? = nil) {
         let whole = before.map { "\($0) wait mark \(script)" } ?? script
-        app.launchEnvironment["STEM_GYM_SCRIPT"] = whole
+        app.launchEnvironment["HAPPY_GYM_SCRIPT"] = whole
         launch()
         open(title)
         runScript(whole)
+        XCTAssertGreaterThan(reading("frames"), 0, "the script measured no scrolling frames")
+        XCTAssertGreaterThan(reading("scriptPoints"), 100, "the script moved no transcript rows")
         report(workload)
     }
 
     /// Taps the meter's run button, which resets it and plays `script`
-    /// (set at launch as `STEM_GYM_SCRIPT`), and waits it out without
+    /// (set at launch as `V2_GYM_SCRIPT`), and waits it out without
     /// reading the screen meanwhile.
     private func runScript(_ script: String) {
         let seconds = script.split(separator: " ").reduce(0.0) { total, token in
@@ -329,9 +358,9 @@ final class ScrollPerfGymTests: XCTestCase {
 
     private func launch() {
         app.launch()
-        let any = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-row:")).firstMatch
+        let any = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "row:")).firstMatch
         if any.waitForExistence(timeout: 10) { return }
-        print("STEM_PAIR_READY")
+        print("HAPPY_PAIR_READY")
         let match = app.buttons["Emoji match"]
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let deadline = Date().addingTimeInterval(120)
@@ -349,16 +378,18 @@ final class ScrollPerfGymTests: XCTestCase {
 
     /// The row titled `title`, brought on screen.
     private func find(_ title: String) -> XCUIElement {
-        let row = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND identifier ENDSWITH %@", "stem-row:", ":\(title)")).firstMatch
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND identifier ENDSWITH %@", "row:", ":\(title)")).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 15), "no row \(title)")
         let height = app.frame.height
         for _ in 0..<20 where !(row.frame.midY > height * 0.15 && row.frame.midY < height * 0.75) {
+            let before = row.frame.midY
             let up = row.frame.midY > height * 0.5
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.7 : 0.3)).press(
                 forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.4 : 0.6)),
                 withVelocity: .slow, thenHoldForDuration: 0.3
             )
             pause(0.6)
+            if abs(row.frame.midY - before) < 1, row.isHittable { break }
         }
         return row
     }
@@ -373,7 +404,7 @@ final class ScrollPerfGymTests: XCTestCase {
     /// The transcript's value once it is up: the open's timing.
     @discardableResult
     private func waitForTranscript() -> String {
-        let transcript = app.scrollViews["stem-transcript"]
+        let transcript = transcriptElement
         XCTAssertTrue(transcript.waitForExistence(timeout: 30), "the transcript never showed")
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline, !((transcript.value as? String) ?? "").hasPrefix("first=") { pause(0.2) }
@@ -414,17 +445,17 @@ final class ScrollPerfGymTests: XCTestCase {
 
     // MARK: Measuring
 
-    private var meter: XCUIElement { app.buttons["stem-gym-meter"] }
+    private var meter: XCUIElement { app.buttons["gym-meter"] }
 
-    /// One integer of the meter's reading.
+    /// Counts or whole points of the meter's reading.
     private func reading(_ key: String) -> Int {
         let value = (meter.value as? String) ?? ""
         let pair = value.split(separator: " ").first { $0.hasPrefix("\(key)=") }
-        return pair.flatMap { Int($0.dropFirst(key.count + 1)) } ?? -1
+        return pair.flatMap { Double($0.dropFirst(key.count + 1)) }.map { Int($0) } ?? -1
     }
 
     private func resetMeter() {
-        XCTAssertTrue(meter.waitForExistence(timeout: 5), "no gym meter: is STEM_GYM_METER read by this build?")
+        XCTAssertTrue(meter.waitForExistence(timeout: 5), "no gym meter: is HAPPY_GYM_METER read by this build?")
         post("com.slopus.happy.gym.reset")
         print("GYM_MARK start")
         pause(0.5)

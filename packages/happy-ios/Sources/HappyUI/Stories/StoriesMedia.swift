@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 @MainActor
 final class StoriesMedia {
     /// The computer the media comes from; live pages read their files through it too.
-    let client: DirectAgentClient
+    let client: AgentClient
     private let images = NSCache<NSString, Decoded>()
     private let placeholders = NSCache<NSString, UIImage>()
     private var loading: [String: Task<UIImage?, Never>] = [:]
@@ -26,7 +26,7 @@ final class StoriesMedia {
         init(pixels: Int, image: UIImage) { self.pixels = pixels; self.image = image }
     }
 
-    init(client: DirectAgentClient) {
+    init(client: AgentClient) {
         self.client = client
         images.totalCostLimit = 64 * 1024 * 1024
         observer = NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
@@ -70,7 +70,7 @@ final class StoriesMedia {
         } else {
             task = Task.detached(priority: .userInitiated) {
                 guard let response = try? await client.storyFrame(storyId, frameId: frame.id) else { return nil }
-                return StemCellsImages.decode(response.body, maxPixels: pixels)
+                return Images.decode(response.body, maxPixels: pixels)
             }
         }
         loading[job] = task
@@ -94,7 +94,7 @@ final class StoriesMedia {
     /// A conversation's picture, before a story holds it.
     func assetImage(_ asset: StoryAsset, pixels: Int) async -> UIImage? {
         let client = client
-        return await picture("asset/\(DirectAgentClient.path(asset))", pixels: pixels) { try? await client.asset(asset).body }
+        return await picture("asset/\(AgentClient.path(asset))", pixels: pixels) { try? await client.asset(asset).body }
     }
 
     /// A player for a conversation's recording, before a story holds it.
@@ -143,7 +143,7 @@ final class StoriesMedia {
         if let task = loading[job] { return await task.value }
         let task = Task.detached(priority: .userInitiated) { () -> UIImage? in
             guard let data = await read() else { return nil }
-            return StemCellsImages.decode(data, maxPixels: pixels)
+            return Images.decode(data, maxPixels: pixels)
         }
         loading[job] = task
         let image = await task.value
@@ -215,13 +215,13 @@ final class StoriesMedia {
 
 /// A recording's bytes for AVFoundation, which can't send the computer's
 /// token itself: a private URL scheme whose every request is answered with
-/// `Range` requests over the paired connection, as Stem Cells streams
+/// `Range` requests over the paired connection, as V2 streams
 /// conversation media.
 final class StoriesByteStream: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
     static let scheme = "happy-story-media"
     static let chunk = 512 * 1024
 
-    typealias Fetch = @Sendable (ClosedRange<Int>?) async throws -> DirectHTTPResponse
+    typealias Fetch = @Sendable (ClosedRange<Int>?) async throws -> HTTP1Response
 
     private let name: String
     private let mimeType: String

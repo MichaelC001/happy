@@ -250,7 +250,7 @@ final class DraftPresenceTests: XCTestCase {
         applications.assertQuiescent(commits.values.last!)
         try await Task.detached {
             let region = try store.writer.read { db in
-                try SQLRequest<Row>(sql: "SELECT sessionId FROM draft").databaseRegion(db)
+                try SQLRequest<GRDB.Row>(sql: "SELECT sessionId FROM draft").databaseRegion(db)
             }
             XCTAssertFalse(region.isModified(byEventsOfKind: .update(tableName: "draft", columnNames: ["text", "updatedAt"])))
             for index in 1...100 {
@@ -425,7 +425,7 @@ final class DraftPresenceTests: XCTestCase {
         let store = try await store(counter)
         let metadata: [String: JSONValue] = [
             "client": .object(["id": .string("rig")]), "rigMetadataVersion": .number(1),
-            "machineId": .string("computer"), "path": .string("/work/project"),
+            "machineId": .string("agent"), "path": .string("/work/project"),
             "summary": .object(["text": .string("Session 0")]),
             "lastMeaningfulMessageAt": .number(Double(ApplyPerfFixtures.now)),
             "draftUpdatedAt": .number(0), "draft": .null,

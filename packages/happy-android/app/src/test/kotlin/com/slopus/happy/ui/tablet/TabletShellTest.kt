@@ -29,6 +29,7 @@ import com.slopus.happy.ui.home.FlatRowTags
 import com.slopus.happy.ui.home.HomeDockTags
 import com.slopus.happy.ui.home.NewSessionTags
 import com.slopus.happy.ui.home.HomeTags
+import com.slopus.happy.ui.home.AccountMenuTags
 import com.slopus.happy.ui.node
 import com.slopus.happy.ui.session.SessionInfoTags
 import kotlinx.coroutines.runBlocking
@@ -103,8 +104,10 @@ class TabletShellTest {
         val detail = rule.node(TabletShellTags.DETAIL).bounds
         assertBox("detail", detail, 360.dp, 0.dp, (TABLET_WIDTH - 360).dp, detail.bottom)
         rule.node(HomeTags.TABLET_BLANK).assertExists()
-        // The phone home's header is not drawn: its list lives in the sidebar.
-        rule.onAllNodesWithTag(HomeTags.FILTER, useUnmergedTree = true).assertCountEquals(0)
+        // The phone home's header is not drawn: its list lives in the sidebar, and so does its
+        // one account switcher, the only way to reach another account under the shell.
+        rule.onAllNodesWithTag(AccountMenuTags.BUTTON, useUnmergedTree = true).assertCountEquals(1)
+        assertTrue("the switcher is in the sidebar", rule.node(AccountMenuTags.BUTTON).bounds.right <= sidebar.right)
         rule.onAllNodesWithTag(FlatRowTags.ROW, useUnmergedTree = true).assertCountEquals(2)
 
         // The persistent header: 28 controls 16 in, 4 apart, centred in the 64 row; back dimmed with nowhere to go.
@@ -114,9 +117,11 @@ class TabletShellTest {
         assertBox("zen", zen, 16.dp, header.top + 18.dp, 28.dp, 28.dp)
         assertBox("back", rule.node(TabletShellTags.BACK).bounds, 48.dp, zen.top, 28.dp, 28.dp)
 
-        // New session sits 8 under the header row, 16 in.
+        // The controls row sits 8 under the header: the account switcher 16 in, then New session.
+        val switcher = rule.node(AccountMenuTags.BUTTON).bounds
         val newSession = rule.node(TabletSidebarTags.NEW_SESSION).bounds
-        assertDp("new session 16 in", 16, newSession.left - sidebar.left - 1.dp / 2)
+        assertDp("the switcher 16 in", 16, switcher.left - sidebar.left - 1.dp / 2)
+        assertDp("new session 8 past the switcher", switcher.right + 8.dp, newSession.left)
         assertTrue("new session under the header", newSession.top >= header.bottom + 8.dp)
         val settings = rule.node(TabletSidebarTags.SETTINGS).bounds
         assertDp("settings row at the sidebar's foot", sidebar.bottom - 0.5.dp, settings.bottom)
@@ -212,14 +217,28 @@ class TabletShellTest {
         assertDp("64 glyph", 64, rule.node(EmptySessionsTabletTags.ICON).bounds.let { it.bottom - it.top })
     }
 
-    // index.tsx: with no computer linked the link page takes the whole window, shell and all.
+    // Unlike index.tsx, no computer linked keeps the shell: the sidebar's empty state offers Scan QR code,
+    // and the account switcher and New session stay beside it.
     @Test
-    fun theLinkPageTakesTheWholeWindow() {
+    fun noComputerKeepsTheShell() {
         signIn(machine = false)
-        waitFor(HomeTags.LINK)
-        rule.onAllNodesWithTag(TabletSidebarTags.SIDEBAR, useUnmergedTree = true).assertCountEquals(0)
-        rule.onAllNodesWithTag(TabletShellTags.HEADER, useUnmergedTree = true).assertCountEquals(0)
-        assertDp("link page from the left edge", 0, rule.node(HomeTags.LINK).bounds.left)
+        waitFor(EmptySessionsTabletTags.ROOT)
+        rule.node(TabletSidebarTags.SIDEBAR).assertExists()
+        rule.node(TabletShellTags.HEADER).assertExists()
+        rule.node(AccountMenuTags.BUTTON).assertExists()
+        rule.node(EmptySessionsTabletTags.BUTTON).assertExists().performClick()
+        rule.onAllNodesWithTag(HomeTags.LINK, useUnmergedTree = true).assertCountEquals(0)
+        rule.node(HomeTags.TABLET_BLANK).assertExists()
+    }
+
+    // Sessions cached with no computer linked list in the sidebar, the shell kept.
+    @Test
+    fun noComputerStillListsCachedSessions() {
+        session("a", 200)
+        signIn(machine = false)
+        waitFor(FlatRowTags.ROW)
+        rule.node(TabletSidebarTags.SIDEBAR).assertExists()
+        rule.onAllNodesWithTag(EmptySessionsTabletTags.ROOT, useUnmergedTree = true).assertCountEquals(0)
     }
 
     // An unfolded foldable on its side, 841 wide: the shell, with a 252 sidebar (30%).
@@ -249,7 +268,7 @@ class TabletShellTest {
         waitFor(FlatRowTags.ROW)
         rule.onAllNodesWithTag(TabletSidebarTags.SIDEBAR, useUnmergedTree = true).assertCountEquals(0)
         rule.onAllNodesWithTag(TabletShellTags.HEADER, useUnmergedTree = true).assertCountEquals(0)
-        rule.node(HomeTags.FILTER).assertExists()
+        rule.node(AccountMenuTags.BUTTON).assertExists()
         rule.node(HomeDockTags.DOCK).assertExists()
         assertDp("home row from the left edge", 0, rule.node(FlatRowTags.ROW).bounds.left)
         rule.node(FlatRowTags.ROW).performClick()

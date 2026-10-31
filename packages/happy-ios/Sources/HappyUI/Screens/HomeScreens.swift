@@ -2,37 +2,35 @@
 import HappyCore
 import HappyLayout
 import HappyStore
+import HappyWire
 import UIKit
 
 /// Signed in: app/(app)/index.tsx and SessionsListWrapper.tsx. Home stays
 /// the navigation root for the whole session and swaps its content as the
 /// store changes (`HomeState`):
-///   - a spinner until the machines are known;
-///   - Link Your Computer while none is linked;
-///   - the offline checklist while none is reachable and nothing is listed;
+///   - until the machines are known, no computer, or none reachable with
+///     nothing listed: a notice in home (`HomeNoticeViewController`),
+///     never an onboarding screen;
 ///   - "No sessions yet" on a reachable computer with nothing on it;
 ///   - the session list otherwise.
 ///
-/// Link Your Computer keeps the onboarding header in the navigation bar.
-/// Every other state is MainView.tsx's phone home: the bar is hidden, and
-/// the home header floats over content that scrolls under it.
+/// Every state has home's bar: the account's picture at the left,
+/// "Sessions" with the connection under it, and the filter menu and
+/// settings at the right.
 ///
-/// The dock sits at the foot of every state but Link Your Computer, which
-/// is not MainView in happy-app; content leaves it 108pt. Where a computer
-/// is a home of its own (`StemCellsPreference`), it leaves the offline
-/// checklist too: with no computer to reach there is nothing to start work
-/// on. There, the account's picture leads to the profiles' settings, where
-/// a computer is chosen instead.
+/// Nothing is typed here: compose in the bar (`compose()`) opens an empty
+/// chat, whose first send starts the session (`LegacyComposeStart`). It is
+/// offered in every state but Link Your Computer and, where a computer is
+/// a home of its own (`Preference`), the offline checklist: with no
+/// computer to reach there is nothing to start work on. There, the
+/// account's picture leads to the profiles' settings, where a computer is
+/// chosen instead.
 ///
 /// Screens pushed over it (settings, server, troubleshoot) stay where they
 /// are when a computer arrives, as they do in happy-app.
-public final class HomeViewController: UIViewController {
+public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     private let context: AppContext
     private let session: AccountSession
-    private let titleView = NavigationTitleView()
-    private let header = HomeHeaderView()
-    private let dockView = HomeDockView()
-    private var dock: HomeDockController?
     /// Home's content worked out off the main thread from the account's
     /// home feed (`HomeDerivation`); only what changed is applied here.
     private var pipeline: ApplyPipeline<HomeDerivation.Input, HomeDerivation.Applied, HomeUpdate>?
@@ -45,7 +43,7 @@ public final class HomeViewController: UIViewController {
     private var grouping: SessionListGrouping = .flat
     private var content: UIViewController?
     private var preparesArchives = false
-    private var accountControl: HomeAccountControl?
+    private var switcher: AccountSwitcher?
 
     public init(context: AppContext, session: AccountSession) {
         self.context = context
@@ -61,30 +59,11 @@ public final class HomeViewController: UIViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(Palette.groupedBackground)
-        header.scrim.ground = UIColor(Palette.groupedBackground)
-        dockView.scrim.ground = UIColor(Palette.groupedBackground)
-        // OnboardingHeader's title, which scales; the rows below don't yet.
-        setScaledTitleView(titleView)
         showsBackTitle()
-        header.isHidden = true
-        header.settingsButton.addAction(UIAction { [weak self] _ in self?.openSettings() }, for: .primaryActionTriggered)
-        header.filterButton.menu = filterMenu()
-        header.filterButton.showsMenuAsPrimaryAction = true
-        header.filterButton.preferredMenuElementOrder = .fixed
-        dockView.isHidden = true
-        view.addSubview(dockView)
-        view.addSubview(header)
-        accountControl = HomeAccountControl(context: context, controller: self, header: header)
-        if StemCellsPreference(variant: context.variant).isAvailable {
-            accountControl?.opensSettings = { [weak self] in
-                guard let self else { return }
-                StemCellsSettingsViewController.open(context: context, computer: nil, from: self)
-            }
-        }
+        switcher = AccountSwitcher(context: context, controller: self)
         let pipeline = ApplyPipeline<HomeDerivation.Input, HomeDerivation.Applied, HomeUpdate>(
             input: HomeDerivation.Input(
                 expandedProjects: context.account.localSettings.expandedProjects,
-                includesDock: true,
                 // In the screens' language; a new one builds home again.
                 unknownMachine: Strings.Home.unknownMachine
             ),
@@ -106,15 +85,11 @@ public final class HomeViewController: UIViewController {
         observation = pipeline.observation
         // Tablet (HappyUI/Tablet): the shell flips this with the window's width.
         registerForTraitChanges([TabletLayoutTrait.self]) { (self: Self, _) in self.updateNavigation(animated: false) }
-        // A new text size: the dock's text heights are made again.
-        registerForTraitChanges([UITraitPreferredContentSizeCategory.self, UITraitDisplayScale.self]) { (self: Self, _) in
-            self.view.setNeedsLayout()
-        }
         // The stream ends when the session stops.
         let statusUpdates = session.statusUpdates
         Task { @MainActor [weak self] in
             for await status in statusUpdates {
-                self?.header.status = status
+                self?.status = status
             }
         }
         // sync.ts `nativeUpdateSync`: asked at start and whenever the app
@@ -127,12 +102,14 @@ public final class HomeViewController: UIViewController {
         NotificationCenter.default.addObserver(self, selector: #selector(rendererChanged), name: HomeRendererPreference.didChange, object: nil)
     }
 
-    /// Something can be started from the dock: a computer is linked and,
-    /// where a computer is a home of its own, one is reachable.
-    private var showsDock: Bool {
-        switch state {
+    /// Something can be started from compose: a computer is linked and,
+    /// where a computer is a home of its own, one is reachable. The bar
+    /// shows compose only then.
+    var canCompose: Bool {
+        guard !traitCollection.isTabletLayout else { return false }
+        return switch state {
         case nil, .link?: false
-        case .offline?: !StemCellsPreference(variant: context.variant).isAvailable
+        case .offline?: !Preference(variant: context.variant).isAvailable
         default: true
         }
     }
@@ -161,29 +138,18 @@ public final class HomeViewController: UIViewController {
         rendererChanged()
         // The server may have changed on a screen pushed from here.
         updateNavigation(animated: animated)
+        HomeToolbar.show(for: self, animated: animated)
     }
 
     public override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // Screens pushed from here have the ordinary bar; settings, its glass one.
-        if let top = navigationController?.topViewController, top !== self, !(top is StemCellsSettingsViewController) {
-            navigationController?.setNavigationBarHidden(false, animated: animated)
-        }
+        HomeToolbar.leave(self, animated: animated)
     }
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        // The dock's text heights for this width and text size, made off
-        // the main thread before the composer opens.
-        dock?.prepareText(width: view.bounds.width, text: TextEnvironment(traitCollection))
-        let layout = HomeScreenLayout(
-            size: view.bounds.size,
-            safeArea: LayoutInsets(view.safeAreaInsets),
-            dock: showsDock ? HomeDockLayout.Metrics.contentInset : 0
-        )
-        header.frame = layout.header
-        dockView.frame = view.bounds
-        applyInsets(layout.insets)
+        switcher?.layout()
+        applyInsets(HomeContentInsets(underBar: LayoutInsets(view.safeAreaInsets), dock: 0))
     }
 
     private var isCurrentAccount: Bool {
@@ -193,14 +159,6 @@ public final class HomeViewController: UIViewController {
     /// Returns how many rows it touched.
     private func apply(_ update: HomeUpdate) -> Int {
         grouping = update.grouping
-        if let snapshot = update.dock {
-            if let dock {
-                dock.update(snapshot)
-            } else {
-                dock = HomeDockController(restingView: dockView, host: self, context: context, session: session, snapshot: snapshot)
-                view.setNeedsLayout()
-            }
-        }
         let touched = update.contentChanged ? show(update) : 0
         (content as? SessionListViewController)?.setArchiveModels(update.archiveModels, settings: update.archiveSettings)
         prepareArchivesIfNeeded()
@@ -224,7 +182,7 @@ public final class HomeViewController: UIViewController {
     /// padding as safe area, as SessionsListWrapper pads them.
     private func applyInsets(_ insets: HomeContentInsets) {
         guard let content else { return }
-        let floating = state != .link
+        let floating = true
         if let list = content as? SessionListViewController {
             list.contentInsets = insets
             setAdditionalSafeArea(.zero, on: list)
@@ -242,14 +200,12 @@ public final class HomeViewController: UIViewController {
         let state = update.content
         let previous = self.state
         self.state = state
-        // The scrim is for a list that scrolls under the dock.
-        dockView.showsScrim = state.kind == .list
         var rows = 0
         switch (previous, state) {
-        case (.offline?, .offline(let choices, let hasArchived)):
-            let checklist = content as? OfflineChecklistViewController
-            if checklist?.choices != choices { checklist?.choices = choices }
-            if checklist?.hasArchived != hasArchived { checklist?.hasArchived = hasArchived }
+        case (.loading?, .loading), (.link?, .link), (.offline?, .offline), (.loading?, .link), (.link?, .loading),
+             (.loading?, .offline), (.offline?, .loading), (.link?, .offline), (.offline?, .link):
+            // One notice in place, its words changed.
+            (content as? HomeNoticeViewController)?.kind = Self.notice(state)
         case (.list?, .list(let model)):
             rows = (content as? SessionListViewController)?.apply(model, changeset: update.changeset, animated: view.window != nil) ?? 0
         default:
@@ -262,12 +218,8 @@ public final class HomeViewController: UIViewController {
 
     private func makeContent(for update: HomeUpdate) -> UIViewController {
         switch update.content {
-        case .loading:
-            LoadingViewController()
-        case .link:
-            LinkComputerViewController(context: context, session: session)
-        case .offline(let choices, let hasArchived):
-            OfflineChecklistViewController(context: context, session: session, choices: choices, hasArchived: hasArchived)
+        case .loading, .link, .offline:
+            HomeNoticeViewController(context: context, session: session, kind: Self.notice(update.content))
         case .noSessions:
             NoSessionsViewController(context: context, session: session)
         case .list(let model):
@@ -275,10 +227,25 @@ public final class HomeViewController: UIViewController {
         }
     }
 
+    /// What home says in place of the list, under its own bar.
+    private static func notice(_ content: HomeContent) -> HomeNoticeViewController.Kind {
+        switch content {
+        case .link: .noComputer
+        case .offline(let choices, let hasArchived): .offline(choices, hasArchived: hasArchived)
+        default: .connecting
+        }
+    }
+
     private func makeList(_ model: HomeListModel, changeset: RowChangeset) -> SessionListViewController {
         let controller = SessionListViewController(context: context, session: session)
+        // ProjectRow's `+` (ProjectHomeList.tsx `createWorkspace`): the
+        // draft moves to the project, asking for a new workspace, and an
+        // empty chat opens on it.
         controller.onCreateWorkspace = { [weak self] origin in
-            self?.dock?.createWorkspace(origin) ?? false
+            guard let self, canCompose else { return false }
+            NewSessionDraftStore.shared(for: context.account.localSettings).prepareWorkspace(origin)
+            compose()
+            return true
         }
         controller.onExpandedProjectsChange = { [weak self] in self?.expandedProjectsChanged() }
         controller.apply(model, changeset: changeset, animated: false)
@@ -303,7 +270,7 @@ public final class HomeViewController: UIViewController {
         next.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         let swap = {
             previous?.view.removeFromSuperview()
-            self.view.insertSubview(next.view, belowSubview: self.dockView)
+            self.view.insertSubview(next.view, at: 0)
         }
         if animated {
             UIView.transition(with: view, duration: 0.25, options: .transitionCrossDissolve, animations: swap)
@@ -315,33 +282,35 @@ public final class HomeViewController: UIViewController {
         view.setNeedsLayout()
     }
 
-    /// The link screen has happy-app's onboarding header: no title, the
-    /// custom server under it, and a gear to the onboarding settings. Every
-    /// other state hides the bar for the floating home header.
+    /// Home's own title and buttons in the bar, whatever it shows.
     private func updateNavigation(animated: Bool) {
         guard let state else { return }
-        let floating = state != .link
+        let floating = true
         // Tablet (HappyUI/Tablet): beside the sidebar the index route draws
         // nothing, nor its header and dock (MainView.tsx `isTablet`).
         let blank = floating && traitCollection.isTabletLayout
         content?.view.isHidden = blank
-        header.isHidden = !floating || blank
-        dock?.isAvailable = showsDock && !blank
-        if navigationController?.topViewController === self {
-            navigationController?.setNavigationBarHidden(floating, animated: animated)
-        }
         if floating {
-            titleView.title = nil
-            titleView.subtitle = nil
-            navigationItem.rightBarButtonItem = nil
-        } else {
-            titleView.title = nil
-            titleView.subtitle = context.customServerHost
-            navigationItem.rightBarButtonItem = settingsBarButton(action: #selector(openOnboardingSettings))
+            // The account's name is the bar's title; the connection hangs under it.
+            let headerState: Strings.HeaderStatus.State = switch status {
+            case .connected: .online
+            case .connecting: .connecting
+            case .disconnected, .error: .offline
+            }
+            switcher?.subtitle = Strings.HeaderStatus.text(headerState)
+            // Beside the sidebar home draws nothing, but the bar is over
+            // the sidebar too: the switcher stays, or a tablet has no way
+            // to the accounts at all.
+            navigationItem.leftBarButtonItem = switcher?.barItem
+            let items: [HeaderBar.Trailing: UIBarButtonItem] = [.filter: filterItem, .settings: settingsItem]
+            if canCompose, let host = self as UIViewController as? ComposeHosting {
+                let compose = composeItem(host)
+                compose.sharesBackground = false
+                toolbarItems = [.flexibleSpace(), compose]
+            } else { toolbarItems = nil }
+            navigationItem.rightBarButtonItems = blank ? nil : HeaderBar.trailing(items)
+            if navigationController?.topViewController === self { HomeToolbar.show(for: self, animated: animated) }
         }
-        // Not `sizeToFit`, which would hold a longer server to the width of
-        // the one before it.
-        titleView.frame.size = titleView.intrinsicContentSize
         view.setNeedsLayout()
     }
 
@@ -380,256 +349,39 @@ public final class HomeViewController: UIViewController {
         return [grouping, UIMenu(options: .displayInline, children: [appearance])]
     }
 
-    @objc private func openOnboardingSettings() {
-        navigationController?.pushViewController(OnboardingSettingsViewController(context: context), animated: true)
+    /// The connection, under "Sessions" while it isn't connected.
+    /// Not private, so a test can flip it.
+    var status: RealtimeStatus = HomeConnectionStatus.initial {
+        didSet { if status != oldValue { updateNavigation(animated: false) } }
     }
+
+    private lazy var settingsItem = HeaderBar.settingsItem { [weak self] in self?.openSettings() }
+
+    private func composeItem(_ host: ComposeHosting) -> UIBarButtonItem {
+        HeaderBar.composeItem { [weak host] in host?.compose() }
+    }
+
+    private lazy var filterItem: UIBarButtonItem = {
+        let item = UIBarButtonItem(image: .icon(.ionicons("filter"), size: 22), menu: filterMenu())
+        item.accessibilityLabel = Strings.Home.filterTitle
+        // As `HeaderBar`'s own items are named, so a test finds it without
+        // depending on the label's language.
+        item.accessibilityIdentifier = "filter"
+        item.preferredMenuElementOrder = .fixed
+        return item
+    }()
 
     private func openSettings() {
         push(.settings, context: context)
     }
-}
 
-final class LoadingViewController: UIViewController {
-    override func loadView() {
-        view = LoadingView()
-    }
-}
-
-/// OnboardingLinkComputer from components/onboarding/LinkComputer.tsx.
-/// Scanning opens once both boxes are ticked, and the ticks are kept until
-/// logout. A link that went through keeps the button busy until the
-/// computer arrives and home swaps this screen out, or for ten seconds if
-/// it never does. A failed one says so on the line above the button. The
-/// only way back is the gear's "Log out and start over".
-final class LinkComputerViewController: UIViewController {
-    static let machineArrivalTimeout: Duration = .seconds(10)
-
-    /// A link that went through, where this screen is a step of adding a
-    /// computer rather than the account's home (the link sheet).
-    var onLinked: (() -> Void)?
-    private let context: AppContext
-    private let session: AccountSession
-    private let content = LinkComputerContentView()
-    private lazy var screen = OnboardingScreenView(
-        content: content,
-        primary: RoundButton(title: Strings.Onboarding.scanButton),
-        secondary: RoundButton(title: Strings.Onboarding.pasteLink, size: .normal, display: .inverted)
-    )
-    /// The approval request is in flight.
-    private var linking = false
-    /// Approved; waiting for the computer to sync in.
-    private var approved = false
-    private var approvalTimeout: Task<Void, Never>?
-
-    init(context: AppContext, session: AccountSession) {
-        self.context = context
-        self.session = session
-        super.init(nibName: nil, bundle: nil)
-        followsTextSize()
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is not supported")
-    }
-
-    override func loadView() {
-        view = screen
-    }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        screen.primary.loadingTitle = Strings.Onboarding.linking
-        screen.primary.onTap = { [weak self] in self?.scan() }
-        screen.secondary.onTap = { [weak self] in self?.paste() }
-        screen.help.onTap = { [weak self] in
-            guard let self else { return }
-            Alerts.help(on: self)
-        }
-        content.onOpenWebsite = {
-            UIApplication.shared.open(Strings.Onboarding.desktopURL)
-        }
-        let saved = context.account.localSettings.linkComputerChecklist
-        content.ticked = Set(LinkComputerContentView.Step.allCases.filter {
-            $0 == .install ? saved.install : saved.open
-        })
-        content.onToggle = { [weak self] ticked in
-            self?.context.account.localSettings.linkComputerChecklist = LinkChecklist(
-                install: ticked.contains(.install),
-                open: ticked.contains(.open)
-            )
-            self?.update()
-        }
-        update()
-    }
-
-    private var busy: Bool {
-        linking || approved
-    }
-
-    private func update() {
-        let ready = content.ticked == Set(LinkComputerContentView.Step.allCases)
-        screen.primary.isLoading = busy
-        screen.primary.isEnabled = !busy && ready
-        screen.secondary.isEnabled = !busy
-        content.isEnabled = !busy
-    }
-
-    private func scan() {
-        content.error = nil
-        Task { @MainActor in
-            guard let text = await PairingFlow.scan(.terminal, from: self) else {
-                return PairingAnalytics.shared.log(.cancelled(method: .relay, start: .scan))
-            }
-            await link(text, start: .scan)
-        }
-    }
-
-    private func paste() {
-        content.error = nil
-        Task { @MainActor in
-            let text = await Alerts.prompt(
-                Strings.Onboarding.pasteLinkTitle,
-                Strings.Onboarding.pasteLinkMessage,
-                placeholder: "happy://terminal?...",
-                confirmTitle: Strings.Onboarding.pasteLinkConfirm,
-                on: self
-            )
-            guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
-                return PairingAnalytics.shared.log(.cancelled(method: .relay, start: .pasteLink))
-            }
-            await link(text, start: .pasteLink)
-        }
-    }
-
-    private func link(_ text: String, start: PairingStart) async {
-        guard !busy else { return }
-        if DirectPairingFlow.openIfDirect(text, context: context, on: self, start: start) { return }
-        linking = true
-        update()
-        let outcome = await PairingFlow.approve(text, expecting: .terminal, session: session)
-        linking = false
-        if case .approved = outcome {
-            PairingAnalytics.shared.log(.completed(method: .relay, start: start))
-        } else {
-            PairingAnalytics.shared.log(.failed(method: .relay, start: start))
-        }
-        switch outcome {
-        case .approved:
-            PairingFlow.report(outcome, kind: .terminal, on: self)
-            if let onLinked { return onLinked() }
-            approved = true
-            approvalTimeout?.cancel()
-            approvalTimeout = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: Self.machineArrivalTimeout)
-                guard !Task.isCancelled, let self else { return }
-                approved = false
-                update()
-            }
-        case .failed:
-            content.error = Strings.Onboarding.linkFailed
-            UIAccessibility.post(notification: .announcement, argument: Strings.Onboarding.linkFailed)
-        case .invalidLink, .terminalNeedsUpdate:
-            // These need more than one line, and scanning again won't help.
-            PairingFlow.report(outcome, kind: .terminal, on: self)
-        }
-        update()
-    }
-}
-
-/// LinkComputerChecklist from components/onboarding/LinkComputer.tsx:
-/// computers are linked but none is reachable. The install box is already
-/// ticked; the job now is to get Happy running again.
-final class OfflineChecklistViewController: UIViewController {
-    var choices: [MachineChoice] {
-        didSet { applyChoices() }
-    }
-
-    /// Offers "Show archived", which turns the archive on and so lists it.
-    var hasArchived: Bool {
-        didSet { applyChoices() }
-    }
-
-    private let context: AppContext
-    private let session: AccountSession
-    private let checklist = OfflineChecklistView()
-    private var linking = false
-    private var approved = false
-    private var approvalTimeout: Task<Void, Never>?
-
-    init(context: AppContext, session: AccountSession, choices: [MachineChoice], hasArchived: Bool = false) {
-        self.context = context
-        self.session = session
-        self.choices = choices
-        self.hasArchived = hasArchived
-        super.init(nibName: nil, bundle: nil)
-        followsTextSize()
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is not supported")
-    }
-
-    override func loadView() {
-        view = checklist
-    }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        checklist.troubleshoot.onTap = { [weak self] in
-            guard let self else { return }
-            navigationController?.pushViewController(TroubleshootViewController(context: context, session: session), animated: true)
-        }
-        checklist.linkAnother.onTap = { [weak self] in self?.scan() }
-        checklist.showArchived.onTap = { [weak self] in
-            self?.session.updateSettings(["hideInactiveSessions": .bool(false)])
-        }
-        applyChoices()
-        update()
-    }
-
-    private func applyChoices() {
-        guard isViewLoaded else { return }
-        checklist.showsArchivedButton = hasArchived
-        if choices.count == 1 {
-            checklist.title = Strings.Onboarding.offlineTitleOne(name: choices[0].name)
-            checklist.linkedTitle = Strings.Onboarding.offlineLinkedStep(name: choices[0].name)
-        } else {
-            checklist.title = Strings.Onboarding.offlineTitleMany
-            checklist.linkedTitle = Strings.Onboarding.offlineLinkedStepMany(count: choices.count)
-        }
-    }
-
-    private func update() {
-        checklist.linkAnother.isLoading = linking || approved
-        checklist.linkAnother.title = approved ? Strings.Onboarding.linking : Strings.Onboarding.linkAnother
-    }
-
-    private func scan() {
-        Task { @MainActor in
-            guard let text = await PairingFlow.scan(.terminal, from: self), !linking, !approved else { return }
-            if DirectPairingFlow.openIfDirect(text, context: context, on: self) { return }
-            linking = true
-            update()
-            let outcome = await PairingFlow.approve(text, expecting: .terminal, session: session)
-            linking = false
-            // No inline error line here: failures are alerts, as in happy-app.
-            PairingFlow.report(outcome, kind: .terminal, on: self)
-            if outcome == .approved { startWaitingForComputer() }
-            update()
-        }
-    }
-
-    private func startWaitingForComputer() {
-        approved = true
-        approvalTimeout?.cancel()
-        approvalTimeout = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: LinkComputerViewController.machineArrivalTimeout)
-            guard !Task.isCancelled, let self else { return }
-            approved = false
-            update()
-        }
+    /// The bar's compose: an empty chat, whose first send starts the
+    /// session on the machine and folder picked last.
+    func compose() {
+        guard canCompose, let navigation = navigationController, navigation.topViewController === self,
+              navigation.transitionCoordinator == nil else { return }
+        let chat = LegacyChatViewController(context: context, session: session, sessionId: ComposeChat.makeId())
+        navigation.pushViewController(chat, animated: true)
     }
 }
 

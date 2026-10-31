@@ -2,6 +2,7 @@
 import HappyCore
 import HappyLayout
 import UIKit
+import UltraView
 
 /// The window's root: SidebarNavigator.tsx. It holds the app's one
 /// navigation stack (AppCoordinator's) and, on a tablet-wide window, the
@@ -42,7 +43,7 @@ public final class TabletShellViewController: UIViewController, UINavigationCont
     private var isTablet = false
     private var showsShell = false
     private var zenMode = false
-    private var popGesture: TabletPopGestureDelegate?
+    private var popGesture: PopGestureDelegate?
 
     public init(context: AppContext, detail: UINavigationController) {
         self.context = context
@@ -66,7 +67,7 @@ public final class TabletShellViewController: UIViewController, UINavigationCont
         view.addSubview(detail.view)
         detail.didMove(toParent: self)
         detail.delegate = self
-        popGesture = TabletPopGestureDelegate(navigation: detail)
+        popGesture = PopGestureDelegate(navigation: detail)
         header.isHidden = true
         header.zenButton.addAction(UIAction { [weak self] _ in self?.toggleZen() }, for: .touchUpInside)
         header.backButton.addAction(UIAction { [weak self] _ in self?.goBack() }, for: .touchUpInside)
@@ -76,7 +77,7 @@ public final class TabletShellViewController: UIViewController, UINavigationCont
     /// AppCoordinator calls this after it replaces the stack's root: sign
     /// in, sign out, an account switch, the server confirmation.
     func rootDidChange() {
-        let session = detail.viewControllers.first is HomeViewController ? context.account.session : nil
+        let session = detail.viewControllers.first is LegacyHomeViewController ? context.account.session : nil
         // A new language builds the sidebar again too, as the root was.
         if session !== self.session || language != AppLocalization.language {
             self.session = session
@@ -148,7 +149,6 @@ public final class TabletShellViewController: UIViewController, UINavigationCont
         if isTablet != self.isTablet {
             self.isTablet = isTablet
             traitOverrides.isTabletLayout = isTablet
-            popGesture?.isTablet = isTablet
         }
         if isTablet, sidebar == nil, let session {
             installSidebar(for: session)
@@ -157,7 +157,7 @@ public final class TabletShellViewController: UIViewController, UINavigationCont
             isAuthenticated: session != nil,
             isTablet: isTablet,
             showsInstallStep: sidebar?.state?.showsInstallStep ?? false,
-            isOnboardingRoute: detail.topViewController is OnboardingSettingsViewController
+            isOnboardingRoute: false
         )
         if showsShell != self.showsShell {
             self.showsShell = showsShell
@@ -206,22 +206,19 @@ public final class TabletShellViewController: UIViewController, UINavigationCont
     }
 
     /// A screen with its own way in and out (new work from home's dock)
-    /// brings it; every other one slides as UIKit's does.
+    /// brings it; every other one slides as UIKit's does. A pop the
+    /// system's swipe is driving is UIKit's own: a screen's animator there
+    /// would leave the swipe with nothing to drive, and it would not start.
     public func navigationController(
         _ navigationController: UINavigationController, animationControllerFor operation: UINavigationController.Operation,
         from fromVC: UIViewController, to toVC: UIViewController
     ) -> (any UIViewControllerAnimatedTransitioning)? {
+        if operation == .pop, popGesture?.isSwiping == true { return nil }
         switch operation {
-        case .push: (toVC as? NavigationTransitionProviding)?.navigationTransition(.push, other: fromVC)
-        case .pop: (fromVC as? NavigationTransitionProviding)?.navigationTransition(.pop, other: toVC)
-        default: nil
+        case .push: return (toVC as? NavigationTransitionProviding)?.navigationTransition(.push, other: fromVC)
+        case .pop: return (fromVC as? NavigationTransitionProviding)?.navigationTransition(.pop, other: toVC)
+        default: return nil
         }
-    }
-
-    public func navigationController(
-        _ navigationController: UINavigationController, interactionControllerFor animationController: any UIViewControllerAnimatedTransitioning
-    ) -> (any UIViewControllerInteractiveTransitioning)? {
-        (animationController as? InteractiveNavigationTransition)?.interaction
     }
 
     // MARK: Header
@@ -241,37 +238,105 @@ public final class TabletShellViewController: UIViewController, UINavigationCont
     }
 }
 
-/// Keeps the edge swipe back on a tablet. Screens with happy-app's plain
-/// header hide their back button there (`dropsBackButtonOnTablet`), and
-/// UIKit stops the swipe for a screen without one; react-native-screens'
-/// stack keeps it. On a tablet the swipe may begin whenever there is
-/// something to go back to and no transition is running. Everything else,
-/// and every decision off a tablet, is UIKit's own delegate's.
-final class TabletPopGestureDelegate: NSObject, UIGestureRecognizerDelegate {
-    var isTablet = false
+/// UIKit's own swipe back, kept wherever there is something to go back
+/// to. UIKit stops its edge swipe on a screen whose back button is hidden
+/// or replaced (happy-app's plain headers, a bar item at the left);
+/// react-native-screens' stack keeps it, and so does this. The swipe is
+/// the system's: its gesture, its animation, iOS 26's swipe from anywhere
+/// on the screen included. Only when it may begin is decided here.
+final class PopGestureDelegate: NSObject, UIGestureRecognizerDelegate {
     private weak var navigation: UINavigationController?
-    nonisolated(unsafe) private weak var system: (any UIGestureRecognizerDelegate)?
+    private weak var edgeSystem: (any UIGestureRecognizerDelegate)?
+    private weak var contentSystem: (any UIGestureRecognizerDelegate)?
 
     init(navigation: UINavigationController) {
         self.navigation = navigation
-        system = navigation.interactivePopGestureRecognizer?.delegate
+        edgeSystem = navigation.interactivePopGestureRecognizer?.delegate
+        if #available(iOS 26.0, *) { contentSystem = navigation.interactiveContentPopGestureRecognizer?.delegate }
         super.init()
         navigation.interactivePopGestureRecognizer?.delegate = self
+        if #available(iOS 26.0, *) { navigation.interactiveContentPopGestureRecognizer?.delegate = self }
+    }
+
+    /// The edge or content swipe is under the finger now.
+    var isSwiping: Bool {
+        guard let navigation else { return false }
+        var gestures = [navigation.interactivePopGestureRecognizer]
+        if #available(iOS 26.0, *) { gestures.append(navigation.interactiveContentPopGestureRecognizer) }
+        return gestures.contains { $0?.state == .began || $0?.state == .changed }
     }
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        if isTablet, let navigation {
-            return navigation.viewControllers.count > 1 && navigation.transitionCoordinator == nil
+        guard let navigation else { return false }
+        var begins = navigation.viewControllers.count > 1 && navigation.transitionCoordinator == nil
+        if #available(iOS 26.0, *), gesture === navigation.interactiveContentPopGestureRecognizer {
+            // Unlike the edge recognizer, the content pan can begin anywhere.
+            // Leave vertical scrolling and the opposite direction to content.
+            let velocity = (gesture as? UIPanGestureRecognizer)?.velocity(in: navigation.view) ?? .zero
+            let leading = navigation.view.effectiveUserInterfaceLayoutDirection == .rightToLeft ? -velocity.x : velocity.x
+            begins = begins && leading > abs(velocity.y)
         }
-        return system?.gestureRecognizerShouldBegin?(gesture) ?? true
+        return begins
     }
 
-    nonisolated override func responds(to selector: Selector!) -> Bool {
-        super.responds(to: selector) || system?.responds(to: selector) == true
+    func gestureRecognizer(_ gesture: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if isContent(gesture), Self.hasHorizontalContent(above: touch.view) { return false }
+        let result = system(for: gesture)?.gestureRecognizer?(gesture, shouldReceive: touch) ?? true
+        return result
     }
 
-    nonisolated override func forwardingTarget(for selector: Selector!) -> Any? {
-        system?.responds(to: selector) == true ? system : super.forwardingTarget(for: selector)
+    func gestureRecognizer(_ gesture: UIGestureRecognizer, shouldReceive event: UIEvent) -> Bool {
+        let result = system(for: gesture)?.gestureRecognizer?(gesture, shouldReceive: event) ?? true
+        return result
+    }
+
+    func gestureRecognizer(_ gesture: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+        // UIKit knows its scroll-view pans, but UltraList's physics pan is a
+        // regular pan that also begins for horizontal motion. It must wait
+        // for the native pop rather than race it.
+        if let navigation, navigation.viewControllers.count > 1,
+           other is UIPanGestureRecognizer, let view = other.view,
+           let top = navigation.topViewController?.viewIfLoaded, view.isDescendant(of: top) {
+            if gesture === navigation.interactivePopGestureRecognizer { return true }
+            if isContent(gesture), !Self.hasHorizontalContent(above: view), Self.isScrollPan(other) { return true }
+        }
+        let result = system(for: gesture)?.gestureRecognizer?(gesture, shouldBeRequiredToFailBy: other) ?? false
+        return result
+    }
+
+    func gestureRecognizer(_ gesture: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer) -> Bool {
+        let result = system(for: gesture)?.gestureRecognizer?(gesture, shouldRequireFailureOf: other) ?? false
+        return result
+    }
+
+    private func isContent(_ gesture: UIGestureRecognizer) -> Bool {
+        if #available(iOS 26.0, *) { return gesture === navigation?.interactiveContentPopGestureRecognizer }
+        return false
+    }
+
+    /// Forward only UIKit's public delegate decisions. Advertising all of
+    /// its private selectors makes the replacement delegate look like the
+    /// internal transition object, and the native swipes stop receiving touches.
+    private func system(for gesture: UIGestureRecognizer) -> (any UIGestureRecognizerDelegate)? {
+        isContent(gesture) ? contentSystem : edgeSystem
+    }
+
+    private static func isScrollPan(_ gesture: UIGestureRecognizer) -> Bool {
+        if let scroll = gesture.view as? UIScrollView { return gesture === scroll.panGestureRecognizer }
+        return (gesture.view?.superview as? UltraScrollView)?.contentView === gesture.view
+    }
+
+    static func hasHorizontalContent(above view: UIView?) -> Bool {
+        var ancestor = view
+        while let current = ancestor {
+            if current is HorizontalListView { return true }
+            if let scroll = current as? UIScrollView,
+               scroll.isScrollEnabled, scroll.contentSize.width > scroll.bounds.width + 1 {
+                return true
+            }
+            ancestor = current.superview
+        }
+        return false
     }
 }
 #endif

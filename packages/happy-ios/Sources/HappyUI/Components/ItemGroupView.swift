@@ -52,7 +52,7 @@ final class GroupCardView: UIView {
 
     private func updateBorder() {
         // CGColor does not follow appearance changes by itself.
-        layer.borderColor = UIColor(Palette.divider).resolvedColor(with: traitCollection).cgColor
+        layer.borderColor = UIColor(Palette.legacyDivider).resolvedColor(with: traitCollection).cgColor
         layer.borderWidth = 1 / max(traitCollection.displayScale, 1)
     }
 }
@@ -238,6 +238,8 @@ public final class GroupedListView: UIScrollView {
         super.init(frame: .zero)
         backgroundColor = UIColor(Palette.groupedBackground)
         contentInsetAdjustmentBehavior = .never
+        // The indicator insets set below are all of them; UIKit would add the safe area again.
+        automaticallyAdjustsScrollIndicatorInsets = false
         alwaysBounceVertical = true
         keyboardDismissMode = .interactive
         // Assignments in a class's own initializer skip didSet.

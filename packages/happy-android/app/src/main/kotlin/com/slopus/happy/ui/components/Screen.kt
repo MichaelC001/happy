@@ -23,18 +23,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
 import com.slopus.happy.ui.theme.HappyTheme
 
 /**
  * A stack screen: the header, then the content on the grouped background,
- * kept clear of the navigation bar and the keyboard (RN's
- * KeyboardAvoidingView with `behavior="height"`).
+ * kept clear of the navigation bar. Only a screen with a text field of its
+ * own sets [avoidKeyboard] and shrinks above the keyboard; the others stay
+ * put when a keyboard opens over them (a dialog's, say).
  */
 @Composable
 fun Screen(
     header: @Composable () -> Unit,
     modifier: Modifier = Modifier,
+    avoidKeyboard: Boolean = false,
     content: @Composable BoxScope.() -> Unit,
 ) {
     Column(modifier = modifier.fillMaxSize().background(HappyTheme.colors.grouped.background)) {
@@ -43,7 +46,7 @@ fun Screen(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
+                .windowInsetsPadding(if (avoidKeyboard) WindowInsets.navigationBars.union(WindowInsets.ime) else WindowInsets.navigationBars),
             content = content,
         )
     }
@@ -72,6 +75,8 @@ fun HappyTextField(
     singleLine: Boolean = false,
     enabled: Boolean = true,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    /** Hides what is typed, for a value no one should read over a shoulder. */
+    visualTransformation: VisualTransformation = VisualTransformation.None,
 ) {
     val colors = HappyTheme.colors
     val style = textStyle.copy(color = colors.input.text)
@@ -88,6 +93,7 @@ fun HappyTextField(
         textStyle = style,
         cursorBrush = SolidColor(colors.text),
         keyboardOptions = keyboardOptions,
+        visualTransformation = visualTransformation,
         decorationBox = { inner ->
             Box(modifier = Modifier.padding(contentPadding)) {
                 if (value.isEmpty()) Text(text = placeholder, style = style.copy(color = colors.input.placeholder))

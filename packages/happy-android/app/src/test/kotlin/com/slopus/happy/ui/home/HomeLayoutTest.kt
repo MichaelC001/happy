@@ -1,7 +1,5 @@
 package com.slopus.happy.ui.home
 
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.CompositionLocalProvider
 import com.slopus.happy.model.WorktreeToggle
 import com.slopus.happy.model.ProjectHomeRow
@@ -13,7 +11,6 @@ import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
@@ -25,6 +22,7 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isHeading
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
@@ -75,10 +73,9 @@ import java.time.ZoneOffset
 
 /**
  * The phone home screen against happy-app's layout:
- * - MainView's header: logo 19 in a 32 box; "Sessions" (`tabs.sessions`) 16/20 centred; the
- *   status line (11/16, 6 dot) hangs 2 into the title's bottom while the
- *   socket isn't connected; the filter and settings buttons are 44 squares
- *   split by a 22-high hairline, the gear 16 from the edge.
+ * - The header (AGENTS.md, design decisions): the account menu on the left;
+ *   settings, then compose 16 from the edge, 44 squares; no title, only the
+ *   status line (11/16, 6 dot) always centred.
  * - FlatSessionRow: 60 avatar at 16, 10 above and below; 12 to the text;
  *   title 17/22, project 15/20, workspace line 1 below at 18 minimum, so a
  *   row is 81; the top-right slot is at least 56 and ends 16 from the edge;
@@ -117,14 +114,14 @@ class HomeLayoutTest {
     )
     private var newSession = 0
     private var whatsNew = 0
+    private var linkComputer = 0
     private val actions = HomeScreenActions(
         onSettings = {},
-        onAppearance = {},
-        onSetGrouping = {},
         onNewSession = { newSession++ },
         onTroubleshoot = {},
         onOpenUrl = {},
         onWhatsNew = { whatsNew++ },
+        onLinkComputer = { linkComputer++ },
     )
 
     private fun cli(id: String, at: Long = noon, active: Boolean = true) = session(
@@ -155,30 +152,53 @@ class HomeLayoutTest {
     @Test
     fun header() {
         show(state(listOf(cli("a"))))
-        assertBox("logo box", rule.node(HomeTags.LOGO).bounds, 24.dp, 16.dp, 32.dp, 32.dp)
-        val settings = rule.node(HomeTags.SETTINGS).bounds
-        assertBox("settings", settings, (PHONE_WIDTH - 16 - 44).dp, 10.dp, 44.dp, 44.dp)
-        val divider = rule.node(HomeTags.ACTION_DIVIDER).bounds
-        assertDp("divider meets the gear", settings.left, divider.right)
-        assertDp("divider height", 22, divider.bottom - divider.top)
-        assertDp("divider centred", 32, (divider.top + divider.bottom) / 2)
-        assertBox("filter", rule.node(HomeTags.FILTER).bounds, divider.left - 44.dp, 10.dp, 44.dp, 44.dp)
-        val title = rule.node(HomeTags.TITLE).bounds
-        assertDp("title centred", (PHONE_WIDTH / 2f).dp, (title.left + title.right) / 2)
-        assertDp("title centred in the bar", 32, (title.top + title.bottom) / 2)
-        assertDp("title line height", 20, title.bottom - title.top)
-        rule.onAllNodesWithTag(HomeTags.STATUS, useUnmergedTree = true).assertCountEquals(0)
+        // The account menu on the left; settings, then compose at the far right.
+        val account = rule.node(AccountMenuTags.BUTTON).bounds
+        assertDp("account menu centred in the bar", 32, (account.top + account.bottom) / 2)
+        assertDp("account menu size", 44, account.right - account.left)
+        val compose = rule.node(HomeTags.COMPOSE).bounds
+        assertBox("compose", compose, (PHONE_WIDTH - 16 - 44).dp, 10.dp, 44.dp, 44.dp)
+        assertBox("settings", rule.node(HomeTags.SETTINGS).bounds, compose.left - 44.dp, 10.dp, 44.dp, 44.dp)
+        rule.onAllNodesWithTag(HomeTags.STATUS, useUnmergedTree = true).assertCountEquals(1)
+        rule.onNodeWithText("online", useUnmergedTree = true).assertExists()
     }
 
     @Test
-    fun headerStatusHangsUnderTheTitle() {
+    fun anUnhealthyConnectionShowsInTheMiddleOfTheBar() {
         show(state(listOf(cli("a"))), ConnectionStatus.DISCONNECTED)
-        val title = rule.node(HomeTags.TITLE).bounds
         val status = rule.node(HomeTags.STATUS).bounds
-        assertDp("title stays centred in the bar", 32, (title.top + title.bottom) / 2)
-        assertDp("status top", title.bottom - 2.dp, status.top)
-        assertDp("status line", 16, status.bottom - status.top)
+        assertDp("status centred in the bar", 32, (status.top + status.bottom) / 2)
         assertDp("status centred", (PHONE_WIDTH / 2f).dp, (status.left + status.right) / 2)
+    }
+
+    @Test
+    fun relayStatusAlwaysShowsWhileTheConnectionAndCatchUpChange() {
+        val home = state(listOf(cli("a")))
+        var connection by mutableStateOf(ConnectionStatus.CONNECTED)
+        var syncing by mutableStateOf(false)
+        rule.setHappyContent {
+            HomeScreen(home, connection, home.grouping, callbacks, actions, syncing = syncing)
+        }
+        val first = rule.onAllNodesWithTag(FlatRowTags.ROW, useUnmergedTree = true)[0].bounds
+        for ((status, catchingUp) in listOf(
+            ConnectionStatus.CONNECTING to false, ConnectionStatus.CONNECTED to true,
+            ConnectionStatus.CONNECTED to false, ConnectionStatus.DISCONNECTED to false,
+            ConnectionStatus.ERROR to false, ConnectionStatus.CONNECTING to true,
+            ConnectionStatus.CONNECTED to true, ConnectionStatus.CONNECTED to false,
+        )) {
+            connection = status
+            syncing = catchingUp
+            rule.waitForIdle()
+            val line = rule.node(HomeTags.STATUS).bounds
+            assertDp("status remains centred vertically", 32, (line.top + line.bottom) / 2)
+            assertEquals(first, rule.onAllNodesWithTag(FlatRowTags.ROW, useUnmergedTree = true)[0].bounds)
+            val label = when (status) {
+                ConnectionStatus.CONNECTED -> if (catchingUp) "syncing" else "online"
+                ConnectionStatus.CONNECTING -> "connecting"
+                else -> "offline"
+            }
+            rule.onNodeWithText(label, useUnmergedTree = true).assertExists()
+        }
     }
 
     @Test
@@ -275,7 +295,6 @@ class HomeLayoutTest {
         rule.setHappyContent {
             HomeScreen(
                 current, ConnectionStatus.CONNECTED, SessionListGrouping.Flat, callbacks, actions,
-                linkContent = { Box(Modifier.fillMaxSize()) },
                 offlineContent = { computers, _ -> offlineComputers = computers },
             )
         }
@@ -292,19 +311,29 @@ class HomeLayoutTest {
         rule.waitForIdle()
         assertEquals(listOf("Studio"), offlineComputers)
 
-        // No computer at all: the first-run link page replaces the whole screen, header included.
+        // No computer and nothing to list: the link state is home's empty state, under home's own
+        // header. The account menu, Settings and New chat stay reachable; Scan QR code starts the scan.
         current = state(emptyList(), machines = emptyList())
         rule.waitForIdle()
+        assertEquals(HomeEmptyState.Link, current!!.emptyState)
         rule.node(HomeTags.LINK).assertExists()
-        rule.onAllNodesWithTag(HomeTags.FILTER, useUnmergedTree = true).assertCountEquals(0)
-        val link = rule.node(HomeTags.LINK).bounds
-        assertDp("link page from the top", 0, link.top)
-        assertDp("link page full width", PHONE_WIDTH, link.right - link.left)
+        rule.node(AccountMenuTags.BUTTON).assertExists()
+        rule.node(HomeTags.SETTINGS).assertExists()
+        rule.node(HomeTags.COMPOSE).assertExists()
+        assertTrue("link state under the header", rule.node(HomeTags.LINK).bounds.top >= rule.node(HomeTags.SETTINGS).bounds.bottom)
+        rule.onNodeWithText("Scan QR code").performClick()
+        assertEquals(1, linkComputer)
+
+        // Sessions cached with no computer linked still list; the link state is only for an empty home.
+        current = state(listOf(cli("a")), machines = emptyList())
+        rule.waitForIdle()
+        rule.node(FlatRowTags.ROW).assertExists()
+        rule.onAllNodesWithTag(HomeTags.LINK, useUnmergedTree = true).assertCountEquals(0)
     }
 
     /**
      * TalkBack over Home, as MainView, FlatSessionRow and SessionsList label
-     * it: "Sessions" is a header; Filter and Settings are named buttons; an
+     * it: the account menu, Settings and New chat are named buttons; an
      * unread row's top-right reads "new results" and not the stamp hidden
      * under the dot; the archive toggle is a button, selected while the
      * archive shows. Grouped by project, every row is a button.
@@ -312,8 +341,8 @@ class HomeLayoutTest {
     @Test
     fun homeReadsForTalkBack() {
         show(state(listOf(cli("a"), cli("gone", noon, active = false)), hidden = false, unread = setOf("a")))
-        rule.onNode(hasText("Sessions") and isHeading(), useUnmergedTree = true).assertExists()
-        rule.onNode(hasContentDescription("Filter") and hasRole(Role.Button)).assertExists()
+        rule.onNode(hasContentDescription("Accounts", substring = true) and hasRole(Role.Button), useUnmergedTree = true).assertExists()
+        rule.onNode(hasContentDescription("New chat") and hasRole(Role.Button)).assertExists()
         rule.onNode(hasContentDescription("Settings") and hasRole(Role.Button)).assertExists()
         rule.onAllNodesWithTag(FlatRowTags.TOP_RIGHT, useUnmergedTree = true)[0].assert(hasContentDescription("new results"))
         rule.onAllNodesWithTag(FlatRowTags.TIMESTAMP, useUnmergedTree = true)[0].assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.HideFromAccessibility))

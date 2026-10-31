@@ -27,6 +27,7 @@ final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
         configurationForConnecting connectingSceneSession: UISceneSession,
         options: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
+        application.isIdleTimerDisabled = true
         let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
         configuration.delegateClass = HarnessSceneDelegate.self
         return configuration
@@ -55,22 +56,38 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
     private var homeRenderer: HomeRendererHarness?
     private var agent: AgentHarness?
     private var storyRows: StoryRowsHarness?
+    private var agentList: AgentListScrollHarness?
+    private var composerKeyboardProbe: ComposerKeyboardProbe?
     private var realArchive: RealArchiveHarness?
     private var qaProbe: ChatUltraQAProbe?
     private var motionScript: ChatMotionScript?
     private var qaReal: ChatUltraQAReal?
     private var stories: StoriesHarness?
+    private var homeControllerScroll: HomeControllerScrollHarness?
+    private var homeScrollDiagnostic: HomeScrollDiagnosticHarness?
+    private var groupedHome: GroupedHomeHarness?
     #endif
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
-        Fonts.registerBundledFonts()
+        LegacyFonts.registerBundledFonts()
         let window = HarnessWindow(windowScene: scene)
         window.rootViewController = UIViewController()
         window.makeKeyAndVisible()
         self.window = window
         let arguments = ProcessInfo.processInfo.arguments
         #if DEBUG || HAPPY_FIXTURES
+        if arguments.contains("-homeScrollDiagnostic") {
+            homeScrollDiagnostic = HomeScrollDiagnosticHarness(window: window, arguments: arguments)
+            return
+        }
+        if arguments.contains("-composerKeyboardProbe") {
+            composerKeyboardProbe = ComposerKeyboardProbe(window: window, arguments: arguments)
+        }
+        if arguments.contains("-fullHomeScroll") {
+            homeControllerScroll = HomeControllerScrollHarness(window: window)
+            return
+        }
         if arguments.contains("-qaRealChat") {
             qaReal = ChatUltraQAReal(window: window)
             return
@@ -89,8 +106,16 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "agent",
            let socket = arguments.firstIndex(of: "-agentSocket").map({ arguments[$0 + 1] }),
-           let token = arguments.firstIndex(of: "-agentToken").map({ arguments[$0 + 1] }) {
+           let token = arguments.firstIndex(of: "-agentToken").map({ arguments[$0 + 1] }) ?? ProcessInfo.processInfo.environment["HAPPY_AGENT_FIXTURE_TOKEN"] {
             agent = AgentHarness(window: window, socket: socket, token: token)
+            return
+        }
+        if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "agentList" {
+            agentList = AgentListScrollHarness(window: window, arguments: arguments)
+            return
+        }
+        if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "groupedHome" {
+            groupedHome = GroupedHomeHarness(window: window, arguments: arguments)
             return
         }
         if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "storyRows" {
@@ -131,7 +156,7 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
         self.controller = controller
         controller.localSettings.chatListRenderer = ProcessInfo.processInfo.arguments.contains("-chatUltraList") ? .ultraList : .collectionView
         let context = AppContext(account: controller, variant: .development, version: "harness")
-        let chat = ChatViewController(context: context, session: account, sessionId: FixtureScenarios.prefix + fixture)
+        let chat = LegacyChatViewController(context: context, session: account, sessionId: FixtureScenarios.prefix + fixture)
         let home = UIViewController()
         home.title = "Chats"
         home.view.backgroundColor = .systemBackground
@@ -344,7 +369,7 @@ final class ChatScrollProbe: NSObject {
 
     private func keyboardTop(_ chat: UIViewController) -> CGFloat {
         let guideTop = chat.view.keyboardLayoutGuide.layoutFrame.minY
-        let top = (chat as? ChatViewController)?.ultraKeyboard?.keyboardTop(guideTop: guideTop) ?? guideTop
+        let top = (chat as? LegacyChatViewController)?.ultraKeyboard?.keyboardTop(guideTop: guideTop) ?? guideTop
         return chat.view.convert(CGPoint(x: 0, y: top), to: window).y
     }
 
@@ -352,7 +377,7 @@ final class ChatScrollProbe: NSObject {
     /// interactive dismissal on UltraList, or the layout guide on
     /// UICollectionView.
     private func keyboardDriver(_ chat: UIViewController) -> String {
-        guard let keyboard = (chat as? ChatViewController)?.ultraKeyboard else { return "guide" }
+        guard let keyboard = (chat as? LegacyChatViewController)?.ultraKeyboard else { return "guide" }
         return keyboard.isAvailable ? "controller" : "system"
     }
 
@@ -370,7 +395,7 @@ final class ChatScrollProbe: NSObject {
             tracking: list.isTracking, dragging: list.isDragging,
             active: activeRecognizers(list.scrollGestureView),
             dockPresentedMinY: dock?.superview.map { $0.convert(CGPoint(x: 0, y: presented), to: window).y } ?? .nan,
-            driving: (chat as? ChatViewController)?.ultraKeyboard?.isDriving ?? false
+            driving: (chat as? LegacyChatViewController)?.ultraKeyboard?.isDriving ?? false
         )
     }
 

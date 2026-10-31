@@ -89,6 +89,8 @@ android {
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = versionCodeValue ?: 1
         versionName = versionNameValue
+        // Instrumented device checks only (src/androidTest); nothing of it reaches an APK we ship.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"https://api.cluster-fluster.com\"")
         buildConfigField("String", "REVENUE_CAT_GOOGLE_KEY", groovy.json.JsonOutput.toJson(revenueCatGoogleKey))
@@ -276,7 +278,7 @@ abstract class VerifyReleaseKeeps : DefaultTask() {
             return if (end < 0) null else xml.substring(open.range.first, end)
         }
         if (!Regex("""<queries>[\s\S]*?<package android:name="com\.android\.vending"""").containsMatchIn(xml)) {
-            problems += "<queries> lost com.android.vending (QrScanner, ReviewPrompt look for the Play Store)"
+            problems += "<queries> lost com.android.vending (ReviewPrompt looks for the Play Store)"
         }
         val activity = component("activity", "com.slopus.happy.MainActivity")
         if (activity == null || "android:exported=\"true\"" !in activity) problems += "MainActivity is not exported"
@@ -341,10 +343,13 @@ dependencies {
     implementation(libs.okhttp)
     implementation(project(":elevenlabs"))
 
-    // QR codes (AGENTS.md "QR codes"): Google Code Scanner reads them, as
-    // expo-camera's launchScanner does on Android; ZXing's encoder draws them.
-    implementation(libs.play.services.code.scanner)
+    // QR codes (AGENTS.md "QR codes"): our own CameraX scanner reads them with
+    // ZXing's decoder, so no Play services; ZXing's encoder draws them.
+    implementation(libs.camera.camera2)
+    implementation(libs.camera.lifecycle)
+    implementation(libs.camera.compose)
     implementation(libs.zxing.core)
+    implementation(libs.tailcat)
 
     // The review ask (utils/requestReview.ts): expo-store-review's Play in-app review.
     implementation(libs.play.review)
@@ -352,6 +357,7 @@ dependencies {
     // Push (AGENTS.md "Push"): FCM, configured from google-services.json when it is there.
     implementation(libs.firebase.messaging)
     implementation(libs.coil.compose)
+    implementation(libs.lottie.compose)
     implementation(libs.coil.network.okhttp)
     implementation(libs.revenuecat.purchases)
     implementation(libs.revenuecat.ui)
@@ -365,4 +371,10 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.coil.test)
+
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.uiautomator)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
 }

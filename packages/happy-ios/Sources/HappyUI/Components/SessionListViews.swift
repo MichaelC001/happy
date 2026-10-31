@@ -11,7 +11,7 @@ final class SessionRowCell: UITableViewCell {
     static let reuseIdentifier = "session"
 
     let avatar = AvatarView()
-    let titleLabel = ShimmerLabel(style: TextStyles.sessionTitle)
+    let titleLabel = LegacyShimmerLabel(style: TextStyles.sessionTitle)
     let timestampLabel = StyledLabel(style: TextStyles.sessionTimestamp, color: Palette.textSecondary, lines: 1, alignment: .right)
     let dot = UIView()
     let projectLabel = StyledLabel(style: TextStyles.sessionProject, color: Palette.textSecondary, lines: 1)
@@ -35,7 +35,7 @@ final class SessionRowCell: UITableViewCell {
         selectedBackgroundView = selected
         branchIcon.tintColor = UIColor(Palette.textSecondary)
         branchIcon.contentMode = .center
-        divider.backgroundColor = UIColor(Palette.divider)
+        divider.backgroundColor = UIColor(Palette.legacyDivider)
         for view in [avatar, titleLabel, timestampLabel, dot, projectLabel, workspaceLabel, branchIcon, draftIcon, changes, divider] {
             contentView.addSubview(view)
         }
@@ -139,7 +139,7 @@ final class SessionRowCell: UITableViewCell {
 /// A title that shimmers while the agent works (ShimmerText): the base text
 /// in the secondary colour with a band of the full text colour sweeping
 /// across it.
-final class ShimmerLabel: UIView {
+final class LegacyShimmerLabel: UIView {
     var string: String {
         get { base.string }
         set { base.string = newValue; highlight.string = newValue; setNeedsLayout() }
@@ -262,7 +262,7 @@ final class ArchiveToggleCell: UITableViewCell {
         backgroundColor = UIColor(Palette.flatListBackground)
         selectionStyle = .none
         for line in [leading, trailing] {
-            line.backgroundColor = UIColor(Palette.divider)
+            line.backgroundColor = UIColor(Palette.legacyDivider)
             contentView.addSubview(line)
         }
         contentView.addSubview(label)
@@ -396,6 +396,24 @@ public final class NoSessionsView: UIView {
         didSet { if showsArchivedAction != oldValue { setNeedsLayout() } }
     }
 
+    /// A picture drawn in the glyph's place, the same box, so the
+    /// layout is unchanged: home's notice puts a `StateSceneView` here.
+    var artwork: UIView? {
+        didSet {
+            guard artwork !== oldValue else { return }
+            oldValue?.removeFromSuperview()
+            if let artwork { scrollView.addSubview(artwork) }
+            icon.isHidden = artwork != nil
+            setNeedsLayout()
+        }
+    }
+
+    /// The button as wide as its label and centred (`NoSessionsLayout`'s
+    /// `buttonLabelWidth`), rather than across the screen.
+    var fitsButtonToLabel = false {
+        didSet { if fitsButtonToLabel != oldValue { setNeedsLayout() } }
+    }
+
     /// What was asked to be measured last, and what was measured for it
     /// and applied. Laying out uses only what was applied.
     private(set) var requested: NoSessionsMeasureInput?
@@ -416,6 +434,8 @@ public final class NoSessionsView: UIView {
         backgroundColor = UIColor(Palette.groupedBackground)
         // The content is placed in the safe area by its layout.
         scrollView.contentInsetAdjustmentBehavior = .never
+        // The indicator insets set below are all of them; UIKit would add the safe area again.
+        scrollView.automaticallyAdjustsScrollIndicatorInsets = false
         scrollView.alwaysBounceVertical = false
         // Nothing to show until the first sizes are in.
         scrollView.isHidden = true
@@ -481,6 +501,7 @@ public final class NoSessionsView: UIView {
             title: .fixed(sizes.title),
             description: .fixed(sizes.description),
             buttonHeight: sizes.buttonHeight,
+            buttonLabelWidth: fitsButtonToLabel ? sizes.buttonLabel.width : nil,
             action: sizes.action.map(Measurable.fixed)
         ))
         scrollView.isHidden = false
@@ -490,6 +511,7 @@ public final class NoSessionsView: UIView {
         let end = max(0, layout.contentHeight - bounds.height)
         if scrollView.contentOffset.y > end { scrollView.contentOffset.y = end }
         icon.setLayoutFrame(layout.icon)
+        artwork?.setLayoutFrame(layout.icon)
         titleLabel.setLayoutFrame(layout.title)
         descriptionLabel.setLayoutFrame(layout.description)
         if let frame = layout.button { startNewSession.setLayoutFrame(frame) }

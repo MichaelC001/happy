@@ -70,6 +70,7 @@ final class AgentInputDesktopControlsView: UIView {
     typealias M = AgentInputDesktopLayout.Metrics
 
     var onSelect: ((String, AgentInputChip) -> Void)?
+    var onOpenSettings: (() -> Void)?
     var onStop: (() -> Void)?
     var onImage: (() -> Void)?
     var onSend: (() -> Void)?
@@ -89,6 +90,7 @@ final class AgentInputDesktopControlsView: UIView {
         addSubview(left)
         settingsButton.accessibilityLabel = Strings.Composer.settingsTitle
         settingsButton.onSelect = { [weak self] key, chip in self?.onSelect?(key, chip) }
+        settingsButton.onOpen = { [weak self] in self?.onOpenSettings?() }
         left.addSubview(settingsButton)
         stopButton.accessibilityLabel = Strings.Composer.stop
         stopButton.addTarget(self, action: #selector(stopTapped), for: .touchUpInside)
@@ -119,9 +121,14 @@ final class AgentInputDesktopControlsView: UIView {
         imageButton.glyphSize.width
     }
 
+    func settingsFrame(in view: UIView) -> CGRect? {
+        guard !settingsButton.isHidden, settingsButton.window != nil else { return nil }
+        return settingsButton.convert(settingsButton.bounds, to: view)
+    }
+
     func configure(_ configuration: AgentInputDesktopConfiguration, showsImage: Bool, hasAttachments: Bool, imageAccessibilityLabel: String) {
         self.configuration = configuration
-        settingsButton.isHidden = configuration.settings == nil
+        settingsButton.isHidden = configuration.settings?.sections.contains(where: { $0.chip != .permission }) != true
         settingsButton.settings = configuration.settings
         stopButton.isHidden = !configuration.showsStop
         stopButton.busy = configuration.isStopBusy
@@ -244,11 +251,12 @@ final class DesktopActionButton: DesktopPressable {
 /// the glyph has none).
 final class DesktopSettingsButton: UIButton {
     var onSelect: ((String, AgentInputChip) -> Void)?
+    var onOpen: (() -> Void)?
 
     var settings: AgentInputSettingsMenu? {
         didSet {
             guard settings != oldValue else { return }
-            menu = settings.map(makeMenu)
+            menu = nil
         }
     }
 
@@ -261,7 +269,8 @@ final class DesktopSettingsButton: UIButton {
     override init(frame: CGRect) {
         super.init(frame: frame)
         addSubview(iconView)
-        showsMenuAsPrimaryAction = true
+        showsMenuAsPrimaryAction = false
+        addAction(UIAction { [weak self] _ in self?.onOpen?() }, for: .touchUpInside)
         // Listed top-down in our order, as happy-app gets it by reversing
         // the rows the upward menu reverses again.
         preferredMenuElementOrder = .fixed
@@ -359,7 +368,7 @@ final class DesktopSendButton: DesktopPressable {
         case .locked:
             backgroundColor = UIColor(Palette.surfaceHigh)
             layer.borderWidth = 1
-            layer.borderColor = UIColor(Palette.divider).resolvedColor(with: traitCollection).cgColor
+            layer.borderColor = UIColor(Palette.legacyDivider).resolvedColor(with: traitCollection).cgColor
         case .active:
             backgroundColor = UIColor(Palette.composerSendFill)
         case .inactive:

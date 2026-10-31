@@ -6,11 +6,11 @@ import Photos
 import UIKit
 import XCTest
 
-private struct VideoTestComputer: DirectTransport {
-    func request(method: String, path: String, credential: String, body: Data?, headers: [String: String]) async throws -> DirectHTTPResponse {
+private struct VideoTestComputer: AgentTransport {
+    func request(method: String, path: String, credential: String, body: Data?, headers: [String: String]) async throws -> HTTP1Response {
         throw URLError(.notConnectedToInternet)
     }
-    func stream(path: String, credential: String, headers: [String: String]) async throws -> DirectHTTPStream {
+    func stream(path: String, credential: String, headers: [String: String]) async throws -> HTTP1Stream {
         throw URLError(.notConnectedToInternet)
     }
     func reset() async {}
@@ -37,17 +37,17 @@ final class HostedComposerVideoTests: XCTestCase {
         let asset = try XCTUnwrap(PHAsset.fetchAssets(with: options).firstObject)
 
         let account = AccountController(serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "video-test",
-            credentialStore: InMemoryCredentialStore(), storeDirectory: nil, directTransport: { _ in VideoTestComputer() })
-        await account.direct.setForeground(false)
-        let computer = try await account.direct.add(JSONDecoder().decode(DirectDeviceCredentials.self,
+            credentialStore: InMemoryCredentialStore(), storeDirectory: nil, agentTransport: { _ in VideoTestComputer() })
+        await account.agentConnections.setForeground(false)
+        let computer = try await account.agentConnections.add(JSONDecoder().decode(AgentConnectionCredentials.self,
             from: Data(#"{"address":"video-test","port":1,"deviceID":"\#(UUID().uuidString)","deviceToken":"test"}"#.utf8)), name: "Video test")
         addTeardownBlock { @MainActor in
-            StemCellsSession.forget(computer.id)
-            try await account.direct.remove(computer.id)
+            Session.forget(computer.id)
+            try await account.agentConnections.remove(computer.id)
         }
         let context = AppContext(account: account, variant: .preview, version: "test")
-        let session = try XCTUnwrap(StemCellsSession.session(for: computer.id, context: context))
-        let chat = StemCellChatViewController(session: session, agentId: "video-test", title: "Video attachment", spaceId: nil, stemCell: nil)
+        let session = try XCTUnwrap(Session.session(for: computer.id, context: context))
+        let chat = ChatViewController(session: session, agentId: "video-test", title: "Video attachment", spaceId: nil, seedling: nil)
         let window = hostedKeyWindow(in: try await hostedActiveScene(), root: chat)
         defer { window.isHidden = true }
         window.layoutIfNeeded()
@@ -55,10 +55,10 @@ final class HostedComposerVideoTests: XCTestCase {
 
         // Tap the composer's actual +, then select the video in its recent strip.
         try plus(in: card).sendActions(for: .touchUpInside)
-        try await wait { chat.presentedViewController is StemCellAttachSheetViewController }
-        let sheet = try XCTUnwrap(chat.presentedViewController as? StemCellAttachSheetViewController)
+        try await wait { chat.presentedViewController is AttachSheetViewController }
+        let sheet = try XCTUnwrap(chat.presentedViewController as? AttachSheetViewController)
         try await wait { self.subviews(sheet.view).contains { $0.accessibilityLabel?.hasPrefix("Video,") == true } }
-        let tile = try XCTUnwrap(subviews(sheet.view).compactMap { $0 as? StemCellAttachTile }.first { $0.videoDuration != nil })
+        let tile = try XCTUnwrap(subviews(sheet.view).compactMap { $0 as? AttachTile }.first { $0.videoDuration != nil })
         XCTAssertGreaterThan(try XCTUnwrap(tile.videoDuration), 0)
         tile.sendActions(for: .touchUpInside)
         XCTAssertTrue(tile.accessibilityLabel?.contains("picked 1") == true)
@@ -73,8 +73,8 @@ final class HostedComposerVideoTests: XCTestCase {
 
         // Open the whole library through the same + sheet and select that video.
         try plus(in: card).sendActions(for: .touchUpInside)
-        try await wait { chat.presentedViewController is StemCellAttachSheetViewController }
-        let secondSheet = try XCTUnwrap(chat.presentedViewController as? StemCellAttachSheetViewController)
+        try await wait { chat.presentedViewController is AttachSheetViewController }
+        let secondSheet = try XCTUnwrap(chat.presentedViewController as? AttachSheetViewController)
         try button("attach-photos", in: secondSheet.view).sendActions(for: .touchUpInside)
         try await wait { chat.presentedViewController is LibraryPickerViewController }
         let library = try XCTUnwrap(chat.presentedViewController as? LibraryPickerViewController)

@@ -114,6 +114,17 @@ final class HomeHeaderLayoutTests: XCTestCase {
         )
     }
 
+    /// Under a navigation bar the safe area already holds the bar (59 + 44).
+    func testContentInsetsUnderTheBarStartTwelveBelowIt() {
+        let insets = HomeContentInsets(underBar: LayoutInsets(top: 103, bottom: 34), dock: 108)
+        XCTAssertEqual(insets.chromeTop, 103)
+        XCTAssertEqual(insets.contentTop, 115)
+        XCTAssertEqual(insets.listBottom, 142)
+        XCTAssertEqual(insets.additionalSafeArea(over: LayoutInsets(top: 103, bottom: 34)), LayoutInsets(top: 12, bottom: 74))
+        // The indicator runs from the bar's foot to the dock's top.
+        XCTAssertEqual(insets.indicatorInsets, LayoutInsets(top: 103, bottom: 142))
+    }
+
     func testTheScreenFloatsTheHeaderAndItsScrimOverFullHeightContent() {
         let layout = HomeScreenLayout(size: phone, safeArea: phoneFullScreen, dock: 108)
         assertFrame(layout.content, rect(0, 0, 393, 852))

@@ -339,21 +339,11 @@ public final class SettingsAccountViewController: UIViewController, UIContextMen
         }
     }
 
-    /// The sign-in screens in a sheet, over an account that stays signed in.
-    /// A sign-in there adds the account and makes it active, and the
-    /// coordinator swaps the whole stack (closing this sheet) to its home.
+    /// The one Add flow (`AccountAdding`): an account added there becomes
+    /// the active one and the coordinator swaps the stack to its home.
     private func addAccount() {
         guard presentedViewController == nil else { return }
-        context.account.beginAddingAccount()
-        let welcome = WelcomeViewController(context: context)
-        welcome.navigationItem.leftBarButtonItem = UIBarButtonItem(
-            title: Strings.Common.cancel,
-            primaryAction: UIAction { [weak self] _ in self?.cancelAddingAccount() }
-        )
-        let navigation = UINavigationController(rootViewController: welcome)
-        AppCoordinator.applyAppearance(to: navigation.navigationBar)
-        navigation.presentationController?.delegate = self
-        present(navigation, animated: true)
+        AccountAdding.begin(context: context, from: self)
     }
 
     private func cancelAddingAccount() {
@@ -382,10 +372,15 @@ public final class SettingsAccountViewController: UIViewController, UIContextMen
             guard confirmed, busyAccount == nil else { return }
             busyAccount = entry.id
             rebuild()
+            // Asked before, since afterwards the connection is gone. Only a
+            // computer has a session; a Happy account's removal forgets
+            // nothing, since `Session.forget` also clears shared caches.
+            let isConnection = context.account.agentConnections.accounts.contains { $0.id == entry.id }
             do {
                 // Removes that account's credentials and cache; the active
                 // account is untouched, and the list redraws without it.
                 try await context.account.signOut(accountID: entry.id)
+                if isConnection { Session.forget(entry.id) }
             } catch {
                 Alerts.show(Strings.Common.error, Strings.AccountSwitcher.signOutFailed, on: self)
             }
@@ -422,14 +417,12 @@ public final class SettingsAccountViewController: UIViewController, UIContextMen
     private func linkDevice() {
         guard !linkingDevice else { return }
         Task { @MainActor in
-            guard let text = await PairingFlow.scan(.account, from: self) else { return }
-            if DirectPairingFlow.openIfDirect(text, context: context, on: self) { return }
-            linkingDevice = true
-            rebuild()
-            let outcome = await PairingFlow.approve(text, expecting: .account, session: session)
-            linkingDevice = false
-            rebuild()
-            PairingFlow.report(outcome, kind: .account, on: self)
+            // Any Happy code: a computer's connects it, another device's
+            // links it, and anything else says what it is.
+            await HappyScan.scan(intent: .connect, context: context, on: self) { [weak self] busy in
+                self?.linkingDevice = busy
+                self?.rebuild()
+            }
         }
     }
 
@@ -738,7 +731,12 @@ public final class SettingsAccountViewController: UIViewController, UIContextMen
                 on: self
             )
             guard confirmed else { return }
+            // The computers before, and forgotten only those actually gone
+            // after: a logout that keeps one keeps its session too.
+            let connections = context.account.agentConnections.accounts.map(\.id)
             await context.account.signOut()
+            let remaining = Set(context.account.agentConnections.accounts.map(\.id))
+            for id in connections where !remaining.contains(id) { Session.forget(id) }
         }
     }
 }

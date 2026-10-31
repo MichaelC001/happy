@@ -67,7 +67,7 @@ final class HomeRendererHarness {
                     try store.addPendingSettings(["sessionListGrouping": .string(grouping), "hideInactiveSessions": .bool(archiveCount > 0)])
                 }.value
                 let context = AppContext(account: controller, variant: .development, version: "home-harness")
-                let home = HomeViewController(context: context, session: session)
+                let home = LegacyHomeViewController(context: context, session: session)
                 let navigation = UINavigationController(rootViewController: home)
                 AppCoordinator.applyAppearance(to: navigation.navigationBar)
                 let shell = TabletShellViewController(context: context, detail: navigation)
@@ -150,7 +150,7 @@ final class HomeArchiveProbe: NSObject {
     private let archivedPrefixes: [String]?
     var report: Data { (try? JSONEncoder().encode(samples)) ?? Data() }
 
-    init(window: HarnessWindow, snapshots: AsyncStream<HomeSnapshot>, archivedPrefixes: [String]? = nil) {
+    init(window: HarnessWindow, snapshots: AsyncStream<LegacyHomeSnapshot>, archivedPrefixes: [String]? = nil) {
         self.window = window
         self.archivedPrefixes = archivedPrefixes
         super.init()

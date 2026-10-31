@@ -54,6 +54,16 @@ class DeepLinksTest {
     }
 
     @Test
+    fun pairingCodesOpenPairingAndNeverPrint() {
+        val code = "happy://direct?eyJ2IjoxfQ"
+        assertEquals(DeepLink.AgentPairing(code), parseDeepLink(" $code\n"))
+        assertEquals(DeepLink.AgentPairing("HAPPY://direct?x"), parseDeepLink("HAPPY://direct?x"))
+        assertFalse(DeepLink.AgentPairing(code).toString().contains("eyJ"))
+        // Only the host itself: another path is an app path.
+        assertEquals(DeepLink.Home, parseDeepLink("happy://directory"))
+    }
+
+    @Test
     fun productionAppLinksMapToTheSamePaths() {
         assertEquals(DeepLink.Terminal(key), parseDeepLink("https://app.happy.engineering/terminal?$key"))
         assertEquals(DeepLink.TerminalWeb, parseDeepLink("https://app.happy.engineering/terminal/connect#key=$key"))

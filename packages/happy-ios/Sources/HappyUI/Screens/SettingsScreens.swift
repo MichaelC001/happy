@@ -10,7 +10,7 @@ import UIKit
 /// Usage and the Developer row are not ported (see
 /// docs/FEATURES.md); logout and the push rows live on the Account page, as
 /// they do in happy-app.
-public final class SettingsViewController: UIViewController {
+public final class LegacySettingsViewController: UIViewController {
     private let context: AppContext
     private let list = GroupedListView()
     private var observation: StoreObservation?
@@ -226,10 +226,10 @@ public final class SettingsViewController: UIViewController {
     }
 
     private func approve(_ text: String) async {
-        guard let session = context.account.session, !connectingTerminal else { return }
+        guard !connectingTerminal else { return }
         connectingTerminal = true
         rebuild()
-        await SettingsConnections.approveTerminal(text, session: session, on: self)
+        await SettingsConnections.approveTerminal(text, context: context, on: self)
         connectingTerminal = false
         rebuild()
     }
@@ -311,96 +311,6 @@ func activeServerHost(_ context: AppContext) -> String? {
 /// things a person may need before a computer is linked: another server, or
 /// throwing the new account away. Nothing is linked yet, so logging out
 /// loses nothing.
-public final class OnboardingSettingsViewController: UIViewController {
-    private let context: AppContext
-    private let list = GroupedListView()
-
-    public init(context: AppContext) {
-        self.context = context
-        super.init(nibName: nil, bundle: nil)
-        followsTextSize()
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is not supported")
-    }
-
-    public override func loadView() {
-        view = list
-    }
-
-    public override func viewDidLoad() {
-        super.viewDidLoad()
-        title = Strings.Onboarding.settingsTitle
-        showsBackTitle()
-    }
-
-    public override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        // Rebuilt on every return, so a changed server shows.
-        rebuild()
-    }
-
-    private func rebuild() {
-        let server = ItemRowView(
-            title: Strings.Onboarding.settingsServer,
-            detail: activeServerHost(context) ?? Strings.Onboarding.settingsServerDefault,
-            icon: ItemIcon(.ionicons("server-outline"), tint: Palette.textSecondary, size: 28)
-        ) { [weak self] in
-            self?.openServer()
-        }
-        let logout = ItemRowView(
-            title: Strings.Onboarding.logoutStartOver,
-            icon: ItemIcon(.ionicons("log-out-outline"), tint: Palette.textDestructive, size: 28),
-            isDestructive: true
-        ) { [weak self] in
-            self?.logout()
-        }
-        logout.showsChevron = false
-        var sections = [ItemGroupView(rows: [server])]
-        // Where a computer can be a home: the Direct connection experiment.
-        let preference = StemCellsPreference(variant: context.variant)
-        if preference.isAvailable {
-            let context = context
-            let direct = ItemRowView.toggle(
-                title: Strings.StemCells.directConnection,
-                subtitle: Strings.StemCells.beta,
-                icon: ItemIcon(.ionicons("flask-outline"), tint: Palette.textSecondary, size: 28),
-                isOn: preference.directConnection
-            ) { on in
-                StemCellsExperiments.turn(on, context: context, surface: .settings)
-            }
-            direct.trailingView?.accessibilityIdentifier = "stem-settings-toggle:direct-connection"
-            sections.append(ItemGroupView(title: Strings.StemCells.experiments, rows: [direct]))
-        }
-        // Signed out, there is nothing to log out of.
-        if context.account.session != nil {
-            sections.append(ItemGroupView(footer: Strings.Onboarding.logoutFooter, rows: [logout]))
-        }
-        list.sections = sections
-    }
-
-    private func openServer() {
-        navigationController?.pushViewController(ServerConfigViewController(context: context), animated: true)
-    }
-
-    private func logout() {
-        Task { @MainActor in
-            let confirmed = await Alerts.confirm(
-                Strings.Onboarding.logoutConfirmTitle,
-                Strings.Onboarding.logoutConfirmBody,
-                confirmTitle: Strings.Common.logout,
-                destructive: true,
-                on: self
-            )
-            guard confirmed else { return }
-            // The coordinator swaps back to Welcome.
-            await context.account.signOut()
-        }
-    }
-}
-
 /// The custom server screen. app/(app)/server.tsx without the voice
 /// section.
 public final class ServerConfigViewController: UIViewController, UITextFieldDelegate {

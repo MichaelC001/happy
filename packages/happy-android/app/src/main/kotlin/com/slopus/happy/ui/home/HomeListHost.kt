@@ -1,13 +1,16 @@
 package com.slopus.happy.ui.home
 
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
@@ -15,6 +18,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.slopus.happy.AppGraph
 import com.slopus.happy.BuildConfig
 import com.slopus.happy.R
+import com.slopus.happy.ui.connect.EnterTerminalUrlPrompt
+import com.slopus.happy.ui.connect.rememberTerminalConnect
 import com.slopus.happy.model.Session
 import com.slopus.happy.model.SessionListGrouping
 import com.slopus.happy.model.WorkspaceOrigin
@@ -38,6 +43,12 @@ class HomeListScope(
     val navigation: HomeNavigation,
     /** The phone home's new-session dock; null in the tablet sidebar. */
     val dock: NewSessionDock?,
+    /**
+     * Where the list sits, held above the host so the breakpoint's swap of
+     * phone list for sidebar list keeps the reader's place.
+     */
+    val listState: LazyListState,
+    val syncing: Boolean = false,
 )
 
 /**
@@ -54,6 +65,8 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, withDock: Boolean 
     val settings by graph.settings.settings.collectAsStateWithLifecycle()
     val local by graph.localSettings.values.collectAsStateWithLifecycle()
     val connection by graph.connectionStatus.collectAsStateWithLifecycle()
+    val syncing by graph.isSyncing.collectAsStateWithLifecycle()
+    val registry by graph.accountStore.registry.collectAsStateWithLifecycle()
     val updateUrl by services.updateUrl.collectAsStateWithLifecycle()
     val resources = LocalResources.current
     val latestChangelog = remember(resources) { Changelog.bundled(resources).latestTitle }
@@ -134,20 +147,39 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, withDock: Boolean 
             onPressDown = { id -> graph.account.value?.messages?.preload(id) },
         )
     }
-    val actions = remember(navigation, uriHandler) {
+    // Linking from the empty home approves the code with this account, as Settings' scan does (not
+    // Add, which makes a new account); without a scanner it asks for the link instead.
+    val connect = rememberTerminalConnect(graph)
+    var enteringUrl by remember { mutableStateOf(false) }
+    connect.onUnavailable = { enteringUrl = true }
+    val actions = remember(navigation, uriHandler, connect) {
         HomeScreenActions(
             onSettings = navigation.onSettings,
-            onAppearance = navigation.onAppearance,
-            onSetGrouping = { grouping -> graph.settings.change { it.copy(sessionListGrouping = grouping) } },
             onNewSession = navigation.onNewSession,
             onTroubleshoot = navigation.onTroubleshoot,
             onOpenUrl = uriHandler::openUri,
             onWhatsNew = navigation.onWhatsNew,
+            onSwitchAccount = { id -> graph.open(id) },
+            onLinkComputer = connect::scan,
         )
     }
 
+    // The breakpoint swaps this host for the sidebar's and back, taking the list with it, so the
+    // place it was at is kept in the services and the rebuilt list opens there (SessionScreenSlots'
+    // tab strip does the same). Keyed by account: switching never lands on another account's place.
+    val accountKey = registry.activeId.orEmpty()
+    val listState = remember(accountKey) {
+        val saved = services.homeListOffsets[accountKey]
+        LazyListState(saved?.first ?: 0, saved?.second ?: 0)
+    }
+    LaunchedEffect(listState, accountKey) {
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .distinctUntilChanged()
+            .collect { services.homeListOffsets[accountKey] = it }
+    }
+
     ProvideAvatarSettings(settings) {
-        content(HomeListScope(state, connection, settings.sessionListGrouping, callbacks, actions, update, navigation, dock))
+        content(HomeListScope(state, connection, settings.sessionListGrouping, callbacks, actions, update, navigation, dock, listState, syncing))
     }
     dock?.dialogs?.invoke()
     duplicating?.let { session ->
@@ -158,5 +190,6 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, withDock: Boolean 
             onDuplicated = onOpenSession,
         )
     }
+    if (enteringUrl) EnterTerminalUrlPrompt(connect, onDismiss = { enteringUrl = false })
     alert?.let { HappyAlert(it, onDismiss = { alert = null }) }
 }

@@ -18,8 +18,9 @@ public final class AppCoordinator {
     /// before the first state arrives.
     private var shownSession: ObjectIdentifier??
     private var shownServerConfirmationID: AccountSummary.ID?
-    private var shownDirectID: String?
-    private var pendingDirectLink: String?
+    private var shownAgentConnectionID: String?
+    /// A link from outside, waiting for the stored accounts.
+    private var pendingLink: String?
     /// The session a tapped notification named, until a signed-in home can
     /// open it.
     private var notificationSessionID: String?
@@ -54,23 +55,17 @@ public final class AppCoordinator {
         // Welcome appears as soon as restore() finds nothing.
         // Where a computer is a home of its own, the profile chosen last
         // opens; with none, a paired computer rather than Welcome.
-        let stemCells = StemCellsPreference(variant: context.variant)
-        #if DEBUG || HAPPY_FIXTURES
-        // UI tests choose the Direct connection experiment's state.
-        if let direct = ProcessInfo.processInfo.environment["STEM_DIRECT"] { stemCells.directConnection = direct == "1" }
-        #endif
-        context.account.fallsBackToComputer = stemCells.isAvailable
-        // Paired computers stay hidden while the experiment is off.
-        context.account.showsComputers = stemCells.showsComputers
+        let v2 = Preference(variant: context.variant)
+        context.account.fallsBackToAgentConnection = true
         PairingAnalytics.shared.variant = context.variant
         Task { @MainActor [weak self] in
             guard let account = self?.context.account else { return }
-            // The Happy account's filter showed a computer's Stem Cells: that
+            // The Happy account's filter showed a computer's V2: that
             // computer is home now, from the first screen.
-            await account.restore(openingComputer: stemCells.takeFilterChoice(), preferred: stemCells.computerID)
+            await account.restore(openingAgentConnection: v2.takeFilterChoice(), preferred: v2.agentConnectionID)
             self?.show(account.state)
             self?.accountRestored = true
-            self?.openPendingDirectLink()
+            self?.openPendingLink()
             self?.openNotificationSession()
         }
     }
@@ -90,7 +85,7 @@ public final class AppCoordinator {
         let account = context.account
         // A root being decided opens it once it is in.
         guard !language.isDeciding else { return }
-        guard let active = account.session, navigation.viewControllers.first is HomeViewController else {
+        guard let active = account.session, navigation.viewControllers.first is LegacyHomeViewController else {
             // Signed out once restored: there is nothing to open it in.
             if accountRestored, account.session == nil { notificationSessionID = nil }
             return
@@ -106,7 +101,7 @@ public final class AppCoordinator {
             guard self.notificationSessionID == sessionId,
                   account.session === active,
                   !self.language.isDeciding,
-                  self.navigation.viewControllers.first is HomeViewController else {
+                  self.navigation.viewControllers.first is LegacyHomeViewController else {
                 self.openNotificationSession()
                 return
             }
@@ -144,8 +139,8 @@ public final class AppCoordinator {
                 return
             }
             guard let session = self.context.account.session,
-                  let home = self.navigation.viewControllers.first as? HomeViewController else { return }
-            if let chat = self.navigation.topViewController as? ChatViewController, chat.sessionId == sessionId { return }
+                  let home = self.navigation.viewControllers.first as? LegacyHomeViewController else { return }
+            if let chat = self.navigation.topViewController as? LegacyChatViewController, chat.sessionId == sessionId { return }
             self.navigation.presentedViewController?.dismiss(animated: false)
             let chat = Screens.make(.session(id: sessionId), context: self.context, session: session)
             self.navigation.setViewControllers([home, chat], animated: true)
@@ -160,43 +155,44 @@ public final class AppCoordinator {
 
     /// Foreground/background, for the server's push suppression.
     public func appStateChanged(active: Bool) {
-        Task { await context.account.direct.setForeground(active) }
+        Task { await context.account.agentConnections.setForeground(active) }
         guard let session = context.account.session else { return }
         Task { await session.sendAppState(active ? "active" : "background") }
     }
 
-    /// Opens a pairing link from outside the app. Asks first: a link can
-    /// come from anywhere, and approving it hands a terminal the account.
+    /// Opens a Happy link from outside the app, routed as a scanned code
+    /// is (`HappyScan`). One that arrives before the stored accounts are
+    /// read waits for them. A relay link asks first: a link can come from
+    /// anywhere, and answering it hands a computer an account; an agent's
+    /// link asks through its pairing screen.
     @discardableResult
     public func open(_ url: URL) -> Bool {
         let text = url.absoluteString
-        if DirectPairingLink.isDirect(text) {
-            if accountRestored, let top = linkHost {
-                return DirectPairingFlow.openIfDirect(text, context: context, on: top)
-            }
-            pendingDirectLink = text
-            return true
-        }
-        guard let link = PairingLink(text) else { return false }
-        let top = presenter
-        guard context.account.session != nil else {
-            Alerts.show(Strings.Common.error, Strings.Modals.failedToConnectTerminal, on: top)
-            return true
-        }
-        let kind: PairingFlow.Kind
-        if case .terminal = link { kind = .terminal } else { kind = .account }
-        Task { @MainActor in
-            let confirmed = await Alerts.confirm(
-                kind == .terminal ? Strings.Modals.authenticateTerminal : Strings.SettingsAccount.linkNewDevice,
-                nil,
-                confirmTitle: Strings.Common.continueAction,
-                on: top
-            )
-            guard confirmed, let session = context.account.session else { return }
-            let outcome = await PairingFlow.approve(text, expecting: kind, session: session)
-            PairingFlow.report(outcome, kind: kind, on: top)
-        }
+        guard HappyCode(text) != .notHappy else { return false }
+        pendingLink = text
+        openPendingLink()
         return true
+    }
+
+    private func openPendingLink() {
+        guard accountRestored, let text = pendingLink, let top = linkHost else { return }
+        pendingLink = nil
+        let route = ScanRoute.route(HappyCode(text), intent: .connect, hasAccount: context.account.session != nil)
+        Task { @MainActor in
+            switch route {
+            case .connectComputer, .newAccountForComputer, .linkDevice:
+                let terminal = if case .linkDevice = route { false } else { true }
+                guard await Alerts.confirm(
+                    terminal ? Strings.Modals.authenticateTerminal : Strings.SettingsAccount.linkNewDevice,
+                    nil,
+                    confirmTitle: Strings.Common.continueAction,
+                    on: top
+                ) else { return }
+            case .connectAgent, .problem:
+                break
+            }
+            await HappyScan.open(text, intent: .connect, context: context, on: top, start: .openedLink)
+        }
     }
 
     /// Swaps the root only when the account changes. While signed in, home
@@ -210,12 +206,12 @@ public final class AppCoordinator {
         VoiceCoordinator.shared.accountDidChange(to: session)
         let identity = session.map(ObjectIdentifier.init)
         let pending = context.account.pendingServerConfirmation
-        let directID = context.account.direct.activeID
-        if let shownSession, shownSession == identity, shownServerConfirmationID == pending?.id, shownDirectID == directID { return }
+        let agentConnectionID = context.account.agentConnections.activeID
+        if let shownSession, shownSession == identity, shownServerConfirmationID == pending?.id, shownAgentConnectionID == agentConnectionID { return }
         let animated = shownSession != nil
         shownSession = .some(identity)
         shownServerConfirmationID = pending?.id
-        shownDirectID = directID
+        shownAgentConnectionID = agentConnectionID
         requestRoot(session: session, pending: pending, animated: animated)
     }
 
@@ -276,62 +272,40 @@ public final class AppCoordinator {
             return
         }
         let root: UIViewController
-        if let direct = context.account.direct.active {
-            root = StemCellsDirectHomeViewController(context: context, id: direct.id)
+        if let direct = context.account.agentConnections.active {
+            root = AgentHomeViewController(context: context, id: direct.id)
         } else if let pending {
             root = AccountServerConfirmationViewController(context: context, account: pending)
         } else if let session {
-            root = HomeViewController(context: context, session: session)
+            root = LegacyHomeViewController(context: context, session: session)
         } else {
-            // Nothing paired or signed in: where a computer can be a home,
-            // the first screen links one, through the relay unless the
-            // Direct connection experiment is on.
-            root = StemCellsPreference(variant: context.variant).isAvailable
-                ? StemCellsLinkViewController(context: context, inSheet: false)
-                : WelcomeViewController(context: context)
+            // Nothing paired or signed in: the first screen, whose Start
+            // scans any code.
+            root = StartViewController(context: context)
         }
-        // Stem Cells' settings stays on top while the profile it chose
+        // V2' settings stays on top while the profile it chose
         // takes over underneath. Anything presented goes with the old root,
         // and so does settings once a flow pushed over it or presented from
         // it (pairing, signing in, signing out) caused the change.
-        let settings = navigation.viewControllers.count == 2 ? navigation.viewControllers.last as? StemCellsSettingsViewController : nil
+        let settings = navigation.viewControllers.count == 2 ? navigation.viewControllers.last as? SettingsViewController : nil
         // A confirmation already going counts as gone.
         let presented = navigation.presentedViewController.flatMap { $0.isBeingDismissed ? nil : $0 }
         let kept = settings.flatMap { settings in
-            presented == nil && (context.account.direct.active != nil || session != nil) ? settings : nil
+            presented == nil && (context.account.agentConnections.active != nil || session != nil) ? settings : nil
         }
         navigation.presentedViewController?.dismiss(animated: false)
         navigation.setViewControllers([root] + [kept].compactMap { $0 }, animated: animated && kept == nil)
         shell.rootDidChange() // Tablet: the sidebar follows the account.
-        openPendingDirectLink()
+        openPendingLink()
         openNotificationSession()
     }
 
-    /// Where a computer's link opens: in the link sheet when it is up,
-    /// else on top of the window's stack, with anything over it (a QR
-    /// sheet, a scanner, an alert) put away so the pairing pushed there
-    /// shows.
+    /// Where a link from outside opens: on top of the window's stack, with
+    /// anything over it (a QR sheet, a scanner, an alert) put away so the
+    /// pairing pushed there shows.
     private var linkHost: UIViewController? {
-        if let sheet = navigation.presentedViewController as? StemCellsLinkNavigationController, !sheet.isBeingDismissed {
-            sheet.presentedViewController?.dismiss(animated: false)
-            return sheet.topViewController
-        }
         navigation.presentedViewController?.dismiss(animated: false)
         return navigation.topViewController
-    }
-
-    /// What an alert about a link shows over: the topmost screen presented,
-    /// not one going or an alert already up.
-    private var presenter: UIViewController {
-        var top: UIViewController = navigation
-        while let next = top.presentedViewController, !next.isBeingDismissed, !(next is UIAlertController) { top = next }
-        return top
-    }
-
-    private func openPendingDirectLink() {
-        guard accountRestored, let text = pendingDirectLink, let top = linkHost else { return }
-        pendingDirectLink = nil
-        _ = DirectPairingFlow.openIfDirect(text, context: context, on: top)
     }
 
     /// The title of happy-app's UIKit headers (react-native-screens 4.22.0
@@ -342,21 +316,14 @@ public final class AppCoordinator {
     /// 16pt title view instead.
     static var nativeTitleAttributes: [NSAttributedString.Key: Any] {
         [
-            .font: Fonts.font(.semiBold, size: TextStyles.nativeHeaderTitle.size),
+            .font: LegacyFonts.font(.semiBold, size: TextStyles.nativeHeaderTitle.size),
             .foregroundColor: UIColor(Palette.headerTint),
         ]
     }
 
+    /// Clear, over each screen's own background (`HeaderBar`).
     static func applyAppearance(to bar: UINavigationBar) {
-        let appearance = UINavigationBarAppearance()
-        appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = UIColor(Palette.groupedBackground)
-        appearance.shadowColor = .clear
-        appearance.titleTextAttributes = Self.nativeTitleAttributes
-        bar.standardAppearance = appearance
-        bar.scrollEdgeAppearance = appearance
-        bar.compactAppearance = appearance
-        bar.tintColor = UIColor(Palette.headerTint)
+        HeaderBar.apply(to: bar)
     }
 }
 #endif

@@ -3,80 +3,8 @@ import HappyCore
 import HappyLayout
 import UIKit
 
-/// The same inventory is used by a legacy home and a direct home.
-@MainActor
-final class HomeAccountControl: NSObject {
-    private let context: AppContext
-    private weak var controller: UIViewController?
-    private weak var header: HomeHeaderView?
-    private var observation: AccountsObservation?
-    private var imageJob: Task<Void, Never>?
-    private var accounts: [AccountSummary] = []
-    /// Where a computer is a home of its own: the active account's picture,
-    /// always, opens the profiles' settings, which is where switching went.
-    var opensSettings: (() -> Void)? {
-        didSet { update(accounts) }
-    }
-
-    init(context: AppContext, controller: UIViewController, header: HomeHeaderView? = nil) {
-        self.context = context; self.controller = controller; self.header = header
-        super.init()
-        if let header { header.logoControl.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(open))) }
-        observation = context.account.observeAccounts { [weak self] accounts in self?.update(accounts) }
-    }
-
-    private func update(_ accounts: [AccountSummary]) {
-        self.accounts = accounts
-        let settings = opensSettings != nil
-        let multiple = accounts.count > 1 || settings
-        let active = accounts.first(where: \.isActive)
-        header?.showsAccountAvatar = multiple
-        header?.logoControl.isUserInteractionEnabled = multiple
-        header?.logoControl.isAccessibilityElement = multiple
-        header?.logoControl.accessibilityLabel = settings ? Strings.StemCells.openSettings : "Switch account"
-        header?.logoControl.accessibilityIdentifier = settings ? "stem-settings-mark" : nil
-        header?.logoControl.accessibilityTraits = .button
-        imageJob?.cancel()
-        let fallback = multiple ? UIImage(systemName: active?.isDirect == true ? "desktopcomputer" : "person.crop.circle.fill") : UIImage.happy("logo-black")?.withRenderingMode(.alwaysTemplate)
-        apply(fallback, multiple: multiple)
-        guard multiple, let active else { return }
-        let bytes = context.account.direct.accounts.first { $0.id == active.id }?.avatar
-        let pictures = context.account.pictures(for: active.id)
-        imageJob = Task { [weak self] in
-            var image: UIImage?
-            if let bytes { image = await Task.detached { AccountPictureImages.decode(bytes)?.picture as? UIImage }.value }
-            else if let url = active.avatarURL { image = await pictures?.image(url) }
-            if image == nil, let thumbhash = active.avatarThumbhash { image = await pictures?.placeholderImage(thumbhash) }
-            guard !Task.isCancelled, let self, let image else { return }
-            apply(image, multiple: true)
-        }
-    }
-
-    private func apply(_ image: UIImage?, multiple: Bool) {
-        if let header { header.logo.image = image; header.logo.contentMode = .scaleAspectFill }
-        let side = multiple ? HomeHeaderLayout.Metrics.logoBox : HomeHeaderLayout.Metrics.logoSize
-        let size = CGSize(width: side, height: side)
-        let icon = image.map { image in
-            UIGraphicsImageRenderer(size: size).image { _ in
-                let rect = CGRect(origin: .zero, size: size)
-                if multiple { UIBezierPath(ovalIn: rect).addClip() }
-                image.draw(in: rect)
-            }.withRenderingMode(multiple ? .alwaysOriginal : .alwaysTemplate)
-        }
-        let item = UIBarButtonItem(image: icon, style: .plain, target: self, action: #selector(open))
-        item.isEnabled = multiple
-        item.accessibilityLabel = opensSettings != nil ? Strings.StemCells.openSettings : multiple ? "Switch account" : "Happy"
-        item.accessibilityIdentifier = opensSettings != nil ? "stem-settings-mark" : nil
-        controller?.navigationItem.leftBarButtonItem = item
-    }
-
-    @objc private func open() {
-        if let opensSettings { return opensSettings() }
-        guard let controller else { return }
-        controller.navigationController?.pushViewController(CombinedAccountsViewController(context: context), animated: true)
-    }
-}
-
+/// Every account and connection, each signed out or disconnected from
+/// here, and the one way to add another; the switcher's Manage Accounts.
 final class CombinedAccountsViewController: UIViewController {
     private let context: AppContext
     private let list = GroupedListView()
@@ -100,27 +28,24 @@ final class CombinedAccountsViewController: UIViewController {
         var rows: [UIView] = []
         for account in context.account.accounts {
             loadImage(account)
-            let icon = images[account.id].map { ItemIcon(.image($0), round: true) } ?? ItemIcon(.ionicons(account.isDirect ? "desktop-outline" : "person-circle-outline"), tint: Palette.iconBlue)
+            let icon = images[account.id].map { ItemIcon(.image($0), round: true) } ?? ItemIcon(.ionicons(account.isAgentConnection ? "desktop-outline" : "person-circle-outline"), tint: Palette.iconBlue)
             let status = account.connectionStatus ?? (account.isActive ? "Active" : "Signed in")
-            let row = ItemRowView(title: account.name ?? account.username ?? "Happy account", subtitle: "\(account.isDirect ? "Direct computer" : account.serverURL.host ?? "Happy") · \(status)", icon: icon) { [weak self] in
+            let row = ItemRowView(title: account.name ?? account.username ?? "Happy account", subtitle: "\(account.isAgentConnection ? "Agent" : account.serverURL.host ?? "Happy") · \(status)", icon: icon) { [weak self] in
                 self?.select(account)
             }
             row.showsChevron = false
             if account.isActive { row.trailingView = SettingsCheckmark.view(tint: Palette.iconBlue) }
             rows.append(row)
-            let remove = ItemRowView(title: account.isDirect ? "Disconnect \(account.name ?? "computer")" : "Sign out \(account.name ?? "account")", icon: ItemIcon(.ionicons("log-out-outline"), tint: Palette.textSecondary)) { [weak self] in self?.remove(account) }
+            let remove = ItemRowView(title: account.isAgentConnection ? "Disconnect \(account.name ?? "agent")" : "Sign out \(account.name ?? "account")", icon: ItemIcon(.ionicons("log-out-outline"), tint: Palette.textSecondary)) { [weak self] in self?.remove(account) }
             remove.showsChevron = false
             rows.append(remove)
         }
-        let scan = ItemRowView(title: "Pair a computer", subtitle: "Scan a Happy or direct pairing code", icon: ItemIcon(.ionicons("qr-code-outline"), tint: Palette.iconBlue)) { [weak self] in
-            guard let self else { return }; DirectPairingFlow.scan(context: context, on: self)
-        }
-        let add = ItemRowView(title: "Add Happy account", icon: ItemIcon(.ionicons("add-circle-outline"), tint: Palette.iconBlue)) { [weak self] in
+        let add = ItemRowView(title: Strings.AccountSwitcher.add, icon: ItemIcon(.ionicons("add-circle-outline"), tint: Palette.iconBlue)) { [weak self] in
             guard let self else { return }
-            context.account.beginAddingAccount()
-            navigationController?.pushViewController(WelcomeViewController(context: context), animated: true)
+            AccountAdding.begin(context: context, from: self)
         }
-        list.sections = [ItemGroupView(rows: rows), ItemGroupView(rows: [scan, add])]
+        add.accessibilityIdentifier = "accounts-add"
+        list.sections = [ItemGroupView(rows: rows), ItemGroupView(rows: [add])]
     }
     private func select(_ account: AccountSummary) {
         guard !busy, !account.isActive else { return }; busy = true
@@ -131,18 +56,28 @@ final class CombinedAccountsViewController: UIViewController {
             busy = false
         }
     }
-    private func remove(_ account: AccountSummary) {
+    func remove(_ account: AccountSummary) {
         guard !busy else { return }; busy = true
         Task { [weak self] in
             guard let self else { return }
             defer { busy = false }
-            guard await Alerts.confirm(account.isDirect ? "Disconnect computer?" : "Sign out?", "Remove this account and its credentials from this phone?", confirmTitle: account.isDirect ? "Disconnect" : "Sign out", destructive: true, on: self) else { return }
-            do { try await context.account.signOut(accountID: account.id) }
-            catch { Alerts.show("Could not remove account", error.localizedDescription, on: self) }
+            guard await Alerts.confirm(account.isAgentConnection ? "Disconnect agent?" : "Sign out?", "Remove this account and its credentials from this phone?", confirmTitle: account.isAgentConnection ? "Disconnect" : "Sign out", destructive: true, on: self) else { return }
+            await signOut(account)
         }
     }
+
+    /// Once confirmed: the account goes, and a computer's session with it,
+    /// only if it really went. A Happy account forgets nothing, since
+    /// `Session.forget` also clears caches shared by every account.
+    func signOut(_ account: AccountSummary) async {
+        do {
+            try await context.account.signOut(accountID: account.id)
+            if account.isAgentConnection { Session.forget(account.id) }
+        }
+        catch { Alerts.show("Could not remove account", error.localizedDescription, on: self) }
+    }
     private func loadImage(_ account: AccountSummary) {
-        let direct = context.account.direct.accounts.first { $0.id == account.id }
+        let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
         let key = direct.map { "\($0.avatarETag ?? ""):\($0.avatar?.count ?? 0)" } ?? account.avatarURL?.absoluteString ?? account.avatarThumbhash ?? ""
         guard imageKeys[account.id] != key else { return }
         imageKeys[account.id] = key; jobs[account.id]?.cancel()

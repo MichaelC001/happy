@@ -27,7 +27,12 @@ import com.slopus.happy.ui.chat.chatRoutes
 import com.slopus.happy.ui.components.Alert
 import com.slopus.happy.ui.components.AlertButton
 import com.slopus.happy.ui.components.HappyAlert
+import com.slopus.happy.accounts.accountId
 import com.slopus.happy.ui.connect.DeepLinkEffect
+import com.slopus.happy.ui.connection.AgentHome
+import com.slopus.happy.ui.connect.LocalAddFlow
+import com.slopus.happy.ui.connect.LocalAgentPairing
+import com.slopus.happy.ui.connect.rememberAddFlow
 import com.slopus.happy.ui.tablet.TabletShell
 import com.slopus.happy.ui.connect.connectRoutes
 import com.slopus.happy.ui.files.filesRoutes
@@ -36,9 +41,17 @@ import com.slopus.happy.ui.onboarding.RestoreManualScreen
 import com.slopus.happy.ui.onboarding.TroubleshootRoute
 import com.slopus.happy.ui.machine.MachineRoute
 import com.slopus.happy.ui.onboarding.onboardingRoutes
+import com.slopus.happy.ui.connection.connectAgent
+import com.slopus.happy.ui.connection.agentConnectionRoutes
+import com.slopus.happy.ui.connection.AgentConnectionSettingsRoute
+import com.slopus.happy.ui.connection.agentHomeRoutes
+import com.slopus.happy.ui.conversation.composeConversation
+import com.slopus.happy.ui.conversation.conversationRoutes
+import com.slopus.happy.ui.conversation.openConversation
 import com.slopus.happy.ui.session.SessionInfoRoute
-import com.slopus.happy.ui.onboarding.WelcomeScreen
+import com.slopus.happy.ui.start.Start
 import com.slopus.happy.ui.server.ServerScreen
+import com.slopus.happy.ui.settings.AppearanceRoute
 import com.slopus.happy.ui.settings.LocalizedContent
 import com.slopus.happy.ui.home.ProvideAvatarSettings
 import com.slopus.happy.ui.settings.settingsRoutes
@@ -47,12 +60,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 
-@Serializable data object WelcomeRoute
+@Serializable data object StartRoute
 @Serializable data object ServerRoute
 @Serializable data object RestoreRoute
 @Serializable data object RestoreManualRoute
 @Serializable data object HomeRoute
 @Serializable data object SettingsRoute
+@Serializable data object AgentHomeRoute
 
 /**
  * The whole UI. Signed out and signed in are separate back stacks: when the
@@ -71,76 +85,75 @@ fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
         val dark = HappyTheme.colors.dark
         LaunchedEffect(dark) { onDarkThemeChange(dark) }
 
+        val agent by graph.openAgentId.collectAsStateWithLifecycle()
         val signedIn = auth as? AuthState.SignedIn
         PaywallHost(graph.purchases)
-        key(signedIn != null) {
+        // Each account has its own back stack, replaced when another opens.
+        key(signedIn?.let { accountId(it.credentials) }, agent) {
             val nav = rememberNavController()
             val openSession = { id: String -> nav.navigate(SessionRoute(id)) }
             val troubleshoot = { nav.navigate(TroubleshootRoute) }
-            // The tablet shell (sidebar beside the stack) or, on a phone, just the stack.
-            TabletShell(graph, nav, signedIn = signedIn != null, onOpenSession = openSession, onTroubleshoot = troubleshoot) {
-                NavHost(navController = nav, startDestination = if (signedIn != null) HomeRoute else WelcomeRoute) {
-                    composable<WelcomeRoute> { Welcome(graph, nav) }
-                    composable<ServerRoute> { Server(graph, nav) }
-                    composable<RestoreManualRoute> { RestoreManual(graph, nav) }
-                    homeRoutes(
-                        graph,
-                        nav,
-                        onOpenSession = openSession,
-                        onTroubleshoot = troubleshoot,
-                    )
-                    settingsRoutes(graph, nav)
-                    onboardingRoutes(graph, nav, onOpenMachine = { id -> nav.navigate(MachineRoute(id)) })
-                    connectRoutes(graph, nav)
-                    chatRoutes(graph, nav, onInfo = { id -> nav.navigate(SessionInfoRoute(id)) })
-                    filesRoutes(graph, nav)
+            val connectAgent = remember(nav) { { code: String -> nav.connectAgent(graph, code) } }
+            // Every scanner, signed in or out, sends happy://direct? codes here.
+            CompositionLocalProvider(LocalAgentPairing provides connectAgent) {
+              // Add (the first screen's Connect, the account menu's Add): scan, then route the code.
+              val add = rememberAddFlow(graph)
+              CompositionLocalProvider(LocalAddFlow provides add) {
+                // The tablet shell (sidebar beside the stack) or, on a phone, just the stack.
+                TabletShell(graph, nav, signedIn = signedIn != null, onOpenSession = openSession, onTroubleshoot = troubleshoot) {
+                    val start: Any = when {
+                        agent != null -> AgentHomeRoute
+                        signedIn != null -> HomeRoute
+                        else -> StartRoute
+                    }
+                    val motion = rememberNavMotion()
+                    NavHost(
+                        navController = nav,
+                        startDestination = start,
+                        enterTransition = motion.enter,
+                        exitTransition = motion.exit,
+                        popEnterTransition = motion.popEnter,
+                        popExitTransition = motion.popExit,
+                        predictivePopEnterTransition = { _ -> motion.popEnter.invoke(this) },
+                        predictivePopExitTransition = { _ -> motion.popExit.invoke(this) },
+                    ) {
+                        composable<StartRoute> { Start(graph, nav, add) }
+                        composable<AgentHomeRoute> {
+                            agent?.let { id ->
+                                AgentHome(
+                                    graph,
+                                    id,
+                                    onOpenConversation = { agentId -> nav.openConversation(id, agentId) },
+                                    onCompose = { nav.composeConversation(id) },
+                                    onSettings = { nav.navigate(AgentConnectionSettingsRoute(id)) },
+                                    onAppearance = { nav.navigate(AppearanceRoute) },
+                                )
+                            }
+                        }
+                        composable<ServerRoute> { Server(graph, nav) }
+                        composable<RestoreManualRoute> { RestoreManual(graph, nav) }
+                        homeRoutes(
+                            graph,
+                            nav,
+                            onOpenSession = openSession,
+                            onTroubleshoot = troubleshoot,
+                        )
+                        settingsRoutes(graph, nav)
+                        onboardingRoutes(graph, nav, onOpenMachine = { id -> nav.navigate(MachineRoute(id)) })
+                        connectRoutes(graph, nav)
+                        chatRoutes(graph, nav, onInfo = { id -> nav.navigate(SessionInfoRoute(id)) })
+                        filesRoutes(graph, nav)
+                        agentConnectionRoutes(graph, nav)
+                        agentHomeRoutes(graph, nav, onAppearance = { nav.navigate(AppearanceRoute) })
+                        conversationRoutes(graph, nav)
+                    }
                 }
+                DeepLinkEffect(nav, signedIn = signedIn != null, onOpenSession = { id -> nav.navigate(SessionRoute(id)) })
+              }
             }
-            DeepLinkEffect(nav, signedIn = signedIn != null, onOpenSession = { id -> nav.navigate(SessionRoute(id)) })
             PushRegistrationEffect(graph)
         }
     } } } }
-}
-
-/**
- * The signed-out start (index.tsx NotAuthenticated). A failed "Create
- * account" shows "Error / Authentication failed"; happy-app only logs it and
- * the button stops spinning, which leaves the user with no word of why.
- */
-@Composable
-private fun Welcome(graph: AppGraph, nav: NavHostController) {
-    val scope = rememberCoroutineScope()
-    val serverUrl by graph.serverConfig.url.collectAsStateWithLifecycle()
-    val customServerLabel = remember(serverUrl) { graph.serverConfig.customHostLabel }
-    var creating by remember { mutableStateOf(false) }
-    var alert by remember { mutableStateOf<Alert?>(null) }
-    val failed = Alert(
-        stringResource(R.string.common_error),
-        stringResource(R.string.errors_authentication_failed),
-        listOf(AlertButton(stringResource(R.string.common_ok))),
-    )
-
-    WelcomeScreen(
-        customServerLabel = customServerLabel,
-        creatingAccount = creating,
-        onCreateAccount = {
-            scope.launch {
-                creating = true
-                try {
-                    graph.auth.createAccount()
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    alert = failed
-                } finally {
-                    creating = false
-                }
-            }
-        },
-        onRestore = { nav.navigate(RestoreRoute) },
-        onServer = { nav.navigate(ServerRoute) },
-    )
-    alert?.let { HappyAlert(it, onDismiss = { alert = null }) }
 }
 
 @Composable

@@ -41,6 +41,8 @@ public enum AgentInputControl: Sendable {
     case permission
     case model
     case effort
+    /// The compact card's options button, which holds the chips.
+    case options
 
     init(_ chip: AgentInputChip) {
         switch chip {
@@ -128,6 +130,7 @@ extension UIMenu {
                         state: option.isChecked || option.key == model.selectedKey ? .on : .off
                     ) { _ in onSelect(option.key) }
                     action.subtitle = option.subtitle
+                    action.accessibilityIdentifier = option.key
                     return action
                 })
             }
@@ -239,6 +242,11 @@ public struct AgentInputCardConfiguration: Equatable, Sendable {
     /// text is past the lines the card shows; the delegate hears
     /// `agentInputCardDidPressExpand`. The compact card only.
     public var showsExpand: Bool
+    /// The text in the action row and the chips behind an options button,
+    /// for a screen too short for the card (`AgentInputCardLayout`'s
+    /// `compact`). Its owner decides from `restingHeight(fitting:)`. The
+    /// flat panel ignores it.
+    public var compact: Bool
 
     public init(
         placeholder: String,
@@ -259,7 +267,8 @@ public struct AgentInputCardConfiguration: Equatable, Sendable {
         refusesControls: Bool = false,
         zenMode: Bool = false,
         desktop: AgentInputDesktopConfiguration? = nil,
-        showsExpand: Bool = false
+        showsExpand: Bool = false,
+        compact: Bool = false
     ) {
         self.placeholder = placeholder
         self.isEditable = isEditable
@@ -280,6 +289,7 @@ public struct AgentInputCardConfiguration: Equatable, Sendable {
         self.zenMode = zenMode
         self.desktop = desktop
         self.showsExpand = showsExpand
+        self.compact = compact
     }
 }
 
@@ -381,6 +391,9 @@ public final class AgentInputCardView: UIView {
     private let modelChip = ComposerChipButton(chip: .model)
     private let separator = UILabel()
     private let effortChip = ComposerChipButton(chip: .effort)
+    /// The compact card's button for the chips.
+    private let optionsButton = ComposerOptionsButton()
+    private var menuPresenter: ComposerMenuPresenter?
     private let primaryHost = PassthroughView()
     private let primaryButton = ComposerPrimaryButton()
     private var installedDesktopControls: AgentInputDesktopControlsView?
@@ -389,6 +402,7 @@ public final class AgentInputCardView: UIView {
     private var desktopControls: AgentInputDesktopControlsView {
         if let installedDesktopControls { return installedDesktopControls }
         let controls = AgentInputDesktopControlsView()
+        controls.onOpenSettings = { [weak self] in self?.showMenu(chip: nil) }
         controls.onSelect = { [weak self] key, chip in
             guard let self else { return }
             self.delegate?.agentInputCard(self, didSelect: key, in: chip)
@@ -530,9 +544,30 @@ public final class AgentInputCardView: UIView {
                 guard let self else { return }
                 self.delegate?.agentInputCard(self, didOpenMenuIn: which)
             }
+            chip.onOpenMenu = { [weak self] which in self?.showMenu(chip: which) }
             middle.addSubview(chip)
         }
         middle.addSubview(separator)
+        optionsButton.accessibilityLabel = Strings.Composer.options
+        optionsButton.accessibilityIdentifier = "composer-options"
+        optionsButton.onSelect = { [weak self] key, which in
+            guard let self else { return }
+            self.delegate?.agentInputCard(self, didSelect: key, in: which)
+        }
+        optionsButton.onPress = { [weak self] which in
+            guard let self else { return }
+            self.delegate?.agentInputCard(self, didPress: which)
+        }
+        optionsButton.onMenu = { [weak self] which in
+            guard let self else { return }
+            self.delegate?.agentInputCard(self, didOpenMenuIn: which)
+        }
+        optionsButton.onRefuse = { [weak self] in
+            guard let self else { return }
+            self.delegate?.agentInputCardDidRefuse(self, control: .options)
+        }
+        optionsButton.onOpen = { [weak self] in self?.showMenu(chip: nil) }
+        actionsGroup.addSubview(optionsButton)
 
         primaryButton.addTarget(self, action: #selector(primaryTapped), for: .touchUpInside)
         primaryHost.addSubview(primaryButton)
@@ -553,6 +588,7 @@ public final class AgentInputCardView: UIView {
 
     public override func didMoveToWindow() {
         super.didMoveToWindow()
+        if window == nil { menuPresenter?.close(); menuPresenter = nil }
         textSizeMayHaveChanged()
     }
 
@@ -724,18 +760,65 @@ public final class AgentInputCardView: UIView {
     }
 
     public func blur() {
+        closeMenus()
         textView.resignFirstResponder()
     }
 
+    func closeMenus() {
+        menuPresenter?.close()
+        menuPresenter = nil
+    }
+
+    private func showMenu(chip: AgentInputChip?) {
+        var responder: UIResponder? = self
+        var host: UIView?
+        while let current = responder {
+            if let controller = current as? UIViewController { host = controller.view; break }
+            responder = current.next
+        }
+        guard let host else { return }
+        menuPresenter?.close()
+        let presenter = ComposerMenuPresenter(card: self, chips: menuChips)
+        presenter.onSelect = { [weak self] key, chip in
+            guard let self else { return }
+            delegate?.agentInputCard(self, didSelect: key, in: chip)
+        }
+        presenter.onPress = { [weak self] chip in
+            guard let self else { return }
+            delegate?.agentInputCard(self, didPress: chip)
+        }
+        presenter.onMenu = { [weak self] chip in
+            guard let self else { return }
+            delegate?.agentInputCard(self, didOpenMenuIn: chip)
+        }
+        menuPresenter = presenter
+        presenter.show(in: host, chip: chip)
+    }
+
+    private var menuChips: [(AgentInputChip, AgentInputChipConfiguration)] {
+        let chips: [(AgentInputChip, AgentInputChipConfiguration)] = [configuration.model.map { (.model, $0) }, configuration.effort.map { (.effort, $0) }].compactMap { $0 }
+        guard let settings = configuration.desktop?.settings else { return chips }
+        return settings.sections.filter { $0.chip != .permission }.map { section in
+            if let existing = chips.first(where: { $0.0 == section.chip }) { return existing }
+            return (section.chip, AgentInputChipConfiguration(content: .label(section.title), accessibilityLabel: section.title, menu: AgentInputMenu(sections: [.init(options: section.options)], selectedKey: section.selectedKey)))
+        }
+    }
+
     /// Where a chip stands, in `view`: what its owner's picker opens over.
-    /// Nil while the chip is hidden.
+    /// Nil while the chip is hidden. On the compact card, the options
+    /// button that holds it.
     public func chipFrame(_ chip: AgentInputChip, in view: UIView) -> CGRect? {
+        if configuration.desktop != nil { return installedDesktopControls?.settingsFrame(in: view) }
+        if isCompact {
+            guard !optionsButton.isHidden, optionsButton.window != nil else { return nil }
+            return optionsButton.convert(optionsButton.bounds, to: view)
+        }
         let button = switch chip {
         case .permission: permissionChip
         case .model: modelChip
         case .effort: effortChip
         }
-        guard !button.isHidden, button.window != nil else { return nil }
+        guard !middle.isHidden, !button.isHidden, button.window != nil else { return nil }
         return button.convert(button.bounds, to: view)
     }
 
@@ -815,6 +898,20 @@ public final class AgentInputCardView: UIView {
         desktopLayout(width: width)?.size.height ?? layout(width: width).size.height
     }
 
+    /// The full card's height at `width` with one line of text: what an
+    /// owner decides `compact` from. Neither the text nor `compact` moves
+    /// it, so the decision can't undo itself. Measures nothing.
+    public func restingHeight(fitting width: CGFloat) -> CGFloat {
+        guard configuration.desktop == nil else { return height(fitting: width) }
+        syncTextSize()
+        return AgentInputCardLayout(layoutInput(width: width, textContentHeight: 0, hasText: false, compact: false)).size.height
+    }
+
+    /// The compact card is drawn (never the flat panel).
+    private var isCompact: Bool {
+        configuration.compact && configuration.desktop == nil
+    }
+
     /// What `AgentInputLayout` places between its rows.
     public func panelInput(width: CGFloat) -> AgentInputLayout.Panel {
         if let input = desktopLayoutInput(width: width) {
@@ -844,15 +941,16 @@ public final class AgentInputCardView: UIView {
                 maxHeight: M.inputMaxHeight
             )
         } else {
-            let contentWidth = max(0, width - 2 * hairline - 2 * metrics.shellInset)
-            let insets = AgentInputInsets(shellInset: metrics.shellInset, actionSize: metrics.actionSize, addIconSize: metrics.addIconSize)
+            let compact = isCompact
+            // The text's width needs only which buttons stand beside it.
+            let columns = layoutInput(width: width, textContentHeight: 0, hasText: false, compact: compact, measuresChips: false)
             key = ComposerTextHeights.Key(
-                width: max(0, contentWidth - insets.inputContainerPaddingLeft - insets.inputContainerPaddingRight),
+                width: AgentInputCardLayout.textWidth(columns),
                 style: inputStyle,
                 lineHeight: inputLineHeight,
                 paddingTop: metrics.inputPaddingTop,
                 paddingBottom: metrics.inputPaddingBottom,
-                maxHeight: metrics.inputMaxHeight
+                maxHeight: compact ? AgentInputCardLayout.compactTextCap(lineHeight: inputLineHeight, metrics: metrics) : metrics.inputMaxHeight
             )
         }
         return ComposerTextHeights.Stamp(key: key, revision: textRevision, generation: textGeneration)
@@ -1012,7 +1110,7 @@ public final class AgentInputCardView: UIView {
             hasText: textView.hasText,
             lineHeight: inputLineHeight,
             inputMinHeight: config.inputMinHeight,
-            showsSettings: desktop.settings != nil,
+            showsSettings: desktop.settings?.sections.contains(where: { $0.chip != .permission }) == true,
             stopContentWidth: desktop.showsStop ? desktopControls.stopContentWidth : nil,
             imageContentWidth: config.showsAdd ? desktopControls.imageContentWidth : nil,
             zenMode: config.zenMode
@@ -1020,26 +1118,36 @@ public final class AgentInputCardView: UIView {
     }
 
     func layoutInput(width: CGFloat) -> AgentInputCardLayout.Input {
-        let config = configuration
         // First: it takes up the text size the chips are measured at.
         let height = textHeight(cardWidth: width, desktop: false)
+        return layoutInput(width: width, textContentHeight: height, hasText: textView.hasText, compact: isCompact)
+    }
+
+    /// `measuresChips: false` leaves the chips' labels unmeasured, for
+    /// what needs only which chips there are.
+    private func layoutInput(width: CGFloat, textContentHeight: CGFloat, hasText: Bool, compact: Bool, measuresChips: Bool = true) -> AgentInputCardLayout.Input {
+        let config = configuration
+        func chip(_ button: ComposerChipButton) -> AgentInputCardLayout.Chip {
+            .init(labelSize: measuresChips ? button.contentSize : .zero)
+        }
         return AgentInputCardLayout.Input(
             width: width,
             metrics: metrics,
             borderWidth: hairline,
             attachmentCount: config.attachments.count,
-            textContentHeight: height,
-            hasText: textView.hasText,
+            textContentHeight: textContentHeight,
+            hasText: hasText,
             lineHeight: textScale == nil ? nil : inputLineHeight,
             inputMinHeight: config.inputMinHeight,
             showsAdd: config.showsAdd,
-            permission: config.permission.map { _ in .init(labelSize: permissionChip.contentSize) },
-            model: config.model.map { _ in .init(labelSize: modelChip.contentSize) },
+            permission: nil,
+            model: config.model.map { _ in chip(modelChip) },
             modelIsMenu: config.model?.menu != nil,
-            effort: config.effort.map { _ in .init(labelSize: effortChip.contentSize) },
-            separator: config.effort == nil ? .zero : separator.sizeThatFits(.zero),
+            effort: config.effort.map { _ in chip(effortChip) },
+            separator: config.effort == nil || !measuresChips ? .zero : separator.sizeThatFits(.zero),
             zenMode: config.zenMode,
-            offersExpand: config.showsExpand
+            offersExpand: config.showsExpand,
+            compact: compact
         )
     }
 
@@ -1049,6 +1157,7 @@ public final class AgentInputCardView: UIView {
 
     public override func layoutSubviews() {
         super.layoutSubviews()
+        defer { menuPresenter?.follow() }
         surface.frame = bounds
         material.frame = surface.bounds
         frosted.frame = surface.bounds
@@ -1070,10 +1179,18 @@ public final class AgentInputCardView: UIView {
         } else {
             attachmentStrip.isHidden = true
         }
+        let padded = textView.textContainerInset.top != layout.textPaddingTop || textView.textContainerInset.bottom != layout.textPaddingBottom
+        if padded {
+            textView.textContainerInset.top = layout.textPaddingTop
+            textView.textContainerInset.bottom = layout.textPaddingBottom
+        }
         textView.setLayoutFrame(layout.text)
         if textView.isScrollEnabled != layout.textScrolls {
             textView.isScrollEnabled = layout.textScrolls
         }
+        // The padding went or came back under a scrolled text: back to the
+        // caret, which rests on a whole line.
+        if padded, layout.textScrolls { textView.scrollRangeToVisible(textView.selectedRange) }
         setTextTrailingInset(layout.textTrailingInset)
         showExpand(at: layout.expand)
         placeholderLabel.setLayoutFrame(CGRect(
@@ -1085,6 +1202,13 @@ public final class AgentInputCardView: UIView {
         if let add = layout.add {
             addButton.setLayoutFrame(add)
         }
+        optionsButton.isHidden = layout.options == nil
+        if let options = layout.options {
+            optionsButton.setLayoutFrame(options)
+        }
+        // The chips stay in the hierarchy, unseen, while the options
+        // button holds them.
+        middle.isHidden = isCompact
         middle.setLayoutFrame(layout.middle)
         let content = layout.middleContent
         place(permissionChip, content.permission)
@@ -1106,6 +1230,7 @@ public final class AgentInputCardView: UIView {
         typealias M = AgentInputDesktopLayout.Metrics
         layer.shadowPath = nil
         expandButton.isHidden = true
+        optionsButton.isHidden = true
         setTextTrailingInset(0)
         if let strip = layout.attachments {
             attachmentStrip.isHidden = false
@@ -1203,10 +1328,14 @@ public final class AgentInputCardView: UIView {
         for chip in [permissionChip, modelChip, effortChip] {
             chip.refuses = config.refusesControls
         }
-        permissionChip.configure(config.zenMode ? nil : config.permission)
+        permissionChip.configure(nil)
         modelChip.configure(config.zenMode ? nil : config.model)
         effortChip.configure(config.zenMode ? nil : config.effort)
         separator.isHidden = config.zenMode || config.effort == nil
+        optionsButton.refuses = config.refusesControls
+        optionsButton.configure(config.zenMode ? [] : [config.model.map { (.model, $0) }, config.effort.map { (.effort, $0) }].compactMap { $0 })
+        if config.refusesControls || config.zenMode { menuPresenter?.close(); menuPresenter = nil }
+        else { menuPresenter?.update(chips: menuChips) }
 
         primaryButton.configure(
             action: config.primaryAction,
@@ -1233,6 +1362,7 @@ public final class AgentInputCardView: UIView {
             || previous.model != config.model
             || previous.effort != config.effort
             || previous.zenMode != config.zenMode
+            || previous.compact != config.compact
             || Self.panelShape(previous.desktop) != Self.panelShape(config.desktop) {
             // Chips that come with the session's record, a picture, the
             // panel: the card takes its new height at once. Only what is
@@ -1254,7 +1384,7 @@ public final class AgentInputCardView: UIView {
         let isDesktop = configuration.desktop != nil
         material.isHidden = isDesktop
         frosted.isHidden = isDesktop
-        middle.isHidden = isDesktop
+        middle.isHidden = isDesktop || isCompact
         primaryHost.isHidden = isDesktop
         installedDesktopControls?.isHidden = !isDesktop
         surface.layer.cornerRadius = isDesktop ? AgentInputDesktopLayout.Metrics.panelRadius : metrics.shellRadius
@@ -1427,6 +1557,7 @@ final class ComposerChipButton: UIButton {
     var onPress: ((AgentInputChip) -> Void)?
     /// The chip's menu opened.
     var onMenu: ((AgentInputChip) -> Void)?
+    var onOpenMenu: ((AgentInputChip) -> Void)?
     /// Presses shake the chip instead of opening its menu.
     var refuses = false {
         didSet {
@@ -1450,7 +1581,7 @@ final class ComposerChipButton: UIButton {
         label.isUserInteractionEnabled = false
         addSubview(label)
         addSubview(iconView)
-        showsMenuAsPrimaryAction = true
+        showsMenuAsPrimaryAction = false
         // The menus list their rows top-down in our order (SwiftUI's
         // `.menuOrder(.fixed)`, which happy-app gets by pre-reversing).
         preferredMenuElementOrder = .fixed
@@ -1468,6 +1599,8 @@ final class ComposerChipButton: UIButton {
             onRefuse?(chip)
         } else if chipConfiguration?.opensPicker == true {
             onPress?(chip)
+        } else if chipConfiguration?.menu != nil {
+            onOpenMenu?(chip)
         }
     }
 
@@ -1524,10 +1657,8 @@ final class ComposerChipButton: UIButton {
     private func applyMenu() {
         let model = chipConfiguration?.menu
         let opensPicker = chipConfiguration?.opensPicker == true
-        menu = refuses || opensPicker ? nil : model.map(makeMenu)
-        // Open while it changed (usage read as it opened): it shows the new one.
-        if let menu { contextMenuInteraction?.updateVisibleMenu { menu.replacing($0) } }
-        showsMenuAsPrimaryAction = !refuses && !opensPicker
+        menu = nil
+        showsMenuAsPrimaryAction = false
         isEnabled = refuses || opensPicker || model != nil
     }
 
@@ -1549,6 +1680,87 @@ final class ComposerChipButton: UIButton {
     /// `hitSlop={6}`.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         bounds.insetBy(dx: -6, dy: -6).contains(point)
+    }
+}
+
+/// The compact card's options button: the chips, which the full card shows
+/// in its row, as one native menu, each as its chip would act. A chip with
+/// a menu is a submenu named for the chip and what it is set to; opening
+/// it is that chip's menu opening. One that opens its owner's picker is a
+/// row that does. One with neither is a dimmed row. Under
+/// `refusesControls` a press shakes it, as the chips would.
+final class ComposerOptionsButton: UIButton {
+    var onSelect: ((String, AgentInputChip) -> Void)?
+    var onPress: ((AgentInputChip) -> Void)?
+    var onMenu: ((AgentInputChip) -> Void)?
+    var onRefuse: (() -> Void)?
+    var onOpen: (() -> Void)?
+    var refuses = false {
+        didSet {
+            guard refuses != oldValue else { return }
+            applyMenu()
+        }
+    }
+    private var chips: [(AgentInputChip, AgentInputChipConfiguration)] = []
+    private let iconView = IconView(.ionicons("options-outline"), size: AgentInputCardLayout.Metrics.expandIconSize, tint: Palette.text)
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        iconView.isUserInteractionEnabled = false
+        addSubview(iconView)
+        // Listed top-down in the row's order, as the chips' menus are.
+        preferredMenuElementOrder = .fixed
+        addTarget(self, action: #selector(tapped), for: .touchUpInside)
+        isHidden = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    func configure(_ chips: [(AgentInputChip, AgentInputChipConfiguration)]) {
+        guard !chips.elementsEqual(self.chips, by: { $0.0 == $1.0 && $0.1 == $1.1 }) else { return }
+        self.chips = chips
+        applyMenu()
+    }
+
+    @objc private func tapped() {
+        if refuses {
+            AgentInputCardView.shake(self, .refusal)
+            onRefuse?()
+        } else if !chips.isEmpty {
+            onOpen?()
+        }
+    }
+
+    private func applyMenu() {
+        menu = nil
+        showsMenuAsPrimaryAction = false
+    }
+
+    private func makeMenu() -> UIMenu {
+        UIMenu(children: chips.map { chip, configuration in
+            if configuration.opensPicker {
+                return UIAction(title: configuration.accessibilityLabel) { [weak self] _ in self?.onPress?(chip) }
+            }
+            guard let model = configuration.menu else {
+                return UIAction(title: configuration.accessibilityLabel, attributes: .disabled) { _ in }
+            }
+            let items = UIMenu(model) { [weak self] key in self?.onSelect?(key, chip) }.children
+            // Its rows load as the submenu opens: the chip's menu opening.
+            let opening = UIDeferredMenuElement.uncached { [weak self] completion in
+                self?.onMenu?(chip)
+                completion(items)
+            }
+            return UIMenu(title: configuration.accessibilityLabel, children: [opening])
+        })
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        layer.cornerRadius = bounds.height / 2
+        iconView.frame = bounds
     }
 }
 
@@ -1640,7 +1852,7 @@ final class ComposerPrimaryButton: ComposerPressableButton {
         case .blocked:
             backgroundColor = UIColor(Palette.surfaceHigh)
             layer.borderWidth = 1
-            layer.borderColor = UIColor(Palette.divider).resolvedColor(with: traitCollection).cgColor
+            layer.borderColor = UIColor(Palette.legacyDivider).resolvedColor(with: traitCollection).cgColor
             iconView.tintColor = UIColor(Palette.textSecondary)
         case .send, .voice:
             backgroundColor = UIColor(Palette.surfaceHighest)
@@ -1782,7 +1994,7 @@ final class AttachmentThumbnailView: UIView {
     }
 
     private func applyColors() {
-        ring.layer.borderColor = UIColor(Palette.divider).resolvedColor(with: traitCollection).cgColor
+        ring.layer.borderColor = UIColor(Palette.legacyDivider).resolvedColor(with: traitCollection).cgColor
     }
 
     private func load() {

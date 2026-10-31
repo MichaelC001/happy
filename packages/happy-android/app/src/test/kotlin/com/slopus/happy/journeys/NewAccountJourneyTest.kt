@@ -3,6 +3,7 @@ package com.slopus.happy.journeys
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -23,6 +24,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -34,7 +36,7 @@ import org.robolectric.annotation.GraphicsMode
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * Journey 1, a new account: Create account lands on Link Your Computer;
+ * Journey 1, a new account: a new account lands on Link Your Computer;
  * the computer the user links appears and home offers the dock; the dock
  * starts a Claude session on it with a prompt and a pasted image, and the
  * chat opens with that first message delivered to the server, image and all.
@@ -58,8 +60,9 @@ class NewAccountJourneyTest {
         graph = journey.graph()
         rule.setContent { HappyApp(graph) }
 
-        // Welcome → Create account → Link Your Computer.
-        rule.onNodeWithText("Create account").performClick()
+        // A new account: home, with its link state (no computer yet) under the usual header.
+        // The first screen makes no empty account; make one directly, as a terminal code would.
+        runBlocking { graph.auth.createAccount() }
         rule.waitFor(HomeTags.LINK)
         rule.waitForText("Link Your Computer")
         rule.assertActionsLabelled()
@@ -80,8 +83,9 @@ class NewAccountJourneyTest {
         }
         journey.machine(updatedAt = 10)
         server.dropSockets()
-        rule.waitFor(HomeDockTags.CAPSULE, 15_000)
-        rule.node(HomeTags.LINK).assertDoesNotExist()
+        // The dock was there all along; the link state giving way is what says the computer arrived.
+        rule.waitUntilDoesNotExist(hasTestTag(HomeTags.LINK), 15_000)
+        rule.waitFor(HomeDockTags.CAPSULE)
 
         // The dock: a prompt and an image from the clipboard.
         rule.node(HomeDockTags.CAPSULE).performClick()

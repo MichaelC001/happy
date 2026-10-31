@@ -21,7 +21,7 @@ final class StoryArtifactPageView: UIView, WKNavigationDelegate {
         didSet { web?.isUserInteractionEnabled = interactive }
     }
 
-    private let client: DirectAgentClient
+    private let client: AgentClient
     let artifactId: String
     let version: Int?
     private var web: WKWebView?
@@ -29,7 +29,7 @@ final class StoryArtifactPageView: UIView, WKNavigationDelegate {
     /// The CSS viewport the page lays out in.
     var viewport = CGSize(width: 360, height: 640) { didSet { if viewport != oldValue { setNeedsLayout() } } }
 
-    init(client: DirectAgentClient, artifactId: String, version: Int?) {
+    init(client: AgentClient, artifactId: String, version: Int?) {
         self.client = client
         self.artifactId = artifactId
         self.version = version
@@ -83,12 +83,12 @@ final class StoryArtifactPageView: UIView, WKNavigationDelegate {
     private func show(version: Int, entry: String) {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
-        configuration.setURLSchemeHandler(StemCellArtifactFiles(client: client, artifactId: artifactId), forURLScheme: StemCellArtifactFiles.scheme)
+        configuration.setURLSchemeHandler(ArtifactFiles(client: client, artifactId: artifactId), forURLScheme: ArtifactFiles.scheme)
         configuration.allowsInlineMediaPlayback = true
         let content = configuration.userContentController
-        content.addUserScript(WKUserScript(source: StemCellInlinePageView.viewportScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        content.addUserScript(WKUserScript(source: InlinePageView.viewportScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         // A story is drawn dark, whatever the phone's scheme.
-        content.addUserScript(WKUserScript(source: StemCellInlinePageView.hostScript(UITraitCollection(userInterfaceStyle: .dark)), injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        content.addUserScript(WKUserScript(source: InlinePageView.hostScript(UITraitCollection(userInterfaceStyle: .dark)), injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let web = WKWebView(frame: CGRect(origin: .zero, size: viewport), configuration: configuration)
         web.navigationDelegate = self
         web.isOpaque = false
@@ -100,8 +100,8 @@ final class StoryArtifactPageView: UIView, WKNavigationDelegate {
         web.accessibilityIdentifier = "story-artifact-web"
         addSubview(web)
         self.web = web
-        let path = entry.split(separator: "/").map { StemCellArtifactFiles.escape(String($0)) }.joined(separator: "/")
-        if let url = URL(string: "\(StemCellArtifactFiles.scheme)://artifact/\(version)/\(path)") { web.load(URLRequest(url: url)) }
+        let path = entry.split(separator: "/").map { ArtifactFiles.escape(String($0)) }.joined(separator: "/")
+        if let url = URL(string: "\(ArtifactFiles.scheme)://artifact/\(version)/\(path)") { web.load(URLRequest(url: url)) }
         setNeedsLayout()
     }
 
@@ -117,7 +117,7 @@ final class StoryArtifactPageView: UIView, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
-        action.request.url?.scheme == StemCellArtifactFiles.scheme ? .allow : .cancel
+        action.request.url?.scheme == ArtifactFiles.scheme ? .allow : .cancel
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -141,7 +141,7 @@ final class StoryArtifactTouches: NSObject, UIGestureRecognizerDelegate {
 final class StoryArtifactOverlayView: StoryOverlayView {
     let page: StoryArtifactPageView
 
-    init(_ overlay: StoryOverlay, client: DirectAgentClient) {
+    init(_ overlay: StoryOverlay, client: AgentClient) {
         guard case .artifact(_, let artifactId, let version, _, _) = overlay else { fatalError("not an artifact overlay") }
         page = StoryArtifactPageView(client: client, artifactId: artifactId, version: version)
         super.init(overlay)
