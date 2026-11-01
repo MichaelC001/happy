@@ -102,9 +102,10 @@ extension ChatTextStyle {
 /// Markdown spans as one attributed paragraph in a block's style: bold and
 /// italic swap the face, inline code takes the mono style, links are
 /// underlined and carry their URL (`RenderSpans`). In an `environment`,
-/// every face is at its text size.
+/// every face is at its text size. `everyLink` makes any address a link,
+/// for a document whose screen resolves its relative ones.
 enum ChatSpans {
-    static func string(_ spans: [MarkdownSpan], style: ChatTextStyle, color: ColorToken, in environment: TextEnvironment?) -> NSAttributedString {
+    static func string(_ spans: [MarkdownSpan], style: ChatTextStyle, color: ColorToken, in environment: TextEnvironment?, everyLink: Bool = false) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let uiColor = UIColor(color)
         for span in spans {
@@ -127,7 +128,7 @@ enum ChatSpans {
             }
             var attributes = style.attributes(color: uiColor, font: spanStyle.font(in: environment), in: environment)
             // An http(s) link, or a reference this phone wrote (never one an agent typed).
-            if let url = span.url, LegacyMarkdown.isHTTPLink(url) || HappyReferences.reference(link: url) != nil {
+            if let url = span.url, (everyLink && !url.isEmpty) || LegacyMarkdown.isHTTPLink(url) || HappyReferences.reference(link: url) != nil {
                 attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
                 attributes[.chatLink] = url
             }
@@ -384,7 +385,7 @@ final class ChatOffMainTextView: ChatTextView {
         // On screen with nothing drawn: now. Words that grew, as a reply
         // streams, keep showing the last of them (pinned top-left) until
         // the rest is drawn.
-        if layer.contents == nil, let window, convert(bounds, to: window).intersects(window.bounds) {
+        if layer.contents == nil, let window, !isInHiddenView, convert(bounds, to: window).intersects(window.bounds) {
             layer.contents = Self.draw(layout, size: size, scale: scale, traits: traits)
             drawnWidth = size.width
             return
@@ -396,6 +397,13 @@ final class ChatOffMainTextView: ChatTextView {
             self.layer.contents = image
             self.drawnWidth = size.width
         }
+    }
+
+    /// It or a view it is in is hidden, wherever it sits: UltraList builds
+    /// the next row ahead of a scroll hidden at its container's top, on
+    /// screen, and drawing its words then held a drag's frame 10 ms.
+    private var isInHiddenView: Bool {
+        sequence(first: self as UIView, next: \.superview).contains { $0.isHidden }
     }
 
     private nonisolated static func draw(_ layout: ChatTextLayout, size: CGSize, scale: CGFloat, traits: UITraitCollection) -> CGImage? {

@@ -5,7 +5,7 @@ import UIKit
 
 /// WorktreeTabStrip.tsx: grouped by project, a chat is one tab of its
 /// checkout, and this is where the checkout's other chats are reached. It
-/// hangs under the header in a capsule of the header's own glass (a solid
+/// hangs under the header in a capsule of the system's Liquid Glass (a solid
 /// surface on a tablet), scrolls sideways, and ends in a hairline and `+`.
 ///
 /// The screen owns what the tabs mean: a tap asks it to switch in place, a
@@ -72,7 +72,7 @@ final class ChatWorktreeTabStrip: UIView {
     }
     /// The last placement, for tests.
     private(set) var layout: WorktreeTabStripLayout?
-    private let glassView = HeaderGlassView()
+    private let glassView = GlassCapsuleView()
     private let solidView = UIView()
     private let clip = UIView()
     private let scroller = TabScroller()
@@ -286,7 +286,7 @@ final class ChatWorktreeTabStrip: UIView {
     private final class TabControl: UIControl {
         private(set) var item: Item?
         private var isOpen = false
-        private var label = LegacyShimmerLabel(style: TextStyles.worktreeTab)
+        private var label = ShimmerLabel(style: TextStyles.worktreeTab)
         private let dot = StatusDotView()
 
         override init(frame: CGRect) {
@@ -314,7 +314,7 @@ final class ChatWorktreeTabStrip: UIView {
         func configure(_ item: Item, selected: Bool) {
             if selected != isOpen || self.item == nil {
                 // The open tab's name is semibold.
-                let next = LegacyShimmerLabel(style: selected ? TextStyles.worktreeTabSelected : TextStyles.worktreeTab)
+                let next = ShimmerLabel(style: selected ? TextStyles.worktreeTabSelected : TextStyles.worktreeTab)
                 next.isUserInteractionEnabled = false
                 insertSubview(next, aboveSubview: label)
                 label.removeFromSuperview()
@@ -324,7 +324,11 @@ final class ChatWorktreeTabStrip: UIView {
             isOpen = selected
             label.string = item.title
             label.color = selected ? Palette.headerTint : Palette.textSecondary
-            label.isShimmering = item.shimmers
+            // Desktop's busy tab: its own colour under a pale band
+            // (`Tabs.tsx`, sheen, inherit), toward the strip under the
+            // open tab's translucent chip.
+            label.ground = UIColor(Palette.surfaceHigh)
+            label.shimmering = item.shimmers
             dot.isHidden = !Self.hasDot(item, selected: selected)
             dot.backgroundColor = UIColor(item.blocked ? Palette.sessionBlockedDot : Palette.sessionReadyDot)
             dot.isPulsing = item.blocked

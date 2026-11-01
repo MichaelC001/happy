@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import com.slopus.happy.R
 import com.slopus.happy.ui.components.Alert
 import com.slopus.happy.ui.components.AlertButton
+import com.slopus.happy.ui.components.GlassBarScreen
 import com.slopus.happy.ui.components.HappyAlert
 import com.slopus.happy.ui.components.HeaderBackButton
 import com.slopus.happy.ui.components.Header
@@ -97,7 +98,7 @@ data class SecondaryAction(val title: String, val onClick: () -> Unit, val enabl
 /**
  * The first-run template (OnboardingScreen.tsx):
  *
- *   header   OnboardingHeader
+ *   header   OnboardingHeader, on glass ([GlassBarScreen])
  *   body     one block, centred in the space left: content, primary, secondary
  *   footer   Get help, bottom right, above the navigation bar
  *
@@ -115,56 +116,58 @@ fun OnboardingScreen(
     secondary: SecondaryAction,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier = modifier.fillMaxSize().background(HappyTheme.colors.grouped.background)) {
-        header()
-        BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth().testTag(OnboardingTags.BODY)) {
-            val viewport = maxHeight
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .heightIn(min = viewport)
-                    .padding(vertical = OnboardingSpec.bodyPaddingVertical),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Spacer(modifier = Modifier.weight(1f))
+    val ground = HappyTheme.colors.grouped.background
+    GlassBarScreen(header, ground, modifier.fillMaxSize().background(ground)) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth().testTag(OnboardingTags.BODY)) {
+                val viewport = maxHeight
                 Column(
                     modifier = Modifier
-                        .widthIn(max = OnboardingSpec.blockMaxWidth)
                         .fillMaxWidth()
-                        .testTag(OnboardingTags.BLOCK)
-                        .padding(horizontal = OnboardingSpec.blockPaddingHorizontal),
+                        .verticalScroll(rememberScrollState())
+                        .heightIn(min = viewport)
+                        .padding(vertical = OnboardingSpec.bodyPaddingVertical),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Layers(
-                        reserve = listOf { LinkComputerContent() },
-                        modifier = Modifier.testTag(OnboardingTags.CONTENT),
-                        content = content,
-                    )
-                    Box(modifier = Modifier.padding(top = OnboardingSpec.primaryGap).testTag(OnboardingTags.PRIMARY)) {
-                        primary()
-                    }
-                    Layers(
-                        reserve = secondaryTitles().map { title -> { SecondaryButton(title = title, onClick = {}, enabled = false) } },
-                        modifier = Modifier.padding(top = OnboardingSpec.secondaryGap).testTag(OnboardingTags.SECONDARY),
+                    Spacer(modifier = Modifier.weight(1f))
+                    Column(
+                        modifier = Modifier
+                            .widthIn(max = OnboardingSpec.blockMaxWidth)
+                            .fillMaxWidth()
+                            .testTag(OnboardingTags.BLOCK)
+                            .padding(horizontal = OnboardingSpec.blockPaddingHorizontal),
                     ) {
-                        SecondaryButton(title = secondary.title, onClick = secondary.onClick, enabled = secondary.enabled)
+                        Layers(
+                            reserve = listOf { LinkComputerContent() },
+                            modifier = Modifier.testTag(OnboardingTags.CONTENT),
+                            content = content,
+                        )
+                        Box(modifier = Modifier.padding(top = OnboardingSpec.primaryGap).testTag(OnboardingTags.PRIMARY)) {
+                            primary()
+                        }
+                        Layers(
+                            reserve = secondaryTitles().map { title -> { SecondaryButton(title = title, onClick = {}, enabled = false) } },
+                            modifier = Modifier.padding(top = OnboardingSpec.secondaryGap).testTag(OnboardingTags.SECONDARY),
+                        ) {
+                            SecondaryButton(title = secondary.title, onClick = secondary.onClick, enabled = secondary.enabled)
+                        }
                     }
+                    Spacer(modifier = Modifier.weight(1f))
                 }
-                Spacer(modifier = Modifier.weight(1f))
             }
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = OnboardingSpec.footerPaddingHorizontal)
-                .padding(
-                    bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
-                        OnboardingSpec.footerPaddingBottom,
-                )
-                .testTag(OnboardingTags.FOOTER),
-            horizontalArrangement = Arrangement.End,
-        ) {
-            GetHelpButton()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = OnboardingSpec.footerPaddingHorizontal)
+                    .padding(
+                        bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
+                            OnboardingSpec.footerPaddingBottom,
+                    )
+                    .testTag(OnboardingTags.FOOTER),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                GetHelpButton()
+            }
         }
     }
 }

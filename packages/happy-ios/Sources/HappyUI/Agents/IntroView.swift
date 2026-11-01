@@ -4,15 +4,14 @@ import HappyIcons
 import HappyLayout
 import UIKit
 
-/// MakeStuffIntro: the work's 64px mark centred over its line. Once the
-/// conversation has begun the line keeps its place, hidden.
+/// MakeStuffIntro: the work's 64px clay icon centred over its line. Once
+/// the conversation has begun the line keeps its place, hidden. New work
+/// opens on `NewWorkPanel` instead.
 final class IntroView: UIView {
     enum Mark: Equatable {
-        case seedling(seed: String)
         case clay(String)
     }
 
-    private let seedling = MarkView()
     private let clay = UIImageView()
     private let line = UILabel()
     private var settled = false
@@ -22,7 +21,7 @@ final class IntroView: UIView {
         clay.contentMode = .scaleAspectFit
         line.attributedText = Self.centred(Strings.introLine, color: Palette.text)
         line.numberOfLines = 0
-        for view in [seedling, clay, line] { addSubview(view) }
+        for view in [clay, line] { addSubview(view) }
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
@@ -48,27 +47,8 @@ final class IntroView: UIView {
 
     func configure(_ mark: Mark, settled: Bool) {
         switch mark {
-        case .seedling(let seed):
-            seedling.seed = seed
-            seedling.isHidden = false
-            clay.isHidden = true
         case .clay(let slug):
-            let image = ClayIconImages.image(slug)
-            if clay.isHidden, !seedling.isHidden, let seed = seedling.seed, let image, HatchView.canPlay(in: self) {
-                // The seedling grows into the picture Prioritizing chose.
-                clay.image = image
-                clay.isHidden = false
-                clay.alpha = 0
-                seedling.isHidden = true
-                let hatch = HatchView(frame: seedling.frame)
-                addSubview(hatch)
-                HatchHaptics.shared.play(size: seedling.frame.width)
-                hatch.play(seed: seed, image: image) { [weak self] in self?.clay.alpha = 1 }
-            } else {
-                clay.image = image
-                clay.isHidden = false
-                seedling.isHidden = true
-            }
+            clay.image = ClayIconImages.image(slug)
         }
         self.settled = settled
         applyVisibility()
@@ -87,7 +67,6 @@ final class IntroView: UIView {
     }
 
     func place(_ layout: MakeStuffIntroLayout) {
-        seedling.frame = layout.mark
         clay.frame = layout.mark
         line.frame = layout.line
     }

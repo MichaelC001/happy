@@ -13,11 +13,22 @@ private struct GroupedHomeSockets: WebSocketConnector {
 }
 
 /// A computer with bots, tasks, Surfaces and a project, each with nested
-/// conversations.
+/// conversations. A task or bot made here (`POST /v0/tasks`, `/v0/bots`)
+/// is a row of its own each time it is asked for, so one asked for twice
+/// shows twice; given no name, it names itself after its first message, as
+/// the daemon does.
 private actor GroupedHomeTransport: AgentTransport {
     /// The cloned repo's picture, as the daemon serves it.
     let avatar: Data
     init(avatar: Data) { self.avatar = avatar }
+
+    /// Tasks and bots made here, newest first, the ones still to be named
+    /// by their first message, and the events stream to tell of them.
+    private var made: [[String: Any]] = []
+    private var madeBots: [[String: Any]] = []
+    private var unnamed: Set<String> = []
+    private var events: AsyncThrowingStream<Data, Error>.Continuation?
+    private var sequence = 1
 
     private static let now = Date().timeIntervalSince1970 * 1000
 
@@ -59,11 +70,11 @@ private actor GroupedHomeTransport: AgentTransport {
         [
             "cursor": "c1", "profile": ["userId": NSNull()],
             "userSettings": [],
-            "bots": Self.bots, "tasks": Self.tasks,
-            "taskMemberships": Self.tasks.map { ["taskId": $0["id"]!] },
+            "bots": bots, "tasks": tasks,
+            "taskMemberships": tasks.map { ["taskId": $0["id"]!] },
             "surfaces": Self.surfaces,
             "projects": [
-                ["id": "p1", "name": "happy", "status": "active", "orderKey": "a", "avatar": ["url": "/v0/projects/p1/avatar", "width": 64, "height": 64], "agents": [Self.agent("root", "Root chat")]],
+                ["id": "p1", "name": "happy", "status": "active", "orderKey": "a", "avatar": ["kind": "image", "source": "user", "thumbhash": "1QcSHQRnh493V4dIh4eXh1h4kJUI"], "agents": [Self.agent("root", "Root chat")]],
                 ["id": "p2", "name": "website", "status": "active", "orderKey": "b", "agents": []],
             ],
             "workspaces": [
@@ -72,16 +83,69 @@ private actor GroupedHomeTransport: AgentTransport {
         ]
     }
 
+    private var tasks: [[String: Any]] { made + Self.tasks }
+    private var bots: [[String: Any]] { madeBots + Self.bots }
+
+    private func tell(_ type: String, _ payload: [String: Any]) {
+        sequence += 1
+        guard let data = try? JSONSerialization.data(withJSONObject: ["type": type, "payload": payload]) else { return }
+        events?.yield(Data("id: c\(sequence)\nevent: event\ndata: ".utf8) + data + Data("\n\n".utf8))
+    }
+
     func request(method: String, path: String, credential: String, body: Data?, headers: [String: String]) async throws -> HTTP1Response {
         let route = path.split(separator: "?").first.map(String.init) ?? path
         if route == "/v0/projects/p1/avatar" { return .init(status: 200, body: avatar) }
+        let sent = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        if method == "POST", route == "/v0/tasks" || route == "/v0/bots" {
+            let bot = route == "/v0/bots"
+            let agentId = sent["agentId"] as? String ?? "made-\(made.count + madeBots.count)"
+            let name = sent["name"] as? String ?? (bot ? "New Bot" : "New Task")
+            if sent["name"] == nil { unnamed.insert(agentId) }
+            var agent = Self.agent(agentId, name, ago: 0)
+            agent["workspaceId"] = sent["workspaceId"] as? String ?? "w-\(agentId)"
+            let made: [String: Any] = ["id": sent["id"] as? String ?? agentId, "name": name, "status": "active", "agent": agent]
+            if bot {
+                madeBots.insert(made, at: 0)
+                tell("bot.created", ["bot": made])
+                return .init(status: 201, body: try JSONSerialization.data(withJSONObject: ["bot": made]))
+            }
+            self.made.insert(made, at: 0)
+            tell("task.created", ["task": made])
+            return .init(status: 200, body: try JSONSerialization.data(withJSONObject: ["task": made, "membership": ["taskId": made["id"]!]]))
+        }
+        if route.hasPrefix("/v0/agents/") {
+            let agentId = route.split(separator: "/")[2]
+            if method == "POST", route.hasSuffix("/send") {
+                // The first message names its task or bot, if it has no name.
+                if unnamed.remove(String(agentId)) != nil, let text = sent["text"] as? String {
+                    func owns(_ entry: [String: Any]) -> Bool { (entry["agent"] as? [String: Any])?["id"] as? String == String(agentId) }
+                    if let index = made.firstIndex(where: owns) {
+                        made[index]["name"] = text
+                        tell("task.updated", ["taskId": made[index]["id"]!])
+                    } else if let index = madeBots.firstIndex(where: owns) {
+                        madeBots[index]["name"] = text
+                        tell("bot.updated", ["botId": madeBots[index]["id"]!])
+                    }
+                }
+                return .init(status: 200, body: Data("{}".utf8))
+            }
+            if route.hasSuffix("/messages") { return .init(status: 200, body: Data(#"{"runs":[],"hasMore":false}"#.utf8)) }
+            if route.hasSuffix("/bootstrap") {
+                return .init(status: 200, body: try JSONSerialization.data(withJSONObject: ["agent": ["id": String(agentId), "workspaceId": "w-\(agentId)", "status": "idle"], "pending": []]))
+            }
+        }
         let object: [String: Any]
         switch route {
         case "/v0/health": object = ["ready": true, "version": ["protocol": 27], "capabilities": ["sidebarOperations": true]]
-        case "/v0/config": object = ["config": ["node": ["name": "Personal MacBook Pro"]]]
+        case "/v0/config": object = ["config": [
+            "node": ["name": "Personal MacBook Pro"],
+            "defaults": ["providerId": "claude", "modelId": "anthropic/opus-5", "permissionMode": "auto"],
+            "models": ["anthropic/opus-5": ["name": "Opus 5", "efforts": ["medium", "high"], "defaultEffort": "medium"]],
+            "providers": ["claude": ["type": "claude", "enabled": true, "models": [["id": "anthropic/opus-5", "enabled": true]]]],
+        ]]
         case "/v0/bootstrap/desktop": object = desktop()
-        case "/v0/bots": object = ["bots": Self.bots]
-        case "/v0/tasks": object = ["tasks": Self.tasks, "memberships": Self.tasks.map { ["taskId": $0["id"]!] }]
+        case "/v0/bots": object = ["bots": bots]
+        case "/v0/tasks": object = ["tasks": tasks, "memberships": tasks.map { ["taskId": $0["id"]!] }]
         case "/v0/surfaces": object = ["surfaces": Self.surfaces.map { ["id": $0["id"]!, "name": $0["name"]!, "type": $0["type"]!] }]
         default: return .init(status: 404, body: Data("{}".utf8))
         }
@@ -91,6 +155,7 @@ private actor GroupedHomeTransport: AgentTransport {
     func stream(path: String, credential: String, headers: [String: String]) throws -> HTTP1Stream {
         let (body, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
         continuation.yield(Data("event: hello\ndata: {\"cursor\":\"c1\",\"resumed\":true}\n\n".utf8))
+        events = continuation
         return .init(status: 200, body: body)
     }
     func reset() {}
@@ -100,37 +165,21 @@ private actor GroupedHomeTransport: AgentTransport {
 /// Home as the person sees it, grouped (`-screen groupedHome`): the real
 /// home screen over a computer serving bots, tasks and Surfaces with
 /// nested conversations, and a cloned repo wearing its
-/// picture. With `-storyRows`, the story rows' list alone, grouped as home
-/// draws it.
+/// picture.
 @MainActor
 final class GroupedHomeHarness {
     private var account: AccountController?
     private var home: AgentHomeViewController?
 
     init(window: UIWindow, arguments: [String]) {
-        if arguments.contains("-storyRows") {
-            let controller = UIViewController()
-            controller.view.backgroundColor = UIColor(Palette.groupedGround)
-            let sidebar = SidebarView(frame: .zero)
-            sidebar.style = .grouped
-            sidebar.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            controller.view.addSubview(sidebar)
-            window.rootViewController = controller
-            DispatchQueue.main.async {
-                sidebar.frame = controller.view.bounds.inset(by: UIEdgeInsets(top: controller.view.safeAreaInsets.top, left: 0, bottom: 0, right: 0))
-                sidebar.apply(StoryRowsHarness.rows())
-                sidebar.selectedRowId = "space:deploy"
-            }
-            return
-        }
         let bottom = arguments.contains("-bottom")
         Task {
             await open(window: window)
             // With `-bottom`, the list's end, where the projects are.
             guard bottom else { return }
             try? await Task.sleep(for: .seconds(1.5))
-            guard let list = home?.view.firstSubview(of: SidebarView.self) else { return }
-            list.setContentOffset(CGPoint(x: 0, y: max(-list.contentInset.top, list.contentSize.height + list.contentInset.bottom - list.bounds.height)), animated: false)
+            guard let list = home?.view.firstSubview(of: SidebarList.self) else { return }
+            list.setContentOffsetY(max(-list.contentInsets.top, list.edge.contentSize.height + list.contentInsets.bottom - list.bounds.height))
         }
     }
 

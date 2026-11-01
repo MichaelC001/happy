@@ -17,6 +17,7 @@ import com.slopus.happy.auth.AuthState
 import com.slopus.happy.auth.ExpoSecureStore
 import com.slopus.happy.auth.SecureStoreCredentialStore
 import com.slopus.happy.auth.SecureStoreKeys
+import com.slopus.happy.config.LiveAvatarsSetting
 import com.slopus.happy.config.LocalSettings
 import com.slopus.happy.config.ServerConfig
 import com.slopus.happy.data.HappyDatabase
@@ -35,6 +36,7 @@ import com.slopus.happy.connection.PairingFlow
 import com.slopus.happy.connection.TailcatTransport
 import com.slopus.happy.sync.AccountSync
 import com.slopus.happy.ui.changelog.ChangelogReadMarker
+import com.slopus.happy.ui.home.HomeServices
 import com.slopus.happy.ui.home.NewSessionDraftStore
 import com.slopus.happy.ui.home.PrefsReviewStamps
 import com.slopus.happy.voice.ElevenLabsTransport
@@ -99,6 +101,9 @@ class AppGraph(
         defaultServerUrl,
     )
     val localSettings = LocalSettings(context.getSharedPreferences(LocalSettings.PREFS_NAME, Context.MODE_PRIVATE))
+
+    /** Animated Avatars, kept on this phone for every account (not cleared with local settings). */
+    val liveAvatars = LiveAvatarsSetting(context.getSharedPreferences(LiveAvatarsSetting.PREFS_NAME, Context.MODE_PRIVATE))
 
     private val okHttp = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -254,6 +259,7 @@ class AppGraph(
             keychainService = AgentConnections.KEYCHAIN_SERVICE,
         ),
         registry = context.getSharedPreferences(AgentConnections.REGISTRY_PREFS, Context.MODE_PRIVATE),
+        pictures = File(context.filesDir, "agent-avatars"),
     )
 
     /**
@@ -264,14 +270,61 @@ class AppGraph(
         registry.activeId?.takeIf { id -> agents.any { it.id == id } }
     }.stateIn(scope, SharingStarted.Eagerly, accountStore.registry.value.activeId?.takeIf { id -> agentConnections.accounts.value.any { it.id == id } })
 
+    /** Guards [switching] and [openState]: a switch's start and the state it hides change together. */
+    private val openLock = Any()
+
+    /** Switches under way ([whileSwitching]); while there are any, [openAccount] holds still. */
+    private var switching = 0
+
+    private val openState = MutableStateFlow(computeOpenAccount())
+
+    /**
+     * The account the screens are of: the open agent connection, else the
+     * signed-in Happy account, else none. One switch is one change of it,
+     * published once the new account is read whole ([whileSwitching]): never
+     * the moment between leaving an agent connection and the Happy account's
+     * sign-in being read, which is "none" and would show the first screen.
+     */
+    val openAccount: StateFlow<OpenAccount> = openState.asStateFlow()
+
+    private fun computeOpenAccount(): OpenAccount {
+        val active = accountStore.registry.value.activeId
+        if (active != null && agentConnections.accounts.value.any { it.id == active }) return OpenAccount.Agent(active)
+        return openAccountId()?.let { OpenAccount.Happy(it) } ?: OpenAccount.None
+    }
+
+    private fun publishOpenAccount() = synchronized(openLock) {
+        if (switching == 0) openState.value = computeOpenAccount()
+    }
+
+    init {
+        // Changes made outside a switch (sign-in, logout, an agent paired or forgotten) show as they come.
+        scope.launch {
+            combine(accountStore.registry, agentConnections.accounts, auth.state) { _, _, _ -> }.collect { publishOpenAccount() }
+        }
+    }
+
+    /** Runs [block], a switch from one open account to another, as one change of [openAccount]. */
+    suspend fun <T> whileSwitching(block: suspend () -> T): T {
+        synchronized(openLock) { switching++ }
+        try {
+            return block()
+        } finally {
+            synchronized(openLock) { switching-- }
+            publishOpenAccount()
+        }
+    }
+
     /**
      * Opens the account [id] from Home's account menu: a Happy account or
      * an agent connection. Whatever was open stays signed in.
      */
     fun open(id: String): Job = scope.launch {
         if (accountStore.registry.value.activeId == id && (openAgentId.value == id || openAccountId() == id)) return@launch
-        withContext(Dispatchers.IO) { accountStore.select(id) }
-        auth.reload()
+        whileSwitching {
+            withContext(Dispatchers.IO) { accountStore.select(id) }
+            auth.reload()
+        }
     }
 
     private val agentPairingState = MutableStateFlow<PairingFlow?>(null)
@@ -352,6 +405,21 @@ class AppGraph(
         foreground = isForeground,
     )
 
+    /**
+     * Starts reading the open account's home from disk: the agent
+     * connection's kept catalog, or the Happy account's stored sessions.
+     * The app graph's thread calls it as soon as the graph is built, while
+     * the window is still composing; home asks for the same once composed,
+     * 100 to 150 ms later on the Fold, and finds it read or on its way.
+     */
+    fun warmHome() {
+        when (val open = openAccount.value) {
+            is OpenAccount.Agent -> agentSessions.session(open.id)
+            is OpenAccount.Happy -> HomeServices.of(this)
+            OpenAccount.None -> Unit
+        }
+    }
+
     private val logoutHooks = CopyOnWriteArrayList<suspend (authToken: String) -> Unit>()
 
     /**
@@ -386,7 +454,11 @@ class AppGraph(
                     LocalCaches.wipe(appContext)
                 }
             }
-            if (last) wipeHooks.forEach { it() }
+            if (last) {
+                wipeHooks.forEach { it() }
+                // The language was the account's setting: back to the device's, as after happy-app's reload.
+                language.apply(null)
+            }
             auth.logout()
             store.use(database(openAccountId()))
             withContext(Dispatchers.IO) { leaving?.let { forgetDatabase(accountId(it.credentials)) } }
@@ -439,6 +511,28 @@ class AppGraph(
 
     private fun onVoiceSessionDeleted(id: String) {
         if (voice.state.value.sessionId == id) scope.launch { voice.stop() }
+    }
+}
+
+/** Which account the screens are of ([AppGraph.openAccount]). */
+sealed interface OpenAccount {
+    /** The account's or agent connection's id; null for none. */
+    val id: String?
+
+    /** What tells one apart from another across a recreation: its kind and id. */
+    val key: String
+
+    data object None : OpenAccount {
+        override val id: String? get() = null
+        override val key: String get() = "none"
+    }
+
+    data class Happy(override val id: String) : OpenAccount {
+        override val key: String get() = "happy:$id"
+    }
+
+    data class Agent(override val id: String) : OpenAccount {
+        override val key: String get() = "agent:$id"
     }
 }
 

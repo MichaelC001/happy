@@ -9,6 +9,7 @@ import UIKit
 @MainActor
 final class Session {
     let accountID: String
+    private(set) var computerName: String
     let engine: SyncEngine
     let client: AgentClient
     let store: Store
@@ -17,17 +18,32 @@ final class Session {
     let models: ModelState
     /// What this computer last showed, for opening on it offline.
     let offline: OfflineFile?
+    /// The pictures, recordings and files its conversations showed, kept
+    /// on this phone for good (`MediaLibrary`).
+    let media: MediaLibrary?
     /// The composers' drafts, kept on this phone beside the computer's copy.
     let drafts: Drafts
     /// Colours the code blocks its conversations show.
     let syntax = CodeSyntaxService()
     /// The conversations read ahead and kept, so they open drawn.
     let warm: WarmChats
-    /// The person's settings for this phone, the transcript's renderer
-    /// among them (`LocalSettings.chatListRenderer`).
+    /// The person's settings for this phone.
     let localSettings: LocalSettings
+    /// What this computer's placeholder picture is picked by, when it has
+    /// none of its own (`AvatarPlaceholder`).
+    let placeholderSeed: String
+    /// What the person's own placeholder is picked by (`PersonSeed`): their
+    /// team user once the computer says it is in a team, else this
+    /// computer's seed as theirs.
+    var personSeed: String { PersonSeed.seed(userId: home.userId, otherwise: "person:" + placeholderSeed) }
     /// The person's own name and picture on this computer.
-    private(set) lazy var profile = ProfileSource(client: client, engine: engine)
+    var profile: ProfileSource {
+        if let madeProfile { return madeProfile }
+        let source = ProfileSource(client: client, engine: engine, placeholderSeed: personSeed)
+        madeProfile = source
+        return source
+    }
+    private var madeProfile: ProfileSource?
     private(set) var snapshot = Snapshot()
     private var watchers: [UUID: (Snapshot) -> Void] = [:]
     /// Readable, not settable, so a test can say the follow was let go of
@@ -36,10 +52,18 @@ final class Session {
     private var observers: [NSObjectProtocol] = []
     private var connectionObservation: AccountsObservation?
     private var connectionFollowing: Task<Void, Never>?
-    private var connectionSnapshot = HomeSnapshot()
+    /// What home lists for this computer (`SidebarRows`), as it last came.
+    private(set) var home = HomeSnapshot()
+    private var homeWatchers: [UUID: (HomeSnapshot) -> Void] = [:]
     private var connectionStatus: ConnectionStatus = .connecting
-    private var headerWatchers: [UUID: (Strings.HeaderStatus.State) -> Void] = [:]
+    /// Whether the phone has a way out at all (`NetworkPath`).
+    private var networkPath = NetworkPath.shared.isSatisfied
+    private var networkWatch: NetworkPathWatch?
+    /// The link as it is (`headerState(status:snapshot:network:)`), and as
+    /// headers show it: home's title and every chat's subtitle watch
+    /// `link` (`watchHeader`), so they change together, debounced.
     private(set) var headerState: Strings.HeaderStatus.State = .connecting
+    let link = LinkIndicator(wanted: .connecting)
 
     /// The notifications this session watches for, for the same reason.
     /// Nothing adds to it today; it is emptied by `stop` all the same, so
@@ -74,8 +98,8 @@ final class Session {
     /// (`FilePreview`), so until then such leftovers stay in this app's
     /// caches.
     static func forget(_ accountID: String) {
+        MediaLibrary.forget(namespace: "agent/\(accountID)")
         OfflineFile.remove(accountID)
-        StoriesSession.forget(accountID)
         guard let session = sessions.removeValue(forKey: accountID) else { return }
         session.stop()
         // The store belongs to the engine, not to the session, so only an
@@ -101,7 +125,10 @@ final class Session {
     }
 
     private init(accountID: String, engine: SyncEngine, account: AccountController) {
+        media = MediaLibrary.agent(accountID)
         self.accountID = accountID
+        computerName = account.agentConnections.accounts.first { $0.id == accountID }?.name ?? Strings.agentConnection
+        placeholderSeed = account.agentConnections.placeholderSeed(for: accountID) ?? accountID
         self.engine = engine
         self.localSettings = account.localSettings
         let client = engine.client
@@ -112,39 +139,38 @@ final class Session {
         store = engine.spaces
         images = Images(client: client, offline: offline)
         warm = WarmChats(client: client, store: store, syntax: syntax, persistence: engine)
-        models = ModelState(client: client, offline: offline)
+        models = ModelState(client: client, offline: offline, store: store)
         drafts = Drafts(offline: offline)
         models.load()
-        // The rows' drafts: what this phone keeps, then every change, here
-        // or (through the store's events) on another device.
-        let drafts = drafts
-        let spaces = store
-        Task {
-            await drafts.observe { agentId, draft in
-                Task { await spaces.noteDraft(agentId, text: draft?.text, updatedAt: draft?.updatedAt ?? Date().timeIntervalSince1970 * 1000) }
-            }
-            for (agentId, draft) in await drafts.all() {
-                await spaces.noteDraft(agentId, text: draft.text, updatedAt: draft.updatedAt)
-            }
-        }
         let updates = store.updates
         following = Task { [weak self] in
             for await snapshot in updates {
                 guard let self else { return }
+                // Back after a gap: the pictures it couldn't read then.
+                if snapshot.live, !self.snapshot.live { images.retryFailed() }
                 self.snapshot = snapshot
                 for watcher in self.watchers.values { watcher(snapshot) }
             }
         }
+        networkWatch = NetworkPath.shared.watch { [weak self, engine] satisfied in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let back = satisfied && !self.networkPath
+                self.networkPath = satisfied
+                self.updateHeaderState()
+                // Back from airplane mode: reconnect, and send what waited, now.
+                if back { Task { await engine.reconnect() } }
+            }
+        }
         connectionObservation = account.observeAccounts { [weak self, weak account] _ in
             guard let self, let account else { return }
-            connectionStatus = account.agentConnections.accounts.first { $0.id == accountID }?.status ?? .paused
-            updateHeaderState()
+            computerName = account.agentConnections.accounts.first { $0.id == accountID }?.name ?? computerName
+            receive(status: account.agentConnections.accounts.first { $0.id == accountID }?.status ?? .paused)
         }
         connectionFollowing = Task { [weak self, engine] in
             for await snapshot in await engine.snapshots() {
                 guard !Task.isCancelled, let self else { return }
-                connectionSnapshot = snapshot
-                updateHeaderState()
+                receive(home: snapshot)
             }
         }
         // AgentConnections owns foreground/background and account switching.
@@ -159,29 +185,56 @@ final class Session {
         return Watch { [weak self] in self?.watchers.removeValue(forKey: id) }
     }
 
-    static func headerState(status: ConnectionStatus, snapshot: HomeSnapshot) -> Strings.HeaderStatus.State {
+    static func headerState(status: ConnectionStatus, snapshot: HomeSnapshot, network: Bool = true) -> Strings.HeaderStatus.State {
+        // No way out at all: nothing to connect to yet, whatever was last heard.
+        if !network, status != .revoked { return .waitingForNetwork }
+        if status == .revoked { return .offline }
+        // The stream is open: it is the truth, whatever the pairing's own
+        // check (which retries on its own backoff) last said.
+        if snapshot.live { return snapshot.loaded && !snapshot.syncing ? .online : .syncing }
+        // The computer did not answer: home's notice says so, in its words.
+        if snapshot.error != nil { return .offline }
         switch status {
         case .paused, .revoked: return .offline
-        case .retrying: return .connecting
-        case .connecting: return .connecting
-        case .connected:
-            if snapshot.error != nil && !snapshot.live { return .offline }
-            return snapshot.live && snapshot.loaded && !snapshot.syncing ? .online : .syncing
+        case .retrying, .connecting: return .connecting
+        case .connected: return .syncing
         }
     }
 
     private func updateHeaderState() {
-        let next = Self.headerState(status: connectionStatus, snapshot: connectionSnapshot)
+        let next = Self.headerState(status: connectionStatus, snapshot: home, network: networkPath)
         guard next != headerState else { return }
         headerState = next
-        for watch in headerWatchers.values { watch(next) }
+        link.want(next)
     }
 
-    func watchHeader(_ watch: @escaping (Strings.HeaderStatus.State) -> Void) -> Watch {
+    /// The pairing's own check, as `AgentConnections` says it (or a test).
+    func receive(status: ConnectionStatus) {
+        connectionStatus = status
+        updateHeaderState()
+    }
+
+    /// What home lists, now and as it changes: the rows a screen finds its
+    /// chat's among, as home draws them.
+    func watchHome(_ watch: @escaping (HomeSnapshot) -> Void) -> Watch {
         let id = UUID()
-        headerWatchers[id] = watch
-        watch(headerState)
-        return Watch { [weak self] in self?.headerWatchers.removeValue(forKey: id) }
+        homeWatchers[id] = watch
+        watch(home)
+        return Watch { [weak self] in self?.homeWatchers.removeValue(forKey: id) }
+    }
+
+    /// A snapshot from the engine (or a test standing in for it).
+    func receive(home snapshot: HomeSnapshot) {
+        if snapshot.live, !home.live { images.retryFailed() }
+        home = snapshot
+        madeProfile?.placeholderSeed = personSeed
+        updateHeaderState()
+        for watch in homeWatchers.values { watch(snapshot) }
+    }
+
+    /// What headers show of the link, now and on every change (`link`).
+    func watchHeader(_ watch: @escaping (Strings.HeaderStatus.State) -> Void) -> Watch {
+        link.watch(watch)
     }
 }
 

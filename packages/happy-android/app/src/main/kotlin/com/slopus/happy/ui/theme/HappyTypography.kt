@@ -42,9 +42,20 @@ private val RnTightLineHeightStyle = LineHeightStyle(
 private const val FONT_LINE_HEIGHT_RATIO = 1.17f
 
 /**
+ * The weight text is drawn at for the weight a stylesheet asks. Typography.ts's
+ * semibold (600) is IBM Plex's, a light face; the system's 600 is Roboto's
+ * heaviest step short of bold, and faces without one (Samsung's One UI font)
+ * fall to bold, so emphasis read fat. Android's own type scale emphasises
+ * with medium (500), so 600 and up are drawn medium.
+ */
+fun appWeight(weight: FontWeight): FontWeight = if (weight >= FontWeight.SemiBold) FontWeight.Medium else weight
+
+/**
  * A text style built the way the RN stylesheets declare them: family, size,
  * line height, tracking. Without a line height, RN Android lays text out
- * with the font's padding included, so that is kept too.
+ * with the font's padding included, so that is kept too. Weights go through
+ * [appWeight]; iOS's negative tracking (SF's) is not taken, as it crowds the
+ * system face.
  */
 fun happyTextStyle(
     fontSize: Int,
@@ -54,10 +65,10 @@ fun happyTextStyle(
     family: FontFamily = AppSans,
 ): TextStyle = TextStyle(
     fontFamily = family,
-    fontWeight = weight,
+    fontWeight = appWeight(weight),
     fontSize = fontSize.sp,
     lineHeight = lineHeight?.sp ?: TextUnit.Unspecified,
-    letterSpacing = letterSpacing.sp,
+    letterSpacing = letterSpacing.coerceAtLeast(0f).sp,
     lineHeightStyle = if (lineHeight != null && lineHeight < fontSize * FONT_LINE_HEIGHT_RATIO) RnTightLineHeightStyle else RnLineHeightStyle,
     platformStyle = if (lineHeight == null) RnFontPadding else null,
 )

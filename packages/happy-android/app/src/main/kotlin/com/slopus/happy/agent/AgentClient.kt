@@ -79,6 +79,12 @@ class AgentClient private constructor(private val link: suspend () -> Link) {
         return check(link.transport.request(method, path, link.token, bytes, headers))
     }
 
+    /** Sends [bytes] as they are (an image), with their Content-Type in [headers]. */
+    suspend fun sendBytes(method: String, path: String, bytes: ByteArray, headers: Map<String, String>): TransportResponse {
+        val link = link()
+        return check(link.transport.request(method, path, link.token, bytes, headers))
+    }
+
     /** The answer to [send] decoded; an answer that doesn't decode is [AgentConnectionException.Reason.InvalidResponse]. */
     suspend fun <T> decode(
         deserializer: DeserializationStrategy<T>,
@@ -110,6 +116,16 @@ class AgentClient private constructor(private val link: suspend () -> Link) {
             check(com.slopus.happy.connection.TransportResponse(stream.status, stream.headers, body))
         }
         return stream
+    }
+
+    /**
+     * A raw stream to the agent's socket and the device token that
+     * authenticates on it: the in-app browser's proxy writes its own HTTP
+     * there. The token never leaves native code.
+     */
+    suspend fun socket(): Pair<com.slopus.happy.connection.TransportSocket, String> {
+        val link = link()
+        return link.transport.socket() to link.token
     }
 
     /** Lets go of the tunnel, so the next request makes a new one. */

@@ -1,5 +1,10 @@
 package com.slopus.happy.ui.conversation
 
+import androidx.compose.ui.unit.constrainHeight
+import androidx.compose.ui.unit.offset
+import androidx.compose.ui.layout.SubcomposeLayout
+import com.slopus.happy.ui.components.rememberHoistedTextFieldState
+import androidx.compose.foundation.text.input.TextFieldLineLimits
 import android.net.Uri
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateDpAsState
@@ -7,7 +12,6 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -21,7 +25,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
@@ -57,7 +60,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -66,14 +68,20 @@ import com.slopus.happy.attachments.AttachmentPreview
 import com.slopus.happy.conversation.ConversationState
 import com.slopus.happy.conversation.InlinePictures
 import com.slopus.happy.conversation.Mode
+import com.slopus.happy.attachments.AttachAccepts
+import com.slopus.happy.ui.attach.AttachSheet
+import com.slopus.happy.ui.attach.AttachedFileTile
 import com.slopus.happy.ui.attachments.rememberComposerImages
 import com.slopus.happy.ui.attachments.ImagePicker
 import com.slopus.happy.ui.chat.PrimaryAction
 import com.slopus.happy.ui.components.Alert
+import com.slopus.happy.ui.components.RecomposeProbe
 import com.slopus.happy.ui.components.AlertButton
 import com.slopus.happy.ui.components.GlassColors
 import com.slopus.happy.ui.components.GlassSource
 import com.slopus.happy.ui.components.HappyAlert
+import com.slopus.happy.ui.components.HappyMenuItem
+import com.slopus.happy.ui.components.MenuSpec
 import com.slopus.happy.ui.components.MaterialSymbols
 import com.slopus.happy.ui.components.RemoteImage
 import com.slopus.happy.ui.components.glass
@@ -89,12 +97,11 @@ object ConversationComposerTags {
     const val PILL = "conversation.composer.pill"
     const val INPUT = "conversation.composer.input"
     const val PRIMARY = "conversation.composer.primary"
-    /** The [+] that opens the attachment menu. */
+    /** The [+] that opens the attachment sheet ([AttachSheet]). */
     const val MORE = "conversation.composer.more"
     const val COUNT = "conversation.composer.attachmentCount"
+    /** Compact with pictures waiting, [+] opens this menu: them, and Add to open the sheet. */
     const val MENU = "conversation.composer.menu"
-    const val PASTE = "conversation.composer.paste"
-    /** The menu's "Add picture". */
     const val ATTACH = "conversation.composer.attach"
     const val PICTURES = "conversation.composer.pictures"
     const val PICTURE_REMOVE = "conversation.composer.pictures.remove"
@@ -125,49 +132,78 @@ private object Slot {
  * pictures waiting to go, the words on top (up to eight lines, then it
  * scrolls), and under them [+], the model and effort as one label
  * ([ConversationModeLabel]) and send, which becomes Stop while the agent
- * works and nothing is typed. [+] opens a menu: paste an image, Add picture
- * (the system photo picker). Both composer menus float above
- * the composer and keyboard, keeping the draft and caret in place. The pill is glass over [backdrop] (the
- * transcript under it), its tint alone where nothing blurs. With Reduce
- * Motion it changes shape at once. Pictures that together pass what one
- * message carries ([InlinePictures]) are refused with an alert, keeping text
- * and pictures. When the available height cannot fit the open card it uses
- * one row, retaining [+], an internally scrolling field, model/effort and
- * send. Its vertical margins shrink to preserve a 48 dp surface where it
- * fits; picture previews and removal move into [+] while space is short.
+ * works and nothing is typed. [+] opens the attachment sheet ([AttachSheet]):
+ * the gallery's recent photos and videos and the File tab; its Send sends the
+ * picks with the draft as their caption, pictures inline and the rest through
+ * the agent's workspace ([com.slopus.happy.conversation.WorkspaceUploads]).
+ * The model menu floats above the composer and keyboard, keeping the draft
+ * and caret in place. The pill is glass over [backdrop] (the transcript under
+ * it), its tint alone where nothing blurs. With Reduce Motion it changes shape
+ * at once. When the available height cannot fit the open card it uses one
+ * row, retaining [+], an internally scrolling field, model/effort and send.
+ * Its vertical margins shrink to preserve a 48 dp surface where it fits;
+ * picture previews hide while space is short, their count on [+].
  */
 @Composable
 internal fun ConversationComposer(
     state: ConversationState,
     text: String,
     onTextChange: (String) -> Unit,
-    onSend: (String, List<File>) -> Boolean,
+    onSend: (String, List<AttachmentPreview>) -> Boolean,
     onSent: () -> Unit,
     onStop: () -> Unit,
     onModeChange: (Mode) -> Unit,
     modifier: Modifier = Modifier,
     backdrop: GlassSource? = null,
     pictures: ImagePicker? = rememberComposerImages(enabled = true),
+    /** Raised to take the keyboard into the composer (Return in new work's name). */
+    focusAsks: Int = 0,
 ) {
+    RecomposeProbe.mark(ConversationScreenTags.PROBE_COMPOSER)
     val colors = HappyTheme.colors
-    var tooLarge by remember { mutableStateOf(false) }
     val attached = pictures?.images.orEmpty()
     val hasContent = text.isNotBlank() || attached.isNotEmpty()
     val primary = primaryActionOf(hasContent, state)
-    // The field's own selection; text set from outside puts the cursor at its end, or where focus asks.
+    // The field's own words and selection; text set from outside puts the cursor at its end, or where focus asks.
     // Saved, so a rotation or a return from process death keeps the caret where it was.
-    var field by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
-    if (field.text != text) field = TextFieldValue(text, TextRange(text.length))
+    val (field, typed) = rememberHoistedTextFieldState(text, onTextChange)
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     var focused by remember { mutableStateOf(false) }
+    var attaching by rememberSaveable { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var picker by rememberSaveable { mutableStateOf<ModePicker?>(null) }
     var moreCenterY by remember { mutableIntStateOf(0) }
     var modelCenterY by remember { mutableIntStateOf(0) }
+    // Where + and the model label sit, kept out of the snapshot as they move (the dock rides the
+    // keyboard each frame) and given to the popups as one opens, so moving never recomposes this.
+    val anchors = remember { IntArray(2) }
     fun openPicker(which: ModePicker) {
+        attaching = false
         menu = false
+        modelCenterY = anchors[1]
         picker = which
+    }
+
+    // The draft and what waits go together; new work keeps them until it is made.
+    fun submit(extra: List<AttachmentPreview> = emptyList()) {
+        if (onSend(text, attached + extra)) {
+            pictures?.clear()
+            onSent()
+        } else if (extra.isNotEmpty()) {
+            pictures?.state?.images?.addAll(extra)
+        }
+    }
+
+    // New work's first message goes once the task or bot is made: only then does it take the
+    // words and pictures, the words unless edited since. Seen once, so a return never clears again.
+    var takenSeen by rememberSaveable { mutableIntStateOf(state.taken?.serial ?: 0) }
+    LaunchedEffect(state.taken?.serial) {
+        val taken = state.taken ?: return@LaunchedEffect
+        if (taken.serial <= takenSeen) return@LaunchedEffect
+        takenSeen = taken.serial
+        pictures?.clear()
+        if (text.trim() == taken.text) onSent()
     }
 
     val open = focused || text.isNotEmpty() || attached.isNotEmpty()
@@ -201,9 +237,9 @@ internal fun ConversationComposer(
             }
             ComposerLayout(open, compact, if (compact || !open) minimumCompact else minimumActions) {
                 Box(Modifier.layoutId(Slot.MORE)) {
-                    IconButton(onClick = { picker = null; menu = true }, modifier = Modifier.testTag(ConversationComposerTags.MORE)
+                    IconButton(onClick = { picker = null; moreCenterY = anchors[0]; if (showCount) menu = true else attaching = true }, modifier = Modifier.testTag(ConversationComposerTags.MORE)
                         .semantics { contentDescription = moreLabel }
-                        .onGloballyPositioned { moreCenterY = it.boundsInWindow().center.y.toInt() }) {
+                        .onGloballyPositioned { anchors[0] = it.boundsInWindow().center.y.toInt() }) {
                         BadgedBox(badge = {
                             if (showCount) Badge(containerColor = colors.text, contentColor = colors.surface) {
                                 Text(attached.size.toString(), Modifier.testTag(ConversationComposerTags.COUNT).clearAndSetSemantics {})
@@ -214,19 +250,16 @@ internal fun ConversationComposer(
                     }
                 }
                 BasicTextField(
-                    value = field,
-                    onValueChange = {
-                        field = it
-                        if (it.text != text) onTextChange(it.text)
-                    },
+                    state = field,
+                    inputTransformation = typed,
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.text),
                     cursorBrush = SolidColor(colors.text),
-                    maxLines = ConversationComposerSpec.MAX_LINES,
-                    decorationBox = { inner ->
+                    lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = ConversationComposerSpec.MAX_LINES),
+                    decorator = { inner ->
                         Box(Modifier.padding(vertical = 12.dp)) {
                             if (field.text.isEmpty()) {
                                 Text(
-                                    stringResource(R.string.conversation_message_placeholder),
+                                    stringResource(R.string.common_message),
                                     style = MaterialTheme.typography.bodyLarge,
                                     color = colors.textSecondary,
                                     maxLines = 1,
@@ -246,7 +279,7 @@ internal fun ConversationComposer(
                         catalog = state.catalog,
                         mode = state.mode,
                         onOpen = { openPicker(ModePicker.Model) },
-                        modifier = Modifier.layoutId(Slot.LABEL).onGloballyPositioned { modelCenterY = it.boundsInWindow().center.y.toInt() },
+                        modifier = Modifier.layoutId(Slot.LABEL).onGloballyPositioned { anchors[1] = it.boundsInWindow().center.y.toInt() },
                     )
                 }
                 val sendLabel = stringResource(if (primary == PrimaryAction.Stop) R.string.conversation_stop else R.string.conversation_send)
@@ -255,14 +288,7 @@ internal fun ConversationComposer(
                     FilledIconButton(
                         onClick = {
                             when (primary) {
-                                PrimaryAction.Send -> {
-                                    if (!InlinePictures.fit(attached.map { it.size })) {
-                                        tooLarge = true
-                                    } else if (onSend(text, attached.mapNotNull { Uri.parse(it.uri).path?.let(::File) })) {
-                                        pictures?.clear()
-                                        onSent()
-                                    }
-                                }
+                                PrimaryAction.Send -> submit()
                                 PrimaryAction.Stop -> if (!state.stopping) onStop()
                                 else -> Unit
                             }
@@ -276,7 +302,7 @@ internal fun ConversationComposer(
                         ),
                         modifier = Modifier.size(ConversationComposerSpec.primary).testTag(ConversationComposerTags.PRIMARY),
                     ) {
-                        if (state.stopping) {
+                        if (state.stopping || state.newWork?.making == true) {
                             CircularProgressIndicator(Modifier.size(16.dp), color = colors.surface, strokeWidth = 2.dp)
                         } else {
                             Icon(
@@ -289,56 +315,50 @@ internal fun ConversationComposer(
                 }
             }
         }
-        if (menu) {
-            ConversationPopup(
-                title = stringResource(R.string.conversation_composer_more),
-                onDismiss = { menu = false },
-                anchorCenterY = moreCenterY,
-                alignEnd = false,
-                width = 280.dp,
-                modifier = Modifier.testTag(ConversationComposerTags.MENU),
-            ) {
-                LazyColumn {
-                    if (compact && attached.isNotEmpty()) {
-                        item { ComposerPictures(attached, onRemove = { pictures?.remove(it) }) }
-                    }
-                    item {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.image_upload_paste_from_clipboard)) },
-                            onClick = { menu = false; pictures?.paste() },
-                            modifier = Modifier.testTag(ConversationComposerTags.PASTE),
-                        )
-                    }
-                    item {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.conversation_attach_picture)) },
-                            leadingIcon = { Icon(MaterialSymbols.Image, contentDescription = null) },
-                            onClick = { menu = false; pictures?.pick() },
-                            modifier = Modifier.testTag(ConversationComposerTags.ATTACH),
-                        )
-                    }
+        ConversationPopup(
+            expanded = menu,
+            title = stringResource(R.string.conversation_composer_more),
+            onDismiss = { menu = false },
+            anchorCenterY = moreCenterY,
+            alignEnd = false,
+            width = 280.dp,
+            modifier = Modifier.testTag(ConversationComposerTags.MENU),
+        ) {
+            LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                item { ComposerPictures(attached, onRemove = { pictures?.remove(it) }) }
+                item {
+                    HappyMenuItem(
+                        label = stringResource(R.string.attach_title),
+                        leading = { Icon(MaterialSymbols.Add, contentDescription = null, Modifier.size(MenuSpec.icon)) },
+                        onClick = { menu = false; attaching = true },
+                        modifier = Modifier.testTag(ConversationComposerTags.ATTACH),
+                    )
                 }
             }
         }
+        AttachSheet(
+            open = attaching,
+            accepts = AttachAccepts.Agent,
+            caption = text,
+            onCaptionChange = onTextChange,
+            onSend = { staged -> submit(staged) },
+            onClosed = { attaching = false },
+            room = AttachAccepts.Agent.maxItems - attached.size,
+        )
         ConversationModePicker(picker, onClose = { picker = null }, catalog = state.catalog, mode = state.mode, onModeChange = onModeChange, anchorCenterY = modelCenterY)
         // The viewport subcomposes its content during measurement. Request
         // focus here, after its editor exists, rather than in the parent.
         LaunchedEffect(state.composerFocus?.serial) {
             val ask = state.composerFocus ?: return@LaunchedEffect
-            field = field.copy(selection = TextRange(ask.cursor.coerceIn(0, field.text.length)))
+            field.edit { selection = TextRange(ask.cursor.coerceIn(0, length)) }
             focus.requestFocus()
             keyboard?.show()
         }
-    }
-    if (tooLarge) {
-        HappyAlert(
-            Alert(
-                stringResource(R.string.conversation_pictures_too_large_title),
-                stringResource(R.string.conversation_pictures_too_large_message),
-                listOf(AlertButton(stringResource(R.string.common_ok))),
-            ),
-            onDismiss = { tooLarge = false },
-        )
+        LaunchedEffect(focusAsks) {
+            if (focusAsks == 0) return@LaunchedEffect
+            focus.requestFocus()
+            keyboard?.show()
+        }
     }
 }
 
@@ -388,15 +408,19 @@ private fun ComposerLayout(open: Boolean, compact: Boolean, minimumRowHeight: Dp
 /** Keep the full card when it fits; otherwise use one row and spend spare height on margins. */
 @Composable
 private fun ComposerViewport(minimumOpen: Dp, minimumCompact: Dp, modifier: Modifier, content: @Composable (Boolean) -> Unit) {
-    val density = LocalDensity.current
-    BoxWithConstraints(modifier.fillMaxWidth().testTag(ConversationComposerTags.COMPOSER)) {
-        val compact = maxHeight < minimumOpen + 16.dp
+    // The margins are worked out where it measures, so the room round it changing (the keyboard
+    // settling) measures the pill again and composes it only when it changes shape.
+    SubcomposeLayout(modifier.fillMaxWidth().testTag(ConversationComposerTags.COMPOSER)) { constraints ->
+        val compact = constraints.hasBoundedHeight && constraints.maxHeight.toDp() < minimumOpen + 16.dp
         // Split whole spare pixels so rounding each margin cannot steal
         // one pixel from the minimum touch surface at fractional densities.
-        val verticalMargin = with(density) {
-            if (compact) ((constraints.maxHeight - minimumCompact.roundToPx()).coerceAtLeast(0) / 2).coerceAtMost(8.dp.roundToPx()).toDp() else 8.dp
-        }
-        Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = verticalMargin)) { content(compact) }
+        val vertical = if (compact) ((constraints.maxHeight - minimumCompact.roundToPx()).coerceAtLeast(0) / 2).coerceAtMost(8.dp.roundToPx()) else 8.dp.roundToPx()
+        val horizontal = 12.dp.roundToPx()
+        val inner = constraints.copy(minWidth = 0, minHeight = 0).offset(-2 * horizontal, -2 * vertical)
+        val placeables = subcompose(Unit) { content(compact) }.map { it.measure(inner) }
+        val width = if (constraints.hasBoundedWidth) constraints.maxWidth else (placeables.maxOfOrNull { it.width } ?: 0) + 2 * horizontal
+        val height = constraints.constrainHeight((placeables.maxOfOrNull { it.height } ?: 0) + 2 * vertical)
+        layout(width, height) { placeables.forEach { it.place(horizontal, vertical) } }
     }
 }
 
@@ -409,7 +433,11 @@ private fun ComposerPictures(images: List<AttachmentPreview>, onRemove: (String)
     ) {
         items(images, key = { it.id }) { picture ->
             Box(Modifier.size(64.dp)) {
-                RemoteImage(picture.uri, contentDescription = picture.name, contentScale = ContentScale.Crop, modifier = Modifier.size(64.dp).clip(MaterialTheme.shapes.medium))
+                if (picture.mimeType.startsWith("image/")) {
+                    RemoteImage(picture.uri, contentDescription = picture.name, contentScale = ContentScale.Crop, modifier = Modifier.size(64.dp).clip(MaterialTheme.shapes.medium))
+                } else {
+                    AttachedFileTile(picture.name, Modifier.size(64.dp).clip(MaterialTheme.shapes.medium))
+                }
                 FilledTonalIconButton(
                     onClick = { onRemove(picture.id) },
                     modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).size(24.dp).testTag(ConversationComposerTags.PICTURE_REMOVE),

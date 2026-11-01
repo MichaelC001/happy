@@ -292,10 +292,15 @@ public final class NewSessionComposer {
         guard snapshot.machines.synced || !snapshot.machines.machines.isEmpty else { return }
         let draft = drafts.draft
         // A draft from before the pair was coalesced names the computer
-        // under its other daemon's id; a computer that left is replaced by
-        // the first one offered.
+        // under its other daemon's id, and keeps its place; a computer that
+        // left is replaced by the first one offered, whose folders are its
+        // own, so the left one's place goes with it.
         if choices.resolvedMachineId != draft.selectedMachineId {
-            drafts.renameMachineId(choices.resolvedMachineId)
+            if choices.offersDraftMachine {
+                drafts.renameMachineId(choices.resolvedMachineId)
+            } else {
+                drafts.setMachineId(choices.resolvedMachineId)
+            }
         }
         if drafts.createsBot && !choices.supportsBots {
             drafts.setCreatesBot(false)

@@ -7,7 +7,7 @@ import UIKit
 /// a small secondary circle with the arrow down, its hairline and soft
 /// shadow, shown while the reader is away from the end. While the agent
 /// works its arrow carries the sheen every working thing in the app does
-/// (`LegacyShimmerLabel`). Its touch reaches past the drawn 32 to 44.
+/// (`ShimmerLabel`). Its touch reaches past the drawn 32 to 44.
 final class ChatJumpButton: UIControl {
     private let arrow = ShimmerLabel()
 

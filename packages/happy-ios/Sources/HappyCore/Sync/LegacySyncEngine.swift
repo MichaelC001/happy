@@ -68,6 +68,9 @@ public actor LegacySyncEngine {
         /// UIKit composition supplies a reference-counted background-task lease.
         /// true acquires before an operation; false releases after it finishes.
         public var deliveryActivity: @Sendable (Bool) async -> Void = { _ in }
+        /// Where each outbox file's upload is, by `UploadProgressBoard.outboxKey`,
+        /// for the ring over its picture in the chat.
+        public var uploads: UploadProgressBoard = .shared
 
         public init() {}
     }
@@ -80,6 +83,14 @@ public actor LegacySyncEngine {
     /// This account's durable Rig drafts and serialized metadata writer.
     public nonisolated let rigComposer: RigComposerSync
     public nonisolated let presence: SessionPresence
+    /// The person's archives, leaves and deletes on their way
+    /// (docs/offline-first.md): shown at once, kept in `LocalStore.intent`,
+    /// sent while the socket is up. `AccountSession` gives it its delivery.
+    public nonisolated let intents: IntentOutbox
+    /// Whether the socket is up, as last said: true until said otherwise,
+    /// so an account never connected (tests) is taken at its word.
+    public private(set) var reachable = true
+    private var intentsFollowing: Task<Void, Never>?
     private let decoder: RecordDecoder
     private let accountCipher: AccountCipher
     private let options: Options
@@ -91,6 +102,8 @@ public actor LegacySyncEngine {
     private var backgrounded = false
     private var filesDirectory: URL?
     private var retryTask: Task<Void, Never>?
+    /// Outbox files' uploads on their way, by localId, so a discard stops one.
+    private var uploading: [String: Task<Void, Error>] = [:]
 
     public init(
         api: HappyAPI,
@@ -107,6 +120,7 @@ public actor LegacySyncEngine {
         self.keyRing = keyRing
         self.rigComposer = RigComposerSync(store: store, keyRing: keyRing, now: now, sleep: sleep)
         self.presence = SessionPresence(store: store, now: now)
+        self.intents = IntentOutbox(storage: LocalIntentStorage(store: store), now: now, sleep: sleep)
         self.decoder = RecordDecoder(keyRing: keyRing)
         self.accountCipher = AccountCipher(secret: keys.secret)
         self.options = options
@@ -122,13 +136,26 @@ public actor LegacySyncEngine {
         ThreadRules.assertOffMain()
         guard !stopped else { return }
         await presence.start()
+        followIntents()
         for job in [Job.sessions, .machines, .settings, .profile, .outbox] {
             await invalidate(job)
         }
     }
 
+    /// Returns once what `syncAll` pulls for home has landed (sessions,
+    /// machines, settings, profile), retries included, without pulling it
+    /// again: the header's "updating…" lasts this long.
+    public func caughtUp() async {
+        for job in [Job.sessions, .machines, .settings, .profile] {
+            guard !stopped, let sync = jobs[job] else { continue }
+            await sync.settled()
+        }
+    }
+
     public func stop() async {
         stopped = true
+        intentsFollowing?.cancel()
+        await intents.close()
         await rigComposer.stop()
         retryTask?.cancel()
         retryTask = nil
@@ -137,6 +164,39 @@ public actor LegacySyncEngine {
         }
         jobs = [:]
         try? await presence.stop()
+    }
+
+    // MARK: Intents
+
+    /// The socket came or went: what waits goes while it is up.
+    public func setConnected(_ connected: Bool) async {
+        reachable = connected
+        if !stopped { followIntents() }
+        await intents.setOnline(connected && !stopped)
+    }
+
+    private func followIntents() {
+        guard intentsFollowing == nil else { return }
+        let intents = intents
+        intentsFollowing = Task { [weak self] in
+            for await rejection in await intents.rejections() {
+                await self?.rollBack(rejection.intent)
+            }
+        }
+    }
+
+    /// A refused action, undone here: the row is back in the list. A
+    /// deleted session is read again by a full pass of the list.
+    public func rollBack(_ intent: Intent) async {
+        switch intent.kind {
+        case .archive, .leave:
+            try? store.setSessionArchiving(id: intent.target, false)
+        case .delete:
+            try? store.setCursor(.sessionsLastFullSync, 0)
+            await invalidate(.sessions)
+        default:
+            break
+        }
     }
 
     public func invalidate(_ job: Job) async {
@@ -604,11 +664,18 @@ public actor LegacySyncEngine {
         await invalidate(.outbox)
     }
 
-    public func discardSend(localId: String, filesDirectory: URL) throws {
+    /// A file taken out stops its upload, and the text it went with goes
+    /// on without it.
+    public func discardSend(localId: String, filesDirectory: URL) async throws {
         ThreadRules.assertOffMain()
         for attachment in try store.discardOutbox(localId: localId) {
+            if let outboxId = attachment.outboxLocalId {
+                uploading.removeValue(forKey: outboxId)?.cancel()
+                options.uploads.clear(key: UploadProgressBoard.outboxKey(outboxId))
+            }
             try? FileManager.default.removeItem(at: filesDirectory.appendingPathComponent(attachment.path))
         }
+        await invalidate(.outbox)
     }
 
     public func downloadAttachment(sessionId: String, ref: String) async throws -> Data {
@@ -624,6 +691,22 @@ public actor LegacySyncEngine {
         return plaintext
     }
 
+    /// Where a session attachment's bytes come from, for the account's
+    /// `MediaLibrary`: its sealed blob a range at a time, opened with the
+    /// session's blob key. `size` is the plaintext's, as the file event
+    /// says it.
+    public func attachmentSource(sessionId: String, ref: String, size: Int?) throws -> MediaSource {
+        ThreadRules.assertOffMain()
+        guard !stopped, let session = try store.session(id: sessionId),
+              let key = keyRing.blobKey(wrappedKey: session.dataKeyCipher) else {
+            throw SendingError.unknownSession
+        }
+        let links = AttachmentLinks(api: api, sessionId: sessionId, ref: ref)
+        return MediaSource(length: size.map { $0 + MediaSeal.header }, seal: MediaSeal(key: key)) { range in
+            try await links.fetch(range)
+        }
+    }
+
     static func filePayload(id: String, time: Int64, attachment: AttachmentRecord, ref: String) -> JSONValue {
         var event: [String: JSONValue] = [
             "t": .string("file"),
@@ -631,7 +714,8 @@ public actor LegacySyncEngine {
             "name": .string(attachment.name),
             "size": .number(Double(attachment.size)),
         ]
-        if let width = attachment.width, let height = attachment.height, width > 0, height > 0 {
+        // sync.ts sends only pictures' shapes: a recording's would read as a picture.
+        if !attachment.mimeType.hasPrefix("video/"), let width = attachment.width, let height = attachment.height, width > 0, height > 0 {
             var image: [String: JSONValue] = ["width": .number(Double(width)), "height": .number(Double(height))]
             if let hash = attachment.thumbhash, !hash.isEmpty {
                 image["thumbhash"] = .string(hash)
@@ -706,12 +790,34 @@ public actor LegacySyncEngine {
                         throw SendingError.missingAttachment
                     }
                     if attachment.ref == nil {
+                        // Its ring turns while it is read, sealed and given a
+                        // place, then fills with the bytes written.
+                        let key = UploadProgressBoard.outboxKey(item.localId)
+                        let board = options.uploads
+                        board.set(key, .preparing)
                         let bytes = try Data(contentsOf: directory.appendingPathComponent(attachment.path))
                         let blob = try encryptedSessionBlob(sessionId: item.sessionId, bytes: bytes)
                         let upload = try await api.requestAttachmentUpload(sessionId: item.sessionId, filename: attachment.name, size: blob.count)
                         try checkDelivery(item, session: session)
-                        try await api.uploadEncryptedBlob(blob, upload: upload)
+                        let api = api
+                        let sending = Task {
+                            try await api.uploadEncryptedBlob(blob, upload: upload) { share in board.set(key, .uploading(share)) }
+                        }
+                        uploading[item.localId] = sending
+                        do {
+                            try await withTaskCancellationHandler { try await sending.value } onCancel: { sending.cancel() }
+                            uploading[item.localId] = nil
+                        } catch {
+                            uploading[item.localId] = nil
+                            // Taken out while it went: not a failure of the send.
+                            if sending.isCancelled { throw CancellationError() }
+                            throw error
+                        }
+                        try checkDelivery(item, session: session)
+                        board.set(key, .done)
                         attachment.ref = upload.ref
+                        // Kept as sent: the sender never downloads its own file.
+                        try? MediaStore(directory: MediaLibrary.legacyDirectory(filesDirectory: directory)).keep(upload.ref, data: bytes)
                         if try store.outbox(localId: item.localId) != nil {
                             try store.saveAttachment(attachment)
                         }
@@ -744,6 +850,7 @@ public actor LegacySyncEngine {
                     }
                 }
                 try store.removeFromOutbox(localId: item.localId)
+                if item.kind == .file { options.uploads.clear(key: UploadProgressBoard.outboxKey(item.localId)) }
             } catch {
                 item.lastError = String(describing: error)
                 if error is CancellationError {
@@ -757,8 +864,12 @@ public actor LegacySyncEngine {
                 do {
                     try store.updateOutbox(item)
                     let noRef = try store.attachment(outboxLocalId: item.localId)?.ref == nil
+                    // Its bytes didn't all go: the ring starts over next time.
+                    if item.kind == .file, noRef { options.uploads.clear(key: UploadProgressBoard.outboxKey(item.localId)) }
                     let skippedUpload = item.kind == .file && item.state == .failed && noRef
-                    if !skippedUpload {
+                    // Taken out meanwhile: what waited on it goes on.
+                    let discarded = try store.outbox(localId: item.localId) == nil
+                    if !skippedUpload, !discarded {
                         blocked.insert(item.sessionId)
                     }
                 } catch {
@@ -930,5 +1041,58 @@ public actor LegacySyncEngine {
         case .machineStatus, .sessionEvent, .unsupported:
             break
         }
+    }
+}
+
+/// An attachment's link, asked for once and kept while it is good:
+/// presigned URLs last 15 minutes, so one is used for 10, and asked for
+/// again when the server refuses it.
+actor AttachmentLinks {
+    private let api: HappyAPI
+    private let sessionId: String
+    private let ref: String
+    private var link: (url: URL, headers: [String: String], at: ContinuousClock.Instant)?
+
+    init(api: HappyAPI, sessionId: String, ref: String) {
+        self.api = api
+        self.sessionId = sessionId
+        self.ref = ref
+    }
+
+    func fetch(_ range: Range<Int>) async throws -> MediaPiece {
+        do {
+            return try await api.attachmentRange(try await current(), range: range)
+        } catch MediaError.status(let status) where status == 403 || status == 400 {
+            link = nil
+            return try await api.attachmentRange(try await current(), range: range)
+        }
+    }
+
+    private func current() async throws -> (url: URL, headers: [String: String]) {
+        if let link, ContinuousClock.now - link.at < .seconds(600) { return (link.url, link.headers) }
+        let fresh = try await api.attachmentLink(sessionId: sessionId, ref: ref)
+        link = (fresh.url, fresh.headers, ContinuousClock.now)
+        return fresh
+    }
+}
+
+/// A legacy account's intents, in its `LocalStore`.
+struct LocalIntentStorage: IntentStorage {
+    let store: LocalStore
+
+    func intents() async throws -> [Intent] {
+        try store.intentValues().compactMap { try? JSONDecoder().decode(Intent.self, from: $0) }
+    }
+
+    func saveIntent(_ intent: Intent) async throws {
+        try store.saveIntent(slot: intent.slot, id: intent.id, value: JSONEncoder().encode(intent))
+    }
+
+    func updateIntent(_ intent: Intent) async throws {
+        try store.updateIntent(id: intent.id, value: JSONEncoder().encode(intent))
+    }
+
+    func removeIntent(id: String) async throws {
+        try store.removeIntent(id: id)
     }
 }

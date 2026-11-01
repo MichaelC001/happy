@@ -85,7 +85,7 @@ final class HomeControllerScrollHarness: NSObject {
     private let transport = ScrollTraceTransport()
     private var account: AccountController?
     private var home: AgentHomeViewController?
-    private var sidebar: SidebarView?
+    private var sidebar: SidebarList?
     private var session: Session?
     private let probe = UIView()
     private var link: CADisplayLink?
@@ -132,7 +132,7 @@ final class HomeControllerScrollHarness: NSObject {
             AppCoordinator.applyAppearance(to: navigation.navigationBar)
             window.rootViewController = navigation
             window.layoutIfNeeded()
-            sidebar = Self.find(SidebarView.self, in: home.view)
+            sidebar = Self.find(SidebarList.self, in: home.view)
             // The same offline full Home fixture, without trace controls
             // covering its native bottom actions.
             if ProcessInfo.processInfo.arguments.contains("-homeActionsOnly") { return }
@@ -212,7 +212,7 @@ final class HomeControllerScrollHarness: NSObject {
             if let path = Self.argument("-traceOutput"), let data = try? JSONSerialization.data(withJSONObject: info) { try? data.write(to: URL(fileURLWithPath: path + ".setup.json")) }
         }
         if !ready, sidebar.rows.filter({ $0.targetKind == "bot" }).count == ScrollTraceTransport.count {
-            sidebar.setContentOffset(CGPoint(x: 0, y: 1800), animated: false)
+            sidebar.setContentOffsetY(1800)
             ready = true
         }
         guard started != nil else {
@@ -235,25 +235,28 @@ final class HomeControllerScrollHarness: NSObject {
         var rows: [String: [CGFloat]] = [:]
         for row in sidebar.visibleRows {
             guard let view = sidebar.view(for: row.id) else { continue }
-            let frame = view.convert(view.bounds, to: window)
-            let presented = view.layer.presentation().map { $0.convert($0.bounds, to: window.layer.presentation() ?? window.layer) }
+            let frame = view.convert(view.box, to: window)
+            let presented = view.layer.presentation().map { $0.convert(view.box, to: window.layer.presentation() ?? window.layer) }
             rows[row.id] = [frame.minY, view.frame.minY, presented?.minY ?? frame.minY, frame.height]
         }
-        let top = -sidebar.adjustedContentInset.top
-        let bottom = max(top, sidebar.contentSize.height + sidebar.adjustedContentInset.bottom - sidebar.bounds.height)
+        let offset = sidebar.contentOffsetY
+        let insets = sidebar.contentInsets
+        let height = sidebar.edge.contentSize.height
+        let top = -insets.top
+        let bottom = max(top, height + insets.bottom - sidebar.bounds.height)
         let labels = home.navigationItem.leftBarButtonItem?.customView
-        let banners = Self.find(BannerView.self, in: home.view)
+        // The notice is the list's first row now, not a card over it.
+        let banners = Self.find(SidebarNoticeView.self, in: home.view)
         let nav = home.navigationController?.navigationBar
-        return ["event": event, "t": CACurrentMediaTime(), "offset": sidebar.contentOffset.y,
-                "height": sidebar.contentSize.height, "bounds": rect(sidebar.bounds), "rows": rows,
-                "insets": [sidebar.contentInset.top, sidebar.contentInset.bottom, sidebar.adjustedContentInset.top, sidebar.adjustedContentInset.bottom],
+        return ["event": event, "t": CACurrentMediaTime(), "offset": offset,
+                "height": height, "bounds": rect(sidebar.bounds), "rows": rows,
+                "insets": [insets.top, insets.bottom, insets.top, insets.bottom],
                 "tracking": sidebar.isTracking, "dragging": sidebar.isDragging, "decelerating": sidebar.isDecelerating,
-                "pan": sidebar.panGestureRecognizer.state.rawValue, "panVelocity": sidebar.panGestureRecognizer.velocity(in: sidebar).y,
-                "topDistance": sidebar.contentOffset.y - top, "bottomDistance": bottom - sidebar.contentOffset.y,
+                "topDistance": offset - top, "bottomDistance": bottom - offset,
                 "bar": nav.map { rect($0.convert($0.bounds, to: window)) } ?? [],
                 "title": labels.map { rect($0.convert($0.bounds, to: window)) } ?? [],
                 "banner": banners.map { rect($0.convert($0.bounds, to: window)) } ?? [],
-                "bannerHidden": banners?.isHidden ?? true, "headerState": String(describing: home.headerState),
+                "bannerHidden": banners == nil, "headerState": String(describing: home.headerState),
                 "order": sidebar.rows.map(\.id), "working": sidebar.rows.filter { $0.status == .working }.map(\.id), "updates": sent]
     }
 }

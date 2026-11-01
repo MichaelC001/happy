@@ -14,9 +14,9 @@ import UIKit
 ///   - "No sessions yet" on a reachable computer with nothing on it;
 ///   - the session list otherwise.
 ///
-/// Every state has home's bar: the account's picture at the left,
-/// "Sessions" with the connection under it, and the filter menu and
-/// settings at the right.
+/// Every state has home's bar: the account switcher at the left, its name
+/// giving way to the link's status while the account isn't live
+/// (`AccountSwitcher.link`), and the filter menu and settings at the right.
 ///
 /// Nothing is typed here: compose in the bar (`compose()`) opens an empty
 /// chat, whose first send starts the session (`LegacyComposeStart`). It is
@@ -44,6 +44,11 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     private var content: UIViewController?
     private var preparesArchives = false
     private var switcher: AccountSwitcher?
+    /// The list's room under the bar and above the toolbar, as home last
+    /// stood with it (`HomeListRoom`).
+    private var room: HomeListRoom?
+    /// On top of the stack, neither coming nor going.
+    private var standing = false
 
     public init(context: AppContext, session: AccountSession) {
         self.context = context
@@ -59,7 +64,7 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(Palette.groupedBackground)
-        showsBackTitle()
+        minimalBackButton()
         switcher = AccountSwitcher(context: context, controller: self)
         let pipeline = ApplyPipeline<HomeDerivation.Input, HomeDerivation.Applied, HomeUpdate>(
             input: HomeDerivation.Input(
@@ -85,11 +90,25 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         observation = pipeline.observation
         // Tablet (HappyUI/Tablet): the shell flips this with the window's width.
         registerForTraitChanges([TabletLayoutTrait.self]) { (self: Self, _) in self.updateNavigation(animated: false) }
-        // The stream ends when the session stops.
-        let statusUpdates = session.statusUpdates
+        // The link as home's title says it, and as this account's chats do.
+        linkWatch = LegacyLink.link(for: session).watch { [weak self] in self?.headerState = $0 }
+        networkWatch = NetworkPath.shared.watch { [weak self] satisfied in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let back = satisfied && !self.networkPath
+                self.networkPath = satisfied
+                // Back from airplane mode: reconnect, and send what waited, now.
+                if back, self.isCurrentAccount { Task { [session = self.session] in await session.networkReturned() } }
+            }
+        }
+        // An archive, leave or delete refused with no screen waiting on it
+        // (sent after a relaunch, or once back online): put back already,
+        // and said here, once. The stream ends when the session stops.
+        let intents = session.sync.intents
         Task { @MainActor [weak self] in
-            for await status in statusUpdates {
-                self?.status = status
+            for await rejection in await intents.rejections() where !rejection.heard {
+                guard let self, self.isCurrentAccount, let front = HomeSessionActions.front(of: self.view.window) else { continue }
+                Alerts.show(Strings.Common.error, HomeSessionActions.message(SessionActionError(refusal: rejection.reason), rejection.intent.kind), on: front)
             }
         }
         // sync.ts `nativeUpdateSync`: asked at start and whenever the app
@@ -99,7 +118,6 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         // Midnight, a new time zone, a clock set by hand: the stamps are
         // written again, off the main thread.
         NotificationCenter.default.addObserver(self, selector: #selector(clockChanged), name: UIApplication.significantTimeChangeNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(rendererChanged), name: HomeRendererPreference.didChange, object: nil)
     }
 
     /// Something can be started from compose: a computer is linked and,
@@ -135,21 +153,39 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
 
     public override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        rendererChanged()
+        prepareArchivesIfNeeded()
         // The server may have changed on a screen pushed from here.
         updateNavigation(animated: animated)
         HomeToolbar.show(for: self, animated: animated)
     }
 
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        standing = true
+        // The bar and the toolbar are where home rests: the list's room is
+        // read from them again.
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+    }
+
     public override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        standing = false
         HomeToolbar.leave(self, animated: animated)
+    }
+
+    public override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        // UIKit doesn't always lay home out after the toolbar's return.
+        view.setNeedsLayout()
     }
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         switcher?.layout()
-        applyInsets(HomeContentInsets(underBar: LayoutInsets(view.safeAreaInsets), dock: 0))
+        let room = HomeListRoom(size: view.bounds.size, safeArea: LayoutInsets(view.safeAreaInsets), control: nil, standing: standing, kept: room)
+        self.room = room
+        applyInsets(room.insets)
     }
 
     private var isCurrentAccount: Bool {
@@ -166,7 +202,7 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     }
 
     private func prepareArchivesIfNeeded() {
-        let wanted = state?.kind == .list && context.account.localSettings.homeListRenderer == .ultraList && !traitCollection.isTabletLayout
+        let wanted = state?.kind == .list && !traitCollection.isTabletLayout
         guard wanted != preparesArchives else { return }
         preparesArchives = wanted
         pipeline?.update { $0.preparesArchives = wanted }
@@ -252,17 +288,9 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         return controller
     }
 
-    @objc private func rendererChanged() {
-        prepareArchivesIfNeeded()
-        guard isCurrentAccount, let list = content as? SessionListViewController,
-              list.rendererPreference != context.account.localSettings.homeListRenderer else { return }
-        embed(makeList(list.model, changeset: RowChangeset()), animated: false)
-        updateNavigation(animated: false)
-    }
-
     private func embed(_ next: UIViewController, animated: Bool) {
         let previous = content
-        (previous as? SessionListViewController)?.deactivateRenderer()
+        (previous as? SessionListViewController)?.deactivate()
         content = next
         previous?.willMove(toParent: nil)
         addChild(next)
@@ -291,23 +319,15 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         let blank = floating && traitCollection.isTabletLayout
         content?.view.isHidden = blank
         if floating {
-            // The account's name is the bar's title; the connection hangs under it.
-            let headerState: Strings.HeaderStatus.State = switch status {
-            case .connected: .online
-            case .connecting: .connecting
-            case .disconnected, .error: .offline
-            }
-            switcher?.subtitle = Strings.HeaderStatus.text(headerState)
             // Beside the sidebar home draws nothing, but the bar is over
             // the sidebar too: the switcher stays, or a tablet has no way
             // to the accounts at all.
             navigationItem.leftBarButtonItem = switcher?.barItem
             let items: [HeaderBar.Trailing: UIBarButtonItem] = [.filter: filterItem, .settings: settingsItem]
-            if canCompose, let host = self as UIViewController as? ComposeHosting {
-                let compose = composeItem(host)
-                compose.sharesBackground = false
-                toolbarItems = [.flexibleSpace(), compose]
-            } else { toolbarItems = nil }
+            // The same items each time: a button rebuilt under a finger
+            // drops its tap, and home updates with every connection change.
+            let toolbar = canCompose ? composeItems : nil
+            if toolbarItems != toolbar { toolbarItems = toolbar }
             navigationItem.rightBarButtonItems = blank ? nil : HeaderBar.trailing(items)
             if navigationController?.topViewController === self { HomeToolbar.show(for: self, animated: animated) }
         }
@@ -349,17 +369,26 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         return [grouping, UIMenu(options: .displayInline, children: [appearance])]
     }
 
-    /// The connection, under "Sessions" while it isn't connected.
+    /// What the title says of the account's link (`LegacyLink`): the
+    /// account's name while it is online, else the status in its place.
     /// Not private, so a test can flip it.
-    var status: RealtimeStatus = HomeConnectionStatus.initial {
-        didSet { if status != oldValue { updateNavigation(animated: false) } }
+    var headerState: Strings.HeaderStatus.State = .online {
+        didSet { if headerState != oldValue { switcher?.link = headerState } }
     }
+    private var linkWatch: Watch?
+
+    /// Whether the phone has a way out at all (`NetworkPath`): its return
+    /// reconnects at once.
+    private var networkPath = NetworkPath.shared.isSatisfied
+    private var networkWatch: NetworkPathWatch?
 
     private lazy var settingsItem = HeaderBar.settingsItem { [weak self] in self?.openSettings() }
 
-    private func composeItem(_ host: ComposeHosting) -> UIBarButtonItem {
-        HeaderBar.composeItem { [weak host] in host?.compose() }
-    }
+    private lazy var composeItems: [UIBarButtonItem] = {
+        let item = HeaderBar.composeItem { [weak self] in self?.compose() }
+        item.sharesBackground = false
+        return [.flexibleSpace(), item]
+    }()
 
     private lazy var filterItem: UIBarButtonItem = {
         let item = UIBarButtonItem(image: .icon(.ionicons("filter"), size: 22), menu: filterMenu())
@@ -429,8 +458,8 @@ final class TroubleshootViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = Strings.Troubleshoot.title
-        guide.onOpenWebsite = {
-            UIApplication.shared.open(Strings.Onboarding.desktopURL)
+        guide.onOpenWebsite = { [weak self] in
+            self?.openBrowser(Strings.Onboarding.desktopURL)
         }
         prompt.button.onTap = { [weak self] in self?.copyPrompt() }
     }

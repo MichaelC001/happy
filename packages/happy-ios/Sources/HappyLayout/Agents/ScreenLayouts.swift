@@ -3,11 +3,10 @@ import Foundation
 import CoreGraphics
 #endif
 
-/// V2 home between home's header and dock: the banner at the top
-/// of the content, the list under it scrolling the whole screen, and the
-/// empty state in the space the list would take.
+/// V2 home between home's header and dock: the list scrolling the whole
+/// screen, its rows (the notice first, when there is one) starting under
+/// the header, and the empty state in the space the list would take.
 public struct HomeLayout: Equatable, Sendable {
-    public var banner: CGRect
     public var listInsets: LayoutInsets
     public var indicatorInsets: LayoutInsets
     public var empty: CGRect
@@ -18,15 +17,12 @@ public struct HomeLayout: Equatable, Sendable {
 
     /// `contentTop` is where content starts under the header, `chromeTop`
     /// the header's own foot, `listBottom` the room the dock keeps,
-    /// `storiesHeight` the room the stories open under the header (0:
-    /// closed into the title, or not drawn), `maxWidth` how wide the
-    /// content may grow.
-    public init(size: CGSize, contentTop: CGFloat, chromeTop: CGFloat, listBottom: CGFloat, bannerHeight: CGFloat, storiesHeight: CGFloat = 0, maxWidth: CGFloat = .greatestFiniteMagnitude, bannerOverlaysList: Bool = false) {
+    /// `maxWidth` how wide the content may grow.
+    public init(size: CGSize, contentTop: CGFloat, chromeTop: CGFloat, listBottom: CGFloat, maxWidth: CGFloat = .greatestFiniteMagnitude) {
         let width = max(0, min(size.width, maxWidth))
         let left = ((size.width - width) / 2).rounded()
         content = CGRect(x: left, y: 0, width: width, height: size.height)
-        banner = CGRect(x: left, y: contentTop + max(0, storiesHeight), width: width, height: bannerHeight)
-        listInsets = LayoutInsets(top: bannerOverlaysList ? banner.minY : banner.maxY, left: 0, bottom: listBottom, right: 0)
+        listInsets = LayoutInsets(top: contentTop, left: 0, bottom: listBottom, right: 0)
         indicatorInsets = LayoutInsets(top: chromeTop, left: 0, bottom: listBottom, right: 0)
         empty = CGRect(x: left, y: contentTop, width: width, height: max(0, size.height - contentTop - listBottom))
     }
@@ -246,7 +242,10 @@ public struct ChatTitleLayout: Equatable, Sendable {
         barWidth > 0 ? max(0, barWidth - 2 * sideClearance) : .greatestFiniteMagnitude
     }
 
-    public init(textWidth: CGFloat, maxWidth: CGFloat, editing: Bool) {
+    /// `room`, when set, is the frame its header handed it, which a
+    /// squeezed bar can make narrower than `maxWidth`: the text is cut to it.
+    public init(textWidth: CGFloat, maxWidth: CGFloat, editing: Bool, room: CGFloat? = nil) {
+        let maxWidth = min(maxWidth, room ?? .greatestFiniteMagnitude)
         let fitted = min(textWidth.rounded(.up), maxWidth)
         let width = editing && maxWidth < .greatestFiniteMagnitude ? maxWidth : fitted
         size = CGSize(width: max(0, width), height: Self.height)
@@ -255,13 +254,17 @@ public struct ChatTitleLayout: Equatable, Sendable {
 }
 
 /// A picture opened whole: fitted inside the safe area on black, never
-/// enlarged past its own size, with its close button at the top right.
+/// enlarged past its own size, with its close button at the top right and
+/// its share button at the top left. A recording's player takes the safe
+/// area under the two, so its own controls never sit beneath them.
 public struct PictureViewerLayout: Equatable, Sendable {
     public static let closeSize: CGFloat = 44
     public static let closeInset: CGFloat = 8
 
     public var picture: CGRect
     public var close: CGRect
+    public var share: CGRect
+    public var player: CGRect
 
     /// `picture` is its size in points; zero before it is known.
     public init(size: CGSize, safeArea: LayoutInsets, picture natural: CGSize) {
@@ -274,5 +277,8 @@ public struct PictureViewerLayout: Equatable, Sendable {
             picture = area
         }
         close = CGRect(x: size.width - safeArea.right - Self.closeInset - Self.closeSize, y: safeArea.top + Self.closeInset, width: Self.closeSize, height: Self.closeSize)
+        share = CGRect(x: safeArea.left + Self.closeInset, y: close.minY, width: Self.closeSize, height: Self.closeSize)
+        let top = close.maxY + Self.closeInset
+        player = CGRect(x: area.minX, y: top, width: area.width, height: max(0, area.maxY - top))
     }
 }

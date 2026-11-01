@@ -65,6 +65,8 @@ struct ChatToolViews {
     var diffExpanded: [Int: Set<Int>] = [:]
     var diagrams = ChatMermaidHeights()
     var flush = true
+    /// An attachment still in the outbox: where it is on its way.
+    var delivery: OutboxDelivery?
 }
 
 // MARK: Tool rows (ToolView.tsx)
@@ -255,7 +257,7 @@ extension ChatRowRenderer {
         case .bash: bashView(message.tool, text: text)
         case .codexBash: codexBashView(message.tool, root: style.root, text: text)
         case .geminiExecute: geminiExecuteView(message.tool, text: text)
-        case .file: fileView(message.tool, text: text)
+        case .file: fileView(message.tool, delivery: views.delivery, text: text)
         }
     }
 
@@ -489,10 +491,24 @@ extension ChatRowRenderer {
 
     /// FileView: the picture a person attached, at its own shape, then its
     /// name on one line. Nothing when the input doesn't read as one.
-    static func fileView(_ tool: ToolCall, text: ChatRowText) -> ChatStackEntry? {
+    ///
+    /// One still in the outbox (`delivery`, the file's own item, by its
+    /// call id) is drawn from this device's copy, dimmed under Telegram's
+    /// ring: its cross takes out just this file, and once it failed the
+    /// ring's arrow sends it again.
+    static func fileView(_ tool: ToolCall, delivery: OutboxDelivery? = nil, text: ChatRowText) -> ChatStackEntry? {
         guard let file = ToolFileInput(tool.input) else { return nil }
         let name = MeasuredText(ChatTextStyles.attachmentName.string(file.name, color: Palette.textSecondary, lineBreakMode: .byTruncatingTail, in: text.environment), maxLines: 1)
-        let attachment = ChatAttachment(ref: file.ref, thumbhash: file.thumbhash)
+        var attachment = ChatAttachment(
+            ref: file.ref, thumbhash: file.thumbhash, size: file.size.map { Int($0) },
+            isVideo: file.isVideo, name: file.name, mimeType: file.mimeType)
+        var tap: ChatRowAction?
+        if let delivery, let localId = tool.callId {
+            let failed = if case .failed = delivery { true } else { false }
+            attachment.local = localId
+            attachment.upload = ChatUpload(key: UploadProgressBoard.outboxKey(localId), failed: failed)
+            tap = failed ? .retry(localId: localId) : .cancelUpload(messageId: localId, piece: localId)
+        }
         func layout(_ width: CGFloat) -> FileViewLayout {
             FileViewLayout(width: width, imageWidth: file.imageWidth, imageHeight: file.imageHeight, name: name.measurable)
         }
@@ -500,7 +516,17 @@ extension ChatRowRenderer {
             let layout = layout(frame.width)
             let image = layout.image.offsetBy(dx: frame.minX, dy: frame.minY)
             let nameFrame = layout.name.offsetBy(dx: frame.minX, dy: frame.minY)
-            return ([.attachment(attachment, frame: image), .text(name.layout(for: nameFrame), nameFrame)], [])
+            // Sending: the ring's cross or retry. Sent: Telegram's download
+            // ring, a tap reading, pausing or resuming it; a recording's
+            // play button plays it streaming, its badge the download.
+            let hits: [ChatHit] = if let tap {
+                [ChatHit(frame: ChatUpload.ring(in: image).insetBy(dx: -8, dy: -8), action: tap)]
+            } else if attachment.isVideo {
+                [ChatHit(frame: MediaStatusLayout.badgeHit(in: image), action: .toggleDownload(file.ref)), ChatHit(frame: image, action: .playAttachment(attachment))]
+            } else {
+                [ChatHit(frame: image, action: .toggleDownload(file.ref))]
+            }
+            return ([.attachment(attachment, frame: image), .text(name.layout(for: nameFrame), nameFrame)], hits)
         })
     }
 

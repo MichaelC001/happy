@@ -55,8 +55,9 @@ public enum AgentInputControl: Sendable {
 
 /// How the round button is painted.
 public enum AgentInputPrimaryStyle: Sendable {
-    /// AgentInput.tsx's chat composer: send on `surfaceHighest`, stop black
-    /// (light) or #F5F5F5 (dark), idle grey.
+    /// AgentInput.tsx's chat composer: send and stop on `surfaceHighest`,
+    /// idle grey. (AgentInput.tsx paints stop black, or #F5F5F5 in dark;
+    /// here stop keeps send's button so only the glyph changes.)
     case standard
     /// HomeDock.tsx's focused composer: send and stop share the solid fill
     /// (`sendButtonActive`) with `primaryActionIconColor`; idle is
@@ -172,12 +173,26 @@ public struct AgentInputChipConfiguration: Equatable, Sendable {
     /// The chip opens its owner's own picker instead of a menu: a press is
     /// `agentInputCard(_:didPress:)`, and `menu` is not drawn.
     public var opensPicker: Bool
+    /// A usage ring before the label (`ChipRingLayout`): what is left of the
+    /// window the selected account warns about. Nil draws none.
+    public var ring: Ring?
 
-    public init(content: Content, accessibilityLabel: String, menu: AgentInputMenu?, opensPicker: Bool = false) {
+    public struct Ring: Equatable, Sendable {
+        public var left: Int
+        public var tone: AccountUsage.Tone
+
+        public init(left: Int, tone: AccountUsage.Tone) {
+            self.left = left
+            self.tone = tone
+        }
+    }
+
+    public init(content: Content, accessibilityLabel: String, menu: AgentInputMenu?, opensPicker: Bool = false, ring: Ring? = nil) {
         self.content = content
         self.accessibilityLabel = accessibilityLabel
         self.menu = menu
         self.opensPicker = opensPicker
+        self.ring = ring
     }
 }
 
@@ -386,6 +401,8 @@ public final class AgentInputCardView: UIView {
     private let expandButton = ComposerIconButton(icon: .ionicons("expand-outline"), size: AgentInputCardLayout.Metrics.expandIconSize)
     private let attachmentStrip = AttachmentStripView()
     private let addButton = ComposerIconButton(icon: .ionicons("add"), size: MobileComposerMetrics.mobile.addIconSize)
+    /// The "+", for what it opens to sit over (the iPad's attachment card).
+    var addControl: UIView { addButton }
     private let middle = UIView()
     private let permissionChip = ComposerChipButton(chip: .permission)
     private let modelChip = ComposerChipButton(chip: .model)
@@ -485,6 +502,7 @@ public final class AgentInputCardView: UIView {
         surface.addSubview(inputGroup)
         surface.addSubview(actionsGroup)
 
+        attachmentStrip.onGone = { [weak self] in self?.setNeedsLayout() }
         attachmentStrip.onRemove = { [weak self] id in
             guard let self else { return }
             self.delegate?.agentInputCard(self, didRemoveAttachment: id)
@@ -1177,7 +1195,8 @@ public final class AgentInputCardView: UIView {
             attachmentStrip.insets = layout.attachmentInsets
             attachmentStrip.setLayoutFrame(strip)
         } else {
-            attachmentStrip.isHidden = true
+            // The last picture shrinking out stays where it was until it has gone.
+            attachmentStrip.isHidden = attachmentStrip.drawnThumbnails.isEmpty
         }
         let padded = textView.textContainerInset.top != layout.textPaddingTop || textView.textContainerInset.bottom != layout.textPaddingBottom
         if padded {
@@ -1237,7 +1256,8 @@ public final class AgentInputCardView: UIView {
             attachmentStrip.insets = .panel
             attachmentStrip.setLayoutFrame(strip)
         } else {
-            attachmentStrip.isHidden = true
+            // The last picture shrinking out stays where it was until it has gone.
+            attachmentStrip.isHidden = attachmentStrip.drawnThumbnails.isEmpty
         }
         textView.setLayoutFrame(layout.text)
         if textView.isScrollEnabled != layout.textScrolls {
@@ -1364,10 +1384,15 @@ public final class AgentInputCardView: UIView {
             || previous.zenMode != config.zenMode
             || previous.compact != config.compact
             || Self.panelShape(previous.desktop) != Self.panelShape(config.desktop) {
-            // Chips that come with the session's record, a picture, the
-            // panel: the card takes its new height at once. Only what is
-            // typed animates.
-            reportHeightChange(animated: false)
+            // Chips that come with the session's record, the panel: the
+            // card takes its new height at once. What is typed, and a
+            // picture added or taken out on screen, animates.
+            let picturesOnly = previous.attachments.count != config.attachments.count
+                && previous.inputMinHeight == config.inputMinHeight && previous.showsAdd == config.showsAdd
+                && previous.permission == config.permission && previous.model == config.model
+                && previous.effort == config.effort && previous.zenMode == config.zenMode
+                && previous.compact == config.compact && Self.panelShape(previous.desktop) == Self.panelShape(config.desktop)
+            reportHeightChange(animated: picturesOnly && window != nil)
             setNeedsLayout()
         }
     }
@@ -1567,6 +1592,7 @@ final class ComposerChipButton: UIButton {
     }
     private let label = UILabel()
     private let iconView = IconView(size: AgentInputCardLayout.Metrics.permissionIconSize, tint: Palette.text)
+    private let ringView = UsageRingView()
     private var chipConfiguration: AgentInputChipConfiguration?
 
     /// The label, in the chip, from the layout.
@@ -1581,6 +1607,8 @@ final class ComposerChipButton: UIButton {
         label.isUserInteractionEnabled = false
         addSubview(label)
         addSubview(iconView)
+        ringView.isHidden = true
+        addSubview(ringView)
         showsMenuAsPrimaryAction = false
         // The menus list their rows top-down in our order (SwiftUI's
         // `.menuOrder(.fixed)`, which happy-app gets by pre-reversing).
@@ -1609,13 +1637,18 @@ final class ComposerChipButton: UIButton {
         fatalError("init(coder:) is not supported")
     }
 
-    /// The label's or glyph's one-line size.
+    /// The label's or glyph's one-line size, with the ring before it.
     var contentSize: CGSize {
         switch chipConfiguration?.content {
         case .icon: iconView.sizeThatFits(.zero)
-        case .label: label.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
+        case .label:
+            chipConfiguration?.ring == nil ? labelSize : ChipRingLayout.contentSize(label: labelSize)
         case nil: .zero
         }
+    }
+
+    private var labelSize: CGSize {
+        label.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
     }
 
     /// The card's text size; nil draws the designed 14.
@@ -1643,6 +1676,9 @@ final class ComposerChipButton: UIButton {
         }
         accessibilityLabel = configuration.accessibilityLabel
         alpha = configuration.menu != nil || configuration.opensPicker ? 1 : AgentInputCardLayout.Metrics.disabledChipOpacity
+        ringView.isHidden = configuration.ring == nil
+        if let ring = configuration.ring { ringView.reading = (ring.left, ring.tone) }
+        setNeedsLayout()
         applyMenu()
     }
 
@@ -1669,12 +1705,18 @@ final class ComposerChipButton: UIButton {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        label.frame = labelFrame
         iconView.frame = labelFrame
+        if chipConfiguration?.ring != nil {
+            let split = ChipRingLayout(content: labelFrame, labelHeight: labelSize.height)
+            ringView.frame = split.ring
+            label.frame = split.label
+        } else {
+            label.frame = labelFrame
+        }
     }
 
     override var isHighlighted: Bool {
-        didSet { label.alpha = isHighlighted ? 0.7 : 1; iconView.alpha = label.alpha }
+        didSet { label.alpha = isHighlighted ? 0.7 : 1; iconView.alpha = label.alpha; ringView.alpha = label.alpha }
     }
 
     /// `hitSlop={6}`.
@@ -1768,10 +1810,13 @@ final class ComposerOptionsButton: UIButton {
 final class ComposerPrimaryButton: ComposerPressableButton {
     private let flashOverlay = UIView()
     private let iconView = IconView(size: AgentInputCardLayout.Metrics.primaryIconSize)
+    /// Stop's rounded square, in place of the icon.
+    let stopView = StopGlyphView(glyphSize: AgentInputCardLayout.Metrics.primaryIconSize)
     private let spinner = UIActivityIndicatorView(style: .medium)
     private var action: AgentInputPrimaryAction = .idle
     private var style: AgentInputPrimaryStyle = .standard
     private var busy = false
+    private var configured = false
 
     /// The refusal wash's alpha, drawn under the glyph on Stop only.
     var flash: CGFloat = 0 {
@@ -1784,6 +1829,8 @@ final class ComposerPrimaryButton: ComposerPressableButton {
         flashOverlay.isUserInteractionEnabled = false
         addSubview(flashOverlay)
         addSubview(iconView)
+        stopView.isHidden = true
+        addSubview(stopView)
         spinner.hidesWhenStopped = true
         addSubview(spinner)
         isAccessibilityElement = true
@@ -1799,13 +1846,18 @@ final class ComposerPrimaryButton: ComposerPressableButton {
     }
 
     func configure(action: AgentInputPrimaryAction, style: AgentInputPrimaryStyle, busy: Bool, accessibilityLabel: String?) {
+        // Send to stop and back is the one button changing its glyph, so
+        // the glyph changes in place: the old one shrinks away as the new
+        // one grows in.
+        let wasStop = self.action == .stop
+        let glyphChanges = configured && !busy && !self.busy && wasStop != (action == .stop)
+        configured = true
         self.action = action
         self.style = style
         self.busy = busy
         switch action {
         case .stop:
-            iconView.icon = .octicons("stop")
-            iconView.size = AgentInputCardLayout.Metrics.primaryIconSize
+            break
         case .blocked:
             iconView.icon = .ionicons("lock-closed")
             iconView.size = AgentInputCardLayout.Metrics.lockIconSize
@@ -1822,13 +1874,50 @@ final class ComposerPrimaryButton: ComposerPressableButton {
         isEnabled = !busy && action != .idle
         if busy {
             spinner.startAnimating()
-            iconView.isHidden = true
         } else {
             spinner.stopAnimating()
-            iconView.isHidden = false
         }
         self.accessibilityLabel = accessibilityLabel ?? (action == .stop ? Strings.Composer.stop : Strings.Composer.send)
-        applyColors()
+        if glyphChanges, window != nil {
+            showGlyph(from: wasStop ? stopView : iconView)
+        } else {
+            showGlyph(from: nil)
+            applyColors()
+        }
+    }
+
+    /// The icon, or stop's square: whichever the action draws. `from`, the
+    /// glyph going away, shrinks and fades out as the new one grows in,
+    /// and the fill changes with them.
+    private func showGlyph(from old: UIView?) {
+        let new: UIView = action == .stop ? stopView : iconView
+        guard let old, old !== new else {
+            for glyph in [iconView, stopView] {
+                glyph.layer.removeAllAnimations()
+                glyph.alpha = 1
+                glyph.transform = .identity
+                glyph.isHidden = busy || glyph !== new
+            }
+            return
+        }
+        let motion = AgentInputPrimaryGlyphMotion.self
+        let shrunk = UIAccessibility.isReduceMotionEnabled ? .identity : CGAffineTransform(scaleX: motion.scale, y: motion.scale)
+        new.isHidden = false
+        new.alpha = 0
+        new.transform = shrunk
+        UIView.animate(withDuration: motion.duration, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseInOut]) {
+            new.alpha = 1
+            new.transform = .identity
+            old.alpha = 0
+            old.transform = shrunk
+            self.applyColors()
+        } completion: { _ in
+            // A later change may have made the old glyph the shown one again.
+            guard old !== (self.action == .stop ? self.stopView : self.iconView) else { return }
+            old.isHidden = true
+            old.alpha = 1
+            old.transform = .identity
+        }
     }
 
     private func applyColors() {
@@ -1840,6 +1929,7 @@ final class ComposerPrimaryButton: ComposerPressableButton {
             let filled = !busy && (action == .send || action == .stop)
             backgroundColor = UIColor(filled ? Palette.composerNewSessionPrimaryFill : Palette.surfaceHighest)
             iconView.tintColor = UIColor(filled ? Palette.composerNewSessionPrimaryIcon : Palette.textSecondary)
+            stopView.tintColor = iconView.tintColor
             spinner.color = UIColor(Palette.textSecondary)
             return
         }
@@ -1847,8 +1937,9 @@ final class ComposerPrimaryButton: ComposerPressableButton {
         // blocked and abortable, and must not look locked.
         switch action {
         case .stop:
-            backgroundColor = UIColor(Palette.composerStopFill)
-            iconView.tintColor = UIColor(Palette.composerStopIcon)
+            // Send's fill and tint: the one button, its glyph changed.
+            backgroundColor = UIColor(Palette.surfaceHighest)
+            stopView.tintColor = UIColor(Palette.text)
         case .blocked:
             backgroundColor = UIColor(Palette.surfaceHigh)
             layer.borderWidth = 1
@@ -1861,10 +1952,7 @@ final class ComposerPrimaryButton: ComposerPressableButton {
             backgroundColor = UIColor(Palette.composerPrimaryInactive)
             iconView.tintColor = UIColor(Palette.textSecondary)
         }
-        // AgentInput.tsx: black on Stop in dark, the text colour otherwise.
-        spinner.color = action == .stop && traitCollection.userInterfaceStyle == .dark
-            ? .black
-            : UIColor(Palette.text)
+        spinner.color = UIColor(Palette.text)
     }
 
     private func applyFlash() {
@@ -1876,8 +1964,13 @@ final class ComposerPrimaryButton: ComposerPressableButton {
         super.layoutSubviews()
         layer.cornerRadius = bounds.height / 2
         flashOverlay.frame = bounds
-        iconView.frame = bounds
-        spinner.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        // Bounds and centre, not frame: a glyph may be mid-scale.
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        for glyph in [iconView, stopView] as [UIView] {
+            glyph.bounds = CGRect(origin: .zero, size: bounds.size)
+            glyph.center = center
+        }
+        spinner.center = center
     }
 }
 
@@ -1894,6 +1987,8 @@ final class PassthroughView: UIView {
 /// React Native's does; `insets` leave the buttons room inside it.
 final class AttachmentStripView: UIScrollView {
     var onRemove: ((String) -> Void)?
+    /// A picture finished going.
+    var onGone: (() -> Void)?
 
     var insets: AgentInputCardLayout.AttachmentInsets = .panel {
         didSet { if insets != oldValue { setNeedsLayout() } }
@@ -1907,6 +2002,9 @@ final class AttachmentStripView: UIScrollView {
     }
 
     private var thumbnails: [AttachmentThumbnailView] = []
+    /// Come in since the last layout: they grow in where they land.
+    private var arriving: Set<ObjectIdentifier> = []
+    private var animatesNext = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -1921,7 +2019,12 @@ final class AttachmentStripView: UIScrollView {
         fatalError("init(coder:) is not supported")
     }
 
+    /// Telegram's input panel: a picture that comes in grows from the
+    /// middle of its place as it fades in, one that goes shrinks and fades
+    /// where it was, and the rest slide to their new places, on the
+    /// 0.4 s `.spring` curve. Only on screen; a draft restored arrives as it is.
     private func rebuild() {
+        let animated = window != nil
         let existing = Dictionary(thumbnails.map { ($0.attachment.id, $0) }, uniquingKeysWith: { first, _ in first })
         var next: [AttachmentThumbnailView] = []
         for attachment in attachments {
@@ -1932,24 +2035,67 @@ final class AttachmentStripView: UIScrollView {
                 view.onRemove = { [weak self] id in self?.onRemove?(id) }
                 addSubview(view)
                 next.append(view)
+                if animated { arriving.insert(ObjectIdentifier(view)) }
             }
         }
         let kept = Set(next.map(ObjectIdentifier.init))
         for view in thumbnails where !kept.contains(ObjectIdentifier(view)) {
-            view.removeFromSuperview()
+            guard animated else {
+                view.removeFromSuperview()
+                continue
+            }
+            view.isUserInteractionEnabled = false
+            let animator = UIViewPropertyAnimator(duration: Self.duration, timingParameters: AttachMenuSprings.openCurve())
+            animator.addAnimations {
+                view.alpha = 0
+                view.transform = CGAffineTransform(scaleX: 0.2, y: 0.2)
+            }
+            animator.addCompletion { [weak self] _ in
+                view.removeFromSuperview()
+                self?.onGone?()
+            }
+            animator.startAnimation()
         }
         thumbnails = next
+        animatesNext = animated
         setNeedsLayout()
     }
+
+    private static let duration: TimeInterval = 0.4
 
     override func layoutSubviews() {
         super.layoutSubviews()
         let placed = AgentInputCardLayout.attachmentThumbnails(count: thumbnails.count, insets: insets)
+        let animated = animatesNext
+        animatesNext = false
+        var moves: [() -> Void] = []
         for (view, frame) in zip(thumbnails, placed.frames) {
-            view.setLayoutFrame(frame)
+            if arriving.remove(ObjectIdentifier(view)) != nil {
+                UIView.performWithoutAnimation {
+                    view.setLayoutFrame(frame)
+                    view.alpha = 0
+                    view.transform = CGAffineTransform(scaleX: 0.2, y: 0.2)
+                }
+                moves.append {
+                    view.alpha = 1
+                    view.transform = .identity
+                }
+            } else if animated, view.transform == .identity {
+                moves.append { view.setLayoutFrame(frame) }
+            } else {
+                view.setLayoutFrame(frame)
+            }
         }
         contentSize = CGSize(width: placed.contentWidth, height: bounds.height)
+        guard !moves.isEmpty else { return }
+        let animator = UIViewPropertyAnimator(duration: Self.duration, timingParameters: AttachMenuSprings.openCurve())
+        animator.addAnimations { moves.forEach { $0() } }
+        animator.isUserInteractionEnabled = true
+        animator.startAnimation()
     }
+
+    /// For tests: the thumbnails as drawn, those on their way out too.
+    var drawnThumbnails: [UIView] { subviews.filter { $0 is AttachmentThumbnailView } }
 }
 
 /// One thumbnail: the picture (cover, radius 8) in a 1pt divider ring,

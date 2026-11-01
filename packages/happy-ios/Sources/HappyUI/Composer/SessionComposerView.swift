@@ -48,26 +48,14 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
 
     var hasPermissionMenu: Bool { card.configuration.permission?.menu != nil }
 
-    func chatMenuElements(onInfo: @escaping () -> Void) -> [UIMenuElement] {
-        card.closeMenus()
-        var elements: [UIMenuElement] = []
-        if let configuration = permissionChips.first?.1, let menu = configuration.menu {
-            let permissions = UIMenu(menu) { [weak self] key in
-                guard let self else { return }
-                self.agentInputCard(self.card, didSelect: key, in: .permission)
-            }
-            elements.append(UIMenu(title: configuration.accessibilityLabel, identifier: .init("chat-permissions"), children: permissions.children))
+    /// The permission modes for the session's profile, a pick going the
+    /// card's own way (`agentInputCard(_:didSelect:in:)`).
+    var permissionChoice: PermissionModeChoice? {
+        guard let menu = card.configuration.permission?.menu else { return nil }
+        return PermissionModeChoice(menu: menu) { [weak self] key in
+            guard let self else { return }
+            self.agentInputCard(self.card, didSelect: key, in: .permission)
         }
-        let details = UIAction(title: Strings.Home.details) { _ in onInfo() }
-        details.accessibilityIdentifier = "chat-info"
-        elements.append(details)
-        return elements
-    }
-
-    private var permissionChips: [(AgentInputChip, AgentInputChipConfiguration)] {
-        guard var configuration = card.configuration.permission else { return [] }
-        configuration.accessibilityLabel = Strings.ChatActions.permissionMode
-        return [(.permission, configuration)]
     }
     private let statusDot = StatusDotView()
     private let statusLabel = UILabel()
@@ -78,8 +66,35 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
     private var state: ChatComposerState?
     private var picks = ComposerPicks()
     private var modes: ComposerModes
-    private var status: ComposerStatus?
+    /// The session's status: the header's capsule says it
+    /// (`headerStatus`), not the row over the card, which says only a
+    /// voice session's.
+    private var status: ComposerStatus? {
+        didSet { if status != oldValue { composerDelegate?.composerDidChangeHeaderStatus(self) } }
+    }
     private var vibingWord = ComposerStatus.randomVibingWord()
+
+    var headerStatus: ChatHeaderStatus? { status.map(Self.headerStatus) }
+
+    static func headerStatus(_ status: ComposerStatus) -> ChatHeaderStatus {
+        var header = ChatHeaderStatus(text: text(status.text), color: UIColor(color(status.tone)))
+        if case .thinking = status.text { header.working = true }
+        return header
+    }
+
+    /// What the header says before the composer is made: from the record
+    /// home already holds, so the chat's first frame has it.
+    static func headerStatus(record: SessionRecord, now presenceNow: Int64?) -> ChatHeaderStatus {
+        headerStatus(ComposerStatus(record: record, now: presenceNow ?? now, vibingWord: ComposerStatus.randomVibingWord()))
+    }
+
+    /// Every status the header may say, for its line's width: those with
+    /// fixed words, each vibing word, and the longest "last seen"s.
+    static var headerStatuses: [String] {
+        [Strings.Composer.online, Strings.Composer.permissionRequired, Strings.Composer.inputRequired]
+            + [ComposerStatus.LastSeen.justNow, .minutes(59), .hours(23), .days(6)].map { Strings.Composer.lastSeen(lastSeen($0)) }
+            + ComposerStatus.vibingMessages.map { text(.thinking($0.lowercased() + "…")) }
+    }
     private var usage: ComposerUsage?
     private var showsPreciseContext = false
     private var detailsVisible = true
@@ -101,6 +116,19 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
     /// Picked images wait here until the outbox has its own copies.
     private let staging: ComposerAttachmentStaging
     private let images: ComposerImagePicker
+    /// The "+" menu and what it opens, as the agent chat has them.
+    private lazy var attach = AttachMenuPresenter(pictures: images, composer: .init(
+        textView: { [weak self] in self?.card.textView },
+        focus: { [weak self] in self?.card.focus() },
+        addControl: { [weak self] in self?.card.addControl },
+        text: { [weak self] in self?.card.text ?? "" },
+        setText: { [weak self] text in
+            guard let self else { return }
+            card.setText(text, selection: NSRange(location: (text as NSString).length, length: 0))
+            agentInputCardDidChangeText(card)
+        },
+        send: { [weak self] in self?.sendPressed() }
+    ))
 
     /// useActiveSuggestions: the last list and its highlighted row, kept
     /// while the query moves, shown only while there is a query.
@@ -462,7 +490,7 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
             paddingH: paddingH,
             maxContentWidth: maxContentWidth,
             screenWidth: screenWidth,
-            statusText: status == nil && voiceStatus == nil ? nil : statusSize,
+            statusText: voiceStatus == nil ? nil : statusSize,
             panel: card.panelInput(width: innerWidth),
             usageWeek: usage?.weekPercent == nil ? nil : weekSize,
             usageContext: usage?.context == nil ? nil : contextButton.labelSize
@@ -737,8 +765,10 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
         abort()
     }
 
+    /// Telegram's attachment menu, as the agent chat's "+" opens it.
     func agentInputCardDidPressAdd(_ card: AgentInputCardView) {
-        images.attach()
+        guard SessionComposerRules.canUseAttachments(state?.session.record), let host = hostViewController else { return }
+        attach.present(from: host)
     }
 
     func agentInputCard(_ card: AgentInputCardView, didRemoveAttachment id: String) {
@@ -1088,15 +1118,10 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
             statusSize = statusLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
             statusDot.backgroundColor = color
             statusDot.isPulsing = true
-        } else if let status {
-            let color = UIColor(Self.color(status.tone))
-            statusLabel.attributedText = style.attributedString(Self.text(status.text), color: color, lineBreakMode: .byTruncatingTail)
-            statusSize = statusLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
-            statusDot.backgroundColor = color
-            statusDot.isPulsing = status.isPulsing
         }
-        statusDot.isHidden = status == nil && voiceStatus == nil
-        statusLabel.isHidden = status == nil && voiceStatus == nil
+        // The session's own status is the header's (`headerStatus`).
+        statusDot.isHidden = voiceStatus == nil
+        statusLabel.isHidden = voiceStatus == nil
         statusLabel.isUserInteractionEnabled = voiceStatus != nil
         statusLabel.accessibilityTraits = voiceStatus == nil ? .staticText : .button
 

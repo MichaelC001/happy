@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -40,6 +39,8 @@ import com.slopus.happy.ui.chat.InlineQuestion
 import com.slopus.happy.ui.chat.InlineQuestionForm
 import com.slopus.happy.ui.chat.MarkdownView
 import com.slopus.happy.ui.components.HappyTextField
+import com.slopus.happy.ui.components.ShimmerSpec
+import com.slopus.happy.ui.components.ShimmerText
 import com.slopus.happy.ui.layout.LocalWindowLayout
 import com.slopus.happy.ui.layout.contentMaxWidth
 import com.slopus.happy.ui.theme.HappyTheme
@@ -79,7 +80,8 @@ object ConversationQuestionSpec {
  * without options takes free text: the question (15/20 medium), a field
  * (surface, radius 8, padding 12/10, at least 44 high) and Answer at the
  * end (14 semibold on surfaceHighest, radius 8, padding 20/12, 0.5 until
- * every prompt has text, a spinner while it goes). A question asking for
+ * every prompt has text; while it goes the word stays at full strength
+ * and shimmers, desktop's Submit). Both forms shimmer their submit so. A question asking for
  * a secret is answered by [SecretRequestForm], which scrolls only its
  * fields and keeps Cancel and Save below them; where this build can't make
  * secrets, it says where to answer it.
@@ -109,7 +111,7 @@ fun ConversationQuestionCard(
         val title = when {
             question.permissionFrom != null -> stringResource(R.string.conversation_permission_from, question.permissionFrom)
             question.isPermission -> stringResource(R.string.conversation_permission)
-            else -> stringResource(R.string.conversation_question)
+            else -> stringResource(R.string.agent_question_title)
         }
         Text(title, style = ConversationQuestionSpec.title, color = colors.textSecondary, modifier = Modifier.testTag(ConversationQuestionTags.TITLE))
         question.context?.let { context -> MarkdownView(remember(context) { parseMarkdown(context) }) }
@@ -151,6 +153,7 @@ fun ConversationQuestionCard(
                 canInteract = true,
                 submittedAnswers = null,
                 onSubmit = onAnswer,
+                shimmerWhileSending = true,
             )
             else -> FreeTextForm(question, onAnswer)
         }
@@ -219,8 +222,15 @@ private fun FreeTextForm(question: Question, onAnswer: suspend (Map<String, List
                 .padding(horizontal = 20.dp, vertical = 12.dp),
             contentAlignment = Alignment.Center,
         ) {
-            if (sending) CircularProgressIndicator(Modifier.heightIn(max = 18.dp), color = colors.text, strokeWidth = 2.dp)
-            else Text(stringResource(R.string.conversation_answer), style = ConversationQuestionSpec.submit, color = colors.text)
+            // Desktop's Submit while the answer is in flight: the word stays, at its size, and shimmers.
+            ShimmerText(
+                stringResource(R.string.conversation_answer),
+                style = ConversationQuestionSpec.submit,
+                baseColor = ShimmerSpec.rest(colors.text, colors.surfaceHighest),
+                highlightColor = colors.text,
+                shimmering = sending,
+                stillColor = colors.text,
+            )
         }
     }
 }

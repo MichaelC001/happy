@@ -135,6 +135,7 @@ class LifecycleJourneyTest {
         // Plan mode picked in the chat; then its agent stops.
         rule.onNode(hasText("Stopped chat"), useUnmergedTree = true).performClick()
         rule.waitFor(ChatScreenTags.SCREEN)
+        rule.waitFor(ChatScreenTags.MORE)
         rule.node(ChatScreenTags.MORE).performClick()
         rule.waitFor(ChatScreenTags.MENU)
         rule.node(PickerSheetTags.option("plan")).performClick()

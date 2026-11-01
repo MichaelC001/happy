@@ -1,5 +1,6 @@
 package com.slopus.happy.ui
 
+import com.slopus.happy.ui.connection.openAgentSettingsRow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import com.slopus.happy.ui.voice.LocalVoiceController
@@ -7,29 +8,44 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.slopus.happy.AppGraph
 import com.slopus.happy.R
-import com.slopus.happy.auth.AuthState
+import com.slopus.happy.OpenAccount
+import com.slopus.happy.ui.components.ProvideRowReveal
+import com.slopus.happy.ui.home.LegacyHome
+import com.slopus.happy.ui.settings.AccountSettings
+import androidx.compose.runtime.saveable.listSaver
+import androidx.navigation.NavDestination.Companion.hasRoute
+import androidx.navigation.NavGraph
+import androidx.navigation.toRoute
 import com.slopus.happy.push.PushRegistrationEffect
 import com.slopus.happy.payments.PaywallHost
+import com.slopus.happy.ui.artifacts.AgentArtifactsRoute
+import com.slopus.happy.ui.artifacts.BrowserRoute
+import com.slopus.happy.ui.artifacts.computerName
+import com.slopus.happy.ui.browser.LinkOpener
+import com.slopus.happy.ui.browser.ProvideLinks
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import com.slopus.happy.ui.chat.SessionRoute
 import com.slopus.happy.ui.chat.chatRoutes
 import com.slopus.happy.ui.components.Alert
 import com.slopus.happy.ui.components.AlertButton
 import com.slopus.happy.ui.components.HappyAlert
-import com.slopus.happy.accounts.accountId
 import com.slopus.happy.ui.connect.DeepLinkEffect
 import com.slopus.happy.ui.connection.AgentHome
+import com.slopus.happy.ui.connection.AgentSurfaceRoute
 import com.slopus.happy.ui.connect.LocalAddFlow
 import com.slopus.happy.ui.connect.LocalAgentPairing
 import com.slopus.happy.ui.connect.rememberAddFlow
@@ -43,7 +59,6 @@ import com.slopus.happy.ui.machine.MachineRoute
 import com.slopus.happy.ui.onboarding.onboardingRoutes
 import com.slopus.happy.ui.connection.connectAgent
 import com.slopus.happy.ui.connection.agentConnectionRoutes
-import com.slopus.happy.ui.connection.AgentConnectionSettingsRoute
 import com.slopus.happy.ui.connection.agentHomeRoutes
 import com.slopus.happy.ui.conversation.composeConversation
 import com.slopus.happy.ui.conversation.conversationRoutes
@@ -51,8 +66,8 @@ import com.slopus.happy.ui.conversation.openConversation
 import com.slopus.happy.ui.session.SessionInfoRoute
 import com.slopus.happy.ui.start.Start
 import com.slopus.happy.ui.server.ServerScreen
-import com.slopus.happy.ui.settings.AppearanceRoute
 import com.slopus.happy.ui.settings.LocalizedContent
+import com.slopus.happy.ui.components.avatar.LocalAnimatedAvatars
 import com.slopus.happy.ui.home.ProvideAvatarSettings
 import com.slopus.happy.ui.settings.settingsRoutes
 import com.slopus.happy.ui.theme.HappyTheme
@@ -65,32 +80,45 @@ import kotlinx.serialization.Serializable
 @Serializable data object RestoreRoute
 @Serializable data object RestoreManualRoute
 @Serializable data object HomeRoute
-@Serializable data object SettingsRoute
-@Serializable data object AgentHomeRoute
+/** Settings, of whichever account is open; [reveal]: the row home's search found there ([ProvideRowReveal]). */
+@Serializable data class SettingsRoute(val reveal: String? = null)
 
 /**
  * The whole UI. Signed out and signed in are separate back stacks: when the
  * account changes the stack is replaced, as happy-app's `router.dismissTo('/')`
- * after login and its reload after logout do.
+ * after login and its reload after logout do. A switch made in Settings
+ * ([AccountSwitcher]) keeps the stack, Settings over home, and both show the
+ * new account: home and Settings follow [AppGraph.openAccount].
  */
 @Composable
 fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
     val theme by graph.localSettings.themePreference.collectAsStateWithLifecycle()
-    val auth by graph.auth.state.collectAsStateWithLifecycle()
     val language by graph.language.language.collectAsStateWithLifecycle()
     val settings by graph.settings.settings.collectAsStateWithLifecycle()
+    val animatedAvatars by graph.liveAvatars.enabled.collectAsStateWithLifecycle()
 
     // Avatar.tsx reads the avatar settings everywhere: the chat header and Settings as well as Home.
-    LocalizedContent(language.locale) { HappyTheme(preference = theme) { ProvideAvatarSettings(settings) { CompositionLocalProvider(LocalVoiceController provides graph.voice) {
+    LocalizedContent(language.locale) { HappyTheme(preference = theme) { ProvideAvatarSettings(settings) { CompositionLocalProvider(LocalVoiceController provides graph.voice, LocalAnimatedAvatars provides animatedAvatars) {
         val dark = HappyTheme.colors.dark
         LaunchedEffect(dark) { onDarkThemeChange(dark) }
 
-        val agent by graph.openAgentId.collectAsStateWithLifecycle()
-        val signedIn = auth as? AuthState.SignedIn
-        PaywallHost(graph.purchases)
-        // Each account has its own back stack, replaced when another opens.
-        key(signedIn?.let { accountId(it.credentials) }, agent) {
+        val open by graph.openAccount.collectAsStateWithLifecycle()
+        val agent = (open as? OpenAccount.Agent)?.id
+        val signedIn = open is OpenAccount.Happy
+        val dissolve = remember { Dissolve() }
+        val scope = rememberCoroutineScope()
+        val switcher = remember(graph) { AccountSwitcher(graph, scope, dissolve) }
+        val shown = remember { arrayOfNulls<NavHostController>(1) }
+        val stack = rememberStackGeneration(open) { switcher.keepsSettings && open != OpenAccount.None && shown[0]?.isSettingsOverHome() == true }
+        // RevenueCat's paywall host, once the start is over: no paywall opens before a tap.
+        val afterStart = LocalAfterStart.current
+        val started by produceState(false) { afterStart.await(); value = true }
+        if (started) PaywallHost(graph.purchases)
+        DissolveBox(dissolve) { CompositionLocalProvider(LocalAccountSwitcher provides switcher) {
+        // Each account has its own back stack, replaced when another opens (but not from Settings).
+        key(stack) {
             val nav = rememberNavController()
+            shown[0] = nav
             val openSession = { id: String -> nav.navigate(SessionRoute(id)) }
             val troubleshoot = { nav.navigate(TroubleshootRoute) }
             val connectAgent = remember(nav) { { code: String -> nav.connectAgent(graph, code) } }
@@ -99,61 +127,114 @@ fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
               // Add (the first screen's Connect, the account menu's Add): scan, then route the code.
               val add = rememberAddFlow(graph)
               CompositionLocalProvider(LocalAddFlow provides add) {
+                // Links: through the open agent connection in its browser, or as ever on a Happy account.
+                ProvideLinks(rememberLinks(graph, nav, agent)) {
                 // The tablet shell (sidebar beside the stack) or, on a phone, just the stack.
-                TabletShell(graph, nav, signedIn = signedIn != null, onOpenSession = openSession, onTroubleshoot = troubleshoot) {
-                    val start: Any = when {
-                        agent != null -> AgentHomeRoute
-                        signedIn != null -> HomeRoute
-                        else -> StartRoute
-                    }
+                TabletShell(graph, nav, signedIn = signedIn, onOpenSession = openSession, onTroubleshoot = troubleshoot) {
+                    val start: Any = if (open == OpenAccount.None) StartRoute else HomeRoute
                     val motion = rememberNavMotion()
+                    CompositionLocalProvider(LocalPageDims provides motion.dims) {
                     NavHost(
                         navController = nav,
                         startDestination = start,
+                        modifier = Modifier.backdrop(nav),
                         enterTransition = motion.enter,
                         exitTransition = motion.exit,
                         popEnterTransition = motion.popEnter,
                         popExitTransition = motion.popExit,
-                        predictivePopEnterTransition = { _ -> motion.popEnter.invoke(this) },
-                        predictivePopExitTransition = { _ -> motion.popExit.invoke(this) },
+                        predictivePopEnterTransition = motion.predictivePopEnter,
+                        predictivePopExitTransition = motion.predictivePopExit,
                     ) {
-                        composable<StartRoute> { Start(graph, nav, add) }
-                        composable<AgentHomeRoute> {
-                            agent?.let { id ->
-                                AgentHome(
-                                    graph,
-                                    id,
-                                    onOpenConversation = { agentId -> nav.openConversation(id, agentId) },
-                                    onCompose = { nav.composeConversation(id) },
-                                    onSettings = { nav.navigate(AgentConnectionSettingsRoute(id)) },
-                                    onAppearance = { nav.navigate(AppearanceRoute) },
-                                )
+                        page<StartRoute> { Start(graph, nav, add) }
+                        // The open account's home; under Settings it changes with a switch made there.
+                        page<HomeRoute> {
+                            key(open.key) {
+                                when (val account = open) {
+                                    is OpenAccount.Agent -> AgentHome(
+                                        graph,
+                                        account.id,
+                                        onOpenConversation = { agentId -> nav.openConversation(account.id, agentId) },
+                                        onCompose = { nav.composeConversation(account.id) },
+                                        onSettings = { nav.navigate(SettingsRoute()) },
+                                        onSettingsRow = { row -> nav.openAgentSettingsRow(account.id, row) },
+                                        onOpenArtifacts = { nav.navigate(AgentArtifactsRoute(account.id)) },
+                                        onOpenSurface = { nav.navigate(AgentSurfaceRoute(account.id, it.id, it.type, it.name)) },
+                                    )
+                                    is OpenAccount.Happy -> LegacyHome(graph, nav, onOpenSession = openSession, onTroubleshoot = troubleshoot)
+                                    OpenAccount.None -> Unit
+                                }
                             }
                         }
-                        composable<ServerRoute> { Server(graph, nav) }
-                        composable<RestoreManualRoute> { RestoreManual(graph, nav) }
-                        homeRoutes(
-                            graph,
-                            nav,
-                            onOpenSession = openSession,
-                            onTroubleshoot = troubleshoot,
-                        )
+                        // The open account's Settings, of either kind; a switch made here changes it in place.
+                        page<SettingsRoute> { entry ->
+                            ProvideRowReveal(entry.toRoute<SettingsRoute>().reveal) { AccountSettings(graph, nav, open) }
+                        }
+                        page<ServerRoute> { Server(graph, nav) }
+                        page<RestoreManualRoute> { RestoreManual(graph, nav) }
+                        homeRoutes(graph, nav, onOpenSession = openSession)
                         settingsRoutes(graph, nav)
                         onboardingRoutes(graph, nav, onOpenMachine = { id -> nav.navigate(MachineRoute(id)) })
                         connectRoutes(graph, nav)
                         chatRoutes(graph, nav, onInfo = { id -> nav.navigate(SessionInfoRoute(id)) })
                         filesRoutes(graph, nav)
                         agentConnectionRoutes(graph, nav)
-                        agentHomeRoutes(graph, nav, onAppearance = { nav.navigate(AppearanceRoute) })
+                        agentHomeRoutes(graph, nav)
                         conversationRoutes(graph, nav)
                     }
+                    }
                 }
-                DeepLinkEffect(nav, signedIn = signedIn != null, onOpenSession = { id -> nav.navigate(SessionRoute(id)) })
+                }
+                DeepLinkEffect(nav, signedIn = signedIn, onOpenSession = { id -> nav.navigate(SessionRoute(id)) })
               }
             }
             PushRegistrationEffect(graph)
         }
+        } }
     } } } }
+}
+
+/** Settings on top of home and nothing else in the stack: a switch made there keeps both. */
+internal fun NavHostController.isSettingsOverHome(): Boolean {
+    val screens = currentBackStack.value.filter { it.destination !is NavGraph }
+    return screens.size == 2 && screens[0].destination.hasRoute<HomeRoute>() && screens[1].destination.hasRoute<SettingsRoute>()
+}
+
+/** Which back stack HappyApp shows and the account it is of; saved, so the stack is restored with it. */
+private class StackGeneration(var account: String, var generation: Int)
+
+/**
+ * The key of HappyApp's back stack: a new one whenever [open] changes,
+ * unless [keep] says the switch keeps the stack (one made in Settings).
+ * Saved with the stack, so a recreation or process death restores it.
+ */
+@Composable
+private fun rememberStackGeneration(open: OpenAccount, keep: () -> Boolean): Int {
+    val saved = rememberSaveable(saver = listSaver(save = { listOf(it.account, it.generation) }, restore = { StackGeneration(it[0] as String, it[1] as Int) })) {
+        StackGeneration(open.key, 0)
+    }
+    return remember(open) {
+        if (saved.account != open.key) {
+            if (!keep()) saved.generation++
+            saved.account = open.key
+        }
+        saved.generation
+    }
+}
+
+/**
+ * The app's links for the open account: with agent connection [agent] open,
+ * the in-app browser through it (its local host workspace; a chat narrows
+ * that to its agent's); on a Happy account, the phone's browser as before.
+ */
+@Composable
+private fun rememberLinks(graph: AppGraph, nav: NavHostController, agent: String?): LinkOpener {
+    val context = LocalContext.current
+    if (agent == null) {
+        val system = LocalUriHandler.current
+        return remember(system) { LinkOpener.legacy(context, system) }
+    }
+    val computer = computerName(graph, agent)
+    return remember(nav, agent, computer) { LinkOpener.agent(context, computer) { url -> nav.navigate(BrowserRoute(agent, url)) } }
 }
 
 @Composable

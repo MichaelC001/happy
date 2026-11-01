@@ -5,8 +5,9 @@ import HappyLayout
 import UIKit
 import XCTest
 
-/// Every row reuses the chat's braille loader. Titles stay still and the
-/// loader stops when work ends, leaves the screen or enters the background.
+/// Every row reuses the chat's braille loader, and a bot, task or subtask
+/// whose work runs shimmers its title, as desktop's sidebar does. Both
+/// stop when work ends, leave the screen or enter the background.
 @MainActor
 final class WorkingRowTests: XCTestCase {
     private var window: UIWindow!
@@ -51,9 +52,11 @@ final class WorkingRowTests: XCTestCase {
         let child = try view(sidebar, "session:child")
         XCTAssertTrue(voice.workingSignalRunning)
         XCTAssertTrue(child.workingSignalRunning)
-        XCTAssertNil(voice.titleSweepBegan)
-        XCTAssertNil(child.titleSweepBegan)
-        XCTAssertEqual(voice.accessibilityValue, "waveform")
+        XCTAssertNotNil(voice.titleSweepBegan)
+        XCTAssertNotNil(child.titleSweepBegan)
+        // One clock: neighbouring titles sweep together.
+        XCTAssertEqual(voice.titleSweepBegan, child.titleSweepBegan)
+        XCTAssertEqual(voice.accessibilityValue, "waveform, working")
         // Idle, asking or waiting: no sweep.
         for id in ["space:mic", "space:ask", "space:wait", "section:work"] {
             XCTAssertNil(try view(sidebar, id).titleSweepBegan, "\(id) shimmers")
@@ -66,6 +69,8 @@ final class WorkingRowTests: XCTestCase {
         sidebar.layoutIfNeeded()
         XCTAssertFalse(voice.workingSignalRunning)
         XCTAssertFalse(child.workingSignalRunning)
+        XCTAssertNil(voice.titleSweepBegan)
+        XCTAssertNil(child.titleSweepBegan)
         XCTAssertEqual(voice.accessibilityValue, "waveform")
 
         sidebar.apply(Self.rows(working: true))
@@ -84,12 +89,15 @@ final class WorkingRowTests: XCTestCase {
         sidebar.contentOffset.y = 600
         sidebar.layoutIfNeeded()
         XCTAssertFalse(voice.workingSignalRunning)
+        XCTAssertNil(voice.titleSweepBegan, "a title out of sight stops sweeping")
         sidebar.contentOffset.y = 0
         sidebar.layoutIfNeeded()
         XCTAssertTrue(voice.workingSignalRunning)
+        XCTAssertNotNil(voice.titleSweepBegan)
         // Out of the window altogether.
         sidebar.removeFromSuperview()
         XCTAssertFalse(voice.workingSignalRunning)
+        XCTAssertNil(voice.titleSweepBegan)
     }
 
     func testTheAppGoingAwayStopsTheLoader() throws {
@@ -97,8 +105,43 @@ final class WorkingRowTests: XCTestCase {
         let voice = try view(sidebar, "space:voice")
         NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
         XCTAssertFalse(voice.workingSignalRunning)
+        XCTAssertNil(voice.titleSweepBegan)
         NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
         XCTAssertTrue(voice.workingSignalRunning)
+        XCTAssertNotNil(voice.titleSweepBegan)
+    }
+
+    /// Desktop shimmers places only: a Surface is never busy.
+    func testOnlyBotsTasksAndSubtasksShimmer() {
+        var surface = Row(id: "space:doc", nodeId: "doc", kind: .space, label: "Notes", status: .working)
+        surface.targetKind = "surface"
+        var task = Row(id: "space:task", nodeId: "task", kind: .space, label: "A task", status: .working)
+        task.targetKind = "task"
+        var bot = Row(id: "space:bot", nodeId: "bot", kind: .space, label: "A bot", status: .working)
+        bot.targetKind = "bot"
+        let subtask = Row(id: "session:sub", nodeId: "sub", kind: .session, depth: 1, label: "A subtask", status: .working)
+        let section = Row(id: "section:s", nodeId: "s", kind: .section, label: "Work", status: .working)
+        XCTAssertFalse(RowView.shimmers(surface))
+        XCTAssertTrue(RowView.shimmers(task))
+        XCTAssertTrue(RowView.shimmers(bot))
+        XCTAssertTrue(RowView.shimmers(subtask))
+        XCTAssertFalse(RowView.shimmers(section))
+        for status in [Row.Status.none, .waiting, .awaitingInput] {
+            task.status = status
+            XCTAssertFalse(RowView.shimmers(task), "\(status)")
+        }
+    }
+
+    /// Asked for less motion, a working title stays still at its colour.
+    func testReduceMotionKeepsTitlesStill() throws {
+        let sidebar = sidebar(Self.rows(working: true))
+        let voice = try view(sidebar, "space:voice")
+        XCTAssertNotNil(voice.titleSweepBegan)
+        ShimmerClock.shared.reduceMotionOverride = true
+        defer { ShimmerClock.shared.reduceMotionOverride = nil }
+        XCTAssertNil(voice.titleSweepBegan)
+        ShimmerClock.shared.reduceMotionOverride = false
+        XCTAssertNotNil(voice.titleSweepBegan)
     }
 }
 #endif

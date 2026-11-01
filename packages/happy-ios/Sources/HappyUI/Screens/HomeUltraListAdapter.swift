@@ -4,16 +4,6 @@ import HappyLayout
 import UIKit
 
 @MainActor
-enum HomeRendererPreference {
-    static let didChange = Notification.Name("HappyHomeRendererPreferenceDidChange")
-    static func set(_ renderer: HomeListRenderer, settings: LocalSettings) {
-        guard renderer != settings.homeListRenderer else { return }
-        settings.homeListRenderer = renderer
-        NotificationCenter.default.post(name: didChange, object: settings)
-    }
-}
-
-@MainActor
 final class HomeUltraListAdapter {
     let view: HomeUltraListView
     var onSelect: ((HomeListRow.ID) -> Void)?
@@ -59,6 +49,8 @@ final class HomeUltraListAdapter {
     }
     struct Entry: Sendable {
         var row: HomeListRow?
+        /// The row's place in its card, drawn with it.
+        var place: HomeCardPlace? = nil
         var tabletRow: TabletGroupedRow? = nil
         var plan: HomeRowDrawing
         var revision: UInt64
@@ -96,15 +88,16 @@ final class HomeUltraListAdapter {
             let archiveStart = input.archiveModels?.hidden.ids.last.flatMap { input.model.ids.firstIndex(of: $0) }
             for (index, pair) in zip(input.model.ids, input.model.rows).enumerated() {
                 let (id, row) = pair
+                let place = input.model.places[index]
                 let selected = input.selected != nil && row.sessionId == input.selected
                 let old = previous?.entries[id]
                 let usesBitmap: Bool
                 if let start = archiveStart {
                     usesBitmap = index >= start
                 } else { usesBitmap = false }
-                if sameEnvironment, let old, old.row == row, old.selected == selected, old.usesArchiveBitmap == usesBitmap { entries[id] = old; continue }
+                if sameEnvironment, let old, old.row == row, old.place == place, old.selected == selected, old.usesArchiveBitmap == usesBitmap { entries[id] = old; continue }
                 revisionSequence += 1
-                entries[id] = Entry(row: row, plan: HomeRowDrawing.make(row, width: input.width, grouped: input.model.grouped, selected: selected, environment: input.environment, dark: input.dark, catalog: catalog, deferArchiveText: true), revision: revisionSequence, selected: selected, usesArchiveBitmap: usesBitmap)
+                entries[id] = Entry(row: row, place: place, plan: HomeRowDrawing.make(row, width: input.width, grouped: input.model.grouped, selected: selected, place: place, carded: true, environment: input.environment, dark: input.dark, catalog: catalog, deferArchiveText: true), revision: revisionSequence, selected: selected, usesArchiveBitmap: usesBitmap)
             }
             var hiddenToggle: Entry?
             if let models = input.archiveModels, let row = models.hidden.rows.last,
@@ -112,7 +105,7 @@ final class HomeUltraListAdapter {
                 if sameEnvironment, let old = previous?.hiddenToggle, old.row == row { hiddenToggle = old }
                 else {
                     revisionSequence += 1
-                    hiddenToggle = Entry(row: row, plan: HomeRowDrawing.make(row, width: input.width, grouped: input.model.grouped, selected: false, environment: input.environment, dark: input.dark, catalog: catalog), revision: revisionSequence, selected: false, usesArchiveBitmap: true)
+                    hiddenToggle = Entry(row: row, plan: HomeRowDrawing.make(row, width: input.width, grouped: input.model.grouped, selected: false, carded: true, environment: input.environment, dark: input.dark, catalog: catalog), revision: revisionSequence, selected: false, usesArchiveBitmap: true)
                 }
                 // Only the first archive viewport, bounded independently of
                 // archive size. Later rows draw when mounted, never on tap.
@@ -238,7 +231,8 @@ final class HomeUltraListAdapter {
     private func publish() {
         guard active, let prepared = plans else { return }
         let model = prepared.input.model
-        let background = UIColor(prepared.input.tablet != nil || model.grouped ? Palette.groupedBackground : Palette.flatListBackground)
+        // Home's rows stand in cards on the modern home's ground.
+        let background = UIColor(prepared.input.tablet != nil ? Palette.groupedBackground : Palette.groupedGround)
         view.backgroundColor = background; view.list.backgroundColor = background
         var rows: [HomeUltraRow] = []
         var nextRows: [HomeListRow.ID: HomeUltraRow] = [:]
@@ -334,7 +328,7 @@ extension TabletGroupedRow.ID {
     var ultraBridgeID: HomeListRow.ID { .project("tablet:\(String(reflecting: self))") }
 }
 
-private extension HomeListRow.ID {
+extension HomeListRow.ID {
     var ultraIdentity: String {
         switch self {
         case .session(let id): "session:\(id)"
@@ -360,11 +354,16 @@ final class HomeUltraOverlay: UIView {
             avatar.frame = plan.avatarFrame
             addSubview(avatar)
         }
-        if let (value, style, frame) = plan.shimmer {
-            let label = LegacyShimmerLabel(style: style)
-            label.string = value; label.isShimmering = true; label.frame = frame
-            label.alpha = plan.contentAlpha
-            addSubview(label)
+        if let title = plan.shimmer {
+            // The bitmap drew the title; only the band is live, its copy
+            // drawn off the main thread.
+            let band = ShimmerBand(
+                frame: title.frame, run: CGRect(x: 0, y: 0, width: title.runWidth, height: title.frame.height),
+                scale: plan.environment.text.displayScale, draw: { plan.drawShimmerCopy(in: $0) }
+            )
+            band.alpha = plan.contentAlpha
+            band.accessibilityIdentifier = "shimmer"
+            addSubview(band)
         }
         for (color, frame) in plan.pulsingDots {
             let dot = StatusDotView(frame: frame)

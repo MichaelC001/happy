@@ -24,10 +24,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Text
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -42,9 +39,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.R
+import com.slopus.happy.ui.components.HappyDropdownMenu
+import com.slopus.happy.ui.components.HappyMenuDivider
+import com.slopus.happy.ui.components.HappyMenuItem
 import com.slopus.happy.ui.components.Icon
 import com.slopus.happy.ui.components.Ionicon
 import com.slopus.happy.ui.components.RoundButton
@@ -92,8 +91,6 @@ object StartSpec {
     val controlIcon = 24.dp
     val menuMinWidth = 220.dp
     val menuIcon = 22.dp
-    val menuLabel = happyTextStyle(fontSize = 16)
-    val menuDetail = happyTextStyle(fontSize = 13)
 }
 
 /**
@@ -211,24 +208,17 @@ private fun StartMenu(
     onRestore: () -> Unit,
     onServer: () -> Unit,
 ) {
-    val colors = HappyTheme.colors
-    DropdownMenu(
+    HappyDropdownMenu(
         expanded = open,
         onDismissRequest = onDismiss,
         modifier = Modifier.widthIn(min = StartSpec.menuMinWidth).testTag(StartTags.MENU),
     ) {
         @Composable
         fun item(label: String, icon: Ionicon, tag: String, detail: String? = null, itemEnabled: Boolean = enabled, onClick: () -> Unit) {
-            DropdownMenuItem(
-                text = {
-                    Column {
-                        Text(label, style = StartSpec.menuLabel, color = colors.text)
-                        if (detail != null) {
-                            Text(detail, style = StartSpec.menuDetail, color = colors.textSecondary, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
-                        }
-                    }
-                },
-                leadingIcon = { Icon(icon, StartSpec.menuIcon, colors.text) },
+            HappyMenuItem(
+                label = label,
+                supporting = detail,
+                leading = { Icon(icon, StartSpec.menuIcon, LocalContentColor.current) },
                 enabled = itemEnabled,
                 onClick = {
                     onDismiss()
@@ -238,7 +228,7 @@ private fun StartMenu(
             )
         }
         item(stringResource(R.string.start_enter_link), Ionicon.LinkOutline, StartTags.ENTER_LINK, onClick = onEnterLink)
-        HorizontalDivider(color = colors.divider)
+        HappyMenuDivider()
         item(stringResource(R.string.start_restore_legacy), Ionicon.KeyOutline, StartTags.RESTORE, onClick = onRestore)
         item(
             stringResource(R.string.start_legacy_server),

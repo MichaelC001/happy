@@ -585,7 +585,7 @@ def load(fixtures):
 
 
 # The sidebar's other work: short synthetic tasks, each with a status its agent set, so
-# the sidebar has story rows enough to scroll. None for the last, which shows the empty mark.
+# the sidebar has rows enough to scroll. None for the last, which never sets one.
 SIDEBAR = {
     "Release notes": "Shipped to preview",
     "Landing page copy": "Two headlines drafted; waiting on the pricing table before the hero section can be written",
@@ -610,8 +610,7 @@ def send(agent, text):
 
 
 def seed_sidebar():
-    """Stories on (story rows), and the sidebar's other tasks with their statuses."""
-    api("PUT", "/v0/user-settings/happy-desktop.experiments.stories", {"value": True})
+    """The sidebar's other tasks with their statuses."""
     tasks = {task["name"]: task for task in api("GET", "/v0/tasks")["tasks"]}
     for name, status in SIDEBAR.items():
         task = tasks.get(name) or api("POST", "/v0/tasks", {"name": name})["task"]
@@ -619,21 +618,6 @@ def seed_sidebar():
             send(task["agent"]["id"], f"status {status}")
             time.sleep(1)
 
-
-def post_story(title, log):
-    """A story posted live to the ring of the task titled `title`, as SHIP BOSS's was:
-    an html artifact the agent made, as its one frame."""
-    agent = next(task["agent"]["id"] for task in api("GET", "/v0/tasks")["tasks"] if task["name"] == title)
-    made = lambda: [a for a in api("GET", "/v0/artifacts")["artifacts"] if (a.get("createdBy") or {}).get("agentId") == agent]
-    if not made():
-        send(agent, "tool create_artifact " + json.dumps({"type": "html", "title": "Gym page"}))
-        for _ in range(40):
-            if made():
-                break
-            time.sleep(0.5)
-    artifact = made()[0]["id"]
-    send(agent, "tool post_story " + json.dumps({"caption": "A live story", "frames": [{"artifactId": artifact}]}))
-    log.write(f"GYM_DRIVER posted a story to {title}\n")
 
 
 def cmd_up(args):
@@ -771,8 +755,7 @@ def run_test(udid, dd, test, label, env, results_dir):
         log.write(line)
         if "HAPPY_PAIR_READY" in line:
             threading.Thread(target=pair, args=(udid, log), daemon=True).start()
-        elif line.startswith("GYM_POST_STORY "):
-            threading.Thread(target=post_story, args=(line.split(" ", 1)[1].strip(), log), daemon=True).start()
+
         elif "GYM_MARK start" in line:
             render, app = processes(udid)
             start = (render, app, cpu_seconds(render), cpu_seconds(app))
@@ -816,7 +799,8 @@ def cmd_run(args):
     titles = {"long": args.chat or SYNTHETIC["long"], "images": args.images or SYNTHETIC["images"]}
     titles["paging"] = args.paging or titles["long"]
     env = {"GYM_CHAT": titles["long"], "GYM_IMAGES": titles["images"], "GYM_PAGING": titles["paging"], "GYM_STREAM": titles["long"],
-           "GYM_ITERATIONS": str(args.iterations)}
+           "GYM_ITERATIONS": str(args.iterations), "GYM_LIVE_AVATARS": "1" if args.live_avatars else "0",
+           "GYM_AVATAR_FPS": str(args.avatar_fps or "")}
     label = args.label or time.strftime("%Y%m%d-%H%M%S")
     results_dir = os.path.join(WORK, "results")
     names = args.workloads or list(WORKLOADS)
@@ -908,6 +892,8 @@ def main():
     p.add_argument("--images", help="the chat heavy with pictures"); p.add_argument("--paging", help="the chat paged in (default the long one)")
     p.add_argument("--iterations", type=int, default=1, help="XCTest metric iterations")
     p.add_argument("--no-prime", action="store_true", help="the chats are already read back to their first message")
+    p.add_argument("--live-avatars", action="store_true", help="Animated Avatars on: the avatars on screen move")
+    p.add_argument("--avatar-fps", type=float, help="live avatars at this many frames a second")
     p.set_defaults(func=cmd_run)
     p = sub.add_parser("check"); p.add_argument("results"); p.add_argument("--budgets"); p.set_defaults(func=cmd_check)
     p = sub.add_parser("compare"); p.add_argument("a"); p.add_argument("b"); p.set_defaults(func=cmd_compare)

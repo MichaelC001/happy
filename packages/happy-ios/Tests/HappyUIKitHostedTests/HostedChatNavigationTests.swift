@@ -187,10 +187,10 @@ final class HostedChatNavigationTests: XCTestCase {
         print(String(format: "OPENING push ready after %.1f ms, missing %@", report.elapsed * 1000, report.missing.description))
         Self.assertStill(sampler.frames, report: report, "push")
         Self.assertSeeded(chat, report, "push")
-        // The header is whole: the capsule and the avatar, the strip.
+        // The header is whole: the capsule and Compose, the strip.
         let last = try XCTUnwrap(sampler.frames.last)
         XCTAssertGreaterThan(last.title.width, 40, "the title capsule")
-        XCTAssertTrue(last.avatar, "the avatar")
+        XCTAssertTrue(last.compose, "Compose")
         XCTAssertNotNil(last.strip, "the strip")
         XCTAssertGreaterThan(last.rows, 0)
         await controller.signOut()
@@ -228,7 +228,7 @@ final class HostedChatNavigationTests: XCTestCase {
         freshFrames.stop()
         let opened = try XCTUnwrap(freshFrames.frames.last)
         XCTAssertEqual(afterSwitch.title, opened.title, "header")
-        XCTAssertEqual(afterSwitch.avatar, opened.avatar, "avatar")
+        XCTAssertEqual(afterSwitch.compose, opened.compose, "Compose")
         XCTAssertEqual(afterSwitch.strip, opened.strip, "strip")
         XCTAssertEqual(afterSwitch.list, opened.list, "list")
         XCTAssertEqual(afterSwitch.insets, opened.insets, "list insets")
@@ -395,7 +395,7 @@ final class HostedChatNavigationTests: XCTestCase {
             let at = String(format: "%@ at %.0f ms", label, (frame.time - first.time) * 1000)
             XCTAssertEqual(frame.animating, [], "\(at): animating", file: file, line: line)
             XCTAssertEqual(frame.title.size, first.title.size, "\(at): header", file: file, line: line)
-            XCTAssertEqual(frame.avatar, first.avatar, "\(at): avatar", file: file, line: line)
+            XCTAssertEqual(frame.compose, first.compose, "\(at): Compose", file: file, line: line)
             XCTAssertEqual(frame.strip, first.strip, "\(at): strip", file: file, line: line)
             XCTAssertEqual(frame.list, first.list, "\(at): list", file: file, line: line)
             XCTAssertEqual(frame.dock, first.dock, "\(at): dock", file: file, line: line)
@@ -427,7 +427,8 @@ struct ChatFrame {
     var ready: Bool
     /// The title capsule's frame in the bar.
     var title: CGRect
-    var avatar: Bool
+    /// Compose is alone at the bar's right: Back, the name, and Compose.
+    var compose: Bool
     var strip: CGRect?
     var list: CGRect
     var insets: UIEdgeInsets
@@ -469,14 +470,17 @@ final class ChatFrameSampler: NSObject {
             return view.convert(view.bounds, to: root)
         }
         let title = chat.navigationItem.titleView
-        let avatar = chat.navigationItem.rightBarButtonItems?.compactMap { $0.customView as? ChatHeaderAvatarControl }.first
+        let compose = chat.navigationItem.rightBarButtonItems?.map(\.accessibilityIdentifier) == ["compose"]
         let list = HostedChatNavigationTests.subview(ChatListView.self, in: root)
         let dock = HostedChatNavigationTests.subview(ChatDockView.self, in: root)
         let card = HostedChatNavigationTests.subview(AgentInputCardView.self, in: root)
         let composer = HostedChatNavigationTests.subview(SessionComposerView.self, in: root)
         let strip = HostedChatNavigationTests.subview(ChatWorktreeTabStrip.self, in: root)
-        let collection = list?.collectionView
-        let lowest = collection?.visibleCells.max { $0.frame.minY < $1.frame.minY }
+        // The newest row drawn, lowest on screen, in the list's own
+        // coordinates (it moves only if the conversation does).
+        let lowest = list?.ultra.list.loadedItemViews
+            .filter { $0.isDisplayReady && ($0 as? ChatUltraRowView)?.row.identity.hasPrefix("chat:message:") == true }
+            .max { $0.convert($0.bounds, to: root).maxY < $1.convert($1.bounds, to: root).maxY }
         var animating: [String] = []
         let watched: [(String, UIView?)] = [("strip", strip), ("list", list), ("dock", dock), ("card", card), ("row", lowest), ("title", title)]
         for (name, view) in watched where !(view?.layer.animationKeys() ?? []).isEmpty {
@@ -486,14 +490,15 @@ final class ChatFrameSampler: NSObject {
             chat: chat,
             time: link.timestamp,
             inWindow: root.window != nil,
-            ready: chat.openingReport != nil,
+            ready: chat.openingReport != nil && list?.isDisplayReady == true,
             title: title.flatMap { $0.window == nil ? nil : $0.convert($0.bounds, to: navigation.navigationBar) } ?? .zero,
-            avatar: avatar.map { !$0.isHidden && $0.window != nil } ?? false,
+            compose: compose,
             strip: frame(strip),
             list: frame(list) ?? .zero,
-            insets: collection?.contentInset ?? .zero,
-            rows: collection?.numberOfItems(inSection: 0) ?? 0,
-            row: lowest?.frame,
+            insets: list?.contentInsets ?? .zero,
+            rows: list?.plans.count ?? 0,
+            row: list.flatMap { list in lowest.map { $0.convert($0.bounds, to: list) } },
+
             dock: frame(dock) ?? .zero,
             card: frame(card) ?? .zero,
             composerShown: (card?.alpha ?? 0) > 0 && (composer?.alpha ?? 0) > 0,

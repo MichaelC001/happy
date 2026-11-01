@@ -38,14 +38,20 @@ public final class AgentClient: Sendable {
     #endif
 
     /// `raw` is sent as is, in place of `json` (an upload's bytes).
-    func send(_ method: String, _ path: String, json: JSONValue? = nil, raw: Data? = nil, headers: [String: String] = [:]) async throws -> HTTP1Response {
+    /// `sent` hears the body's bytes as they are written.
+    func send(_ method: String, _ path: String, json: JSONValue? = nil, raw: Data? = nil, headers: [String: String] = [:], sent: (@Sendable (Int) -> Void)? = nil) async throws -> HTTP1Response {
         #if DEBUG
         if method != "GET", let slow = Self.slowWrites { try await Task.sleep(for: .seconds(slow)) }
         #endif
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.withoutEscapingSlashes]
         let body = try raw ?? json.map { try encoder.encode($0) }
-        let response = try await transport.request(method: method, path: path, credential: token, body: body, headers: headers)
+        let response: HTTP1Response
+        if let sent, let body, headers.isEmpty {
+            response = try await transport.send(method: method, path: path, credential: token, body: body, upload: false, sent: sent)
+        } else {
+            response = try await transport.request(method: method, path: path, credential: token, body: body, headers: headers)
+        }
         if response.status == 401 { throw AgentClientError.revoked }
         guard (200..<300).contains(response.status) || response.status == 304 || response.status == 206 else {
             struct Failure: Decodable { let error: String?; let code: String? }
@@ -103,21 +109,6 @@ public final class AgentClient: Sendable {
         return AgentWire.OperationsResponse(artifactId: artifactId, version: Int(version), html: html, operations: operations)
     }
 
-    public func createV2(id: String, mutationId: String, sectionId: String?, identity: Identity?) async throws -> AgentWire.CreateV2Response {
-        var object: [String: JSONValue] = ["id": .string(id), "mutationId": .string(mutationId), "sectionId": sectionId.map(JSONValue.string) ?? .null]
-        if let identity {
-            object["taskId"] = .string(identity.taskId)
-            object["workspaceId"] = .string(identity.workspaceId)
-            object["agentId"] = .string(identity.agentId)
-        }
-        return try await decode(AgentWire.CreateV2Response.self, "POST", "/v0/spaces/stem-cells", json: .object(object))
-    }
-
-    /// Closes new work nobody wrote in; the daemon refuses once it has a message.
-    public func removeSpace(_ spaceId: String, mutationId: String) async throws {
-        _ = try await send("PATCH", "/v0/spaces/\(Self.escape(spaceId))", json: .object(["removed": .bool(true), "mutationId": .string(mutationId)]))
-    }
-
     public func reportAttention(_ state: String) async throws {
         _ = try await send("POST", "/v0/spaces/attention", json: .object(["state": .string(state)]))
     }
@@ -131,6 +122,37 @@ public final class AgentClient: Sendable {
     /// Every bot as sent, so its embedded agent can be normalized.
     public func bots() async throws -> [JSONValue] {
         try await decode(JSONValue.self, "GET", "/v0/bots")["bots"]?.arrayValue ?? []
+    }
+
+    /// Makes a task the person owns and joins (`POST /v0/tasks`), named by
+    /// this phone; the same `id` again answers the same task. Unnamed, it is
+    /// "New Task" until its first message names it, as desktop's blank
+    /// name does. Its conversation's ID, as the computer gives it.
+    public func createTask(_ identity: Identity, mutationId: String, name: String? = nil) async throws -> String {
+        let answer = try await decode(JSONValue.self, "POST", "/v0/tasks", json: Self.creation(identity, mutationId: mutationId, name: name))
+        guard let agentId = answer["task"]?["agent"]?["id"]?.stringValue else { throw AgentClientError.invalidResponse }
+        return agentId
+    }
+
+    /// Makes a bot (`POST /v0/bots`) under the names this phone gives it,
+    /// as desktop's `createBot` does; the same `mutationId` again answers
+    /// the same bot. Unnamed, the computer names it from its first message
+    /// ("New Bot" until then). Its conversation's ID, as the computer gives it.
+    public func createBot(_ identity: Identity, mutationId: String, name: String? = nil) async throws -> String {
+        let answer = try await decode(JSONValue.self, "POST", "/v0/bots", json: Self.creation(identity, mutationId: mutationId, name: name))
+        guard let agentId = answer["bot"]?["agent"]?["id"]?.stringValue else { throw AgentClientError.invalidResponse }
+        return agentId
+    }
+
+    /// A task's or bot's names; a blank name is left out rather than sent,
+    /// which the computer would refuse.
+    private static func creation(_ identity: Identity, mutationId: String, name: String?) -> JSONValue {
+        var fields: [String: JSONValue] = [
+            "id": .string(identity.taskId), "mutationId": .string(mutationId),
+            "agentId": .string(identity.agentId), "workspaceId": .string(identity.workspaceId),
+        ]
+        if let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { fields["name"] = .string(name) }
+        return .object(fields)
     }
 
     /// The tasks the person joined, as sent, each holding the person's own
@@ -169,16 +191,18 @@ public final class AgentClient: Sendable {
         return names
     }
 
-    public func renameTask(_ taskId: String, name: String) async throws {
-        try await rename("/v0/tasks/\(Self.escape(taskId))", key: "task", name: name)
+    /// `mutationId`: the same for every try of one rename, so the computer
+    /// does it once (an intent's ID, `IntentOutbox`).
+    public func renameTask(_ taskId: String, name: String, mutationId: String = ClientID.make()) async throws {
+        try await rename("/v0/tasks/\(Self.escape(taskId))", key: "task", name: name, mutationId: mutationId)
     }
 
-    public func renameBot(_ botId: String, name: String) async throws {
-        try await rename("/v0/bots/\(Self.escape(botId))", key: "bot", name: name)
+    public func renameBot(_ botId: String, name: String, mutationId: String = ClientID.make()) async throws {
+        try await rename("/v0/bots/\(Self.escape(botId))", key: "bot", name: name, mutationId: mutationId)
     }
 
-    public func leaveTask(_ taskId: String) async throws {
-        _ = try await send("POST", "/v0/tasks/\(Self.escape(taskId))/leave", json: .object(["mutationId": .string(ClientID.make())]))
+    public func leaveTask(_ taskId: String, mutationId: String = ClientID.make()) async throws {
+        _ = try await send("POST", "/v0/tasks/\(Self.escape(taskId))/leave", json: .object(["mutationId": .string(mutationId)]))
     }
 
     public func archiveTask(_ taskId: String) async throws {
@@ -190,8 +214,8 @@ public final class AgentClient: Sendable {
     }
 
     /// A subtask's conversation (`POST /v0/agents/:agentId/archive`).
-    public func archiveAgent(_ agentId: String) async throws {
-        _ = try await send("POST", "/v0/agents/\(Self.escape(agentId))/archive", json: .object(["mutationId": .string(ClientID.make())]))
+    public func archiveAgent(_ agentId: String, mutationId: String = ClientID.make()) async throws {
+        _ = try await send("POST", "/v0/agents/\(Self.escape(agentId))/archive", json: .object(["mutationId": .string(mutationId)]))
     }
 
     /// Archival names the version it archives (`If-Match`).
@@ -202,8 +226,7 @@ public final class AgentClient: Sendable {
 
     /// A rename names the version it renames (`If-Match`); one that lost a
     /// race reads the newer version and renames that.
-    private func rename(_ path: String, key: String, name: String) async throws {
-        let mutationId = ClientID.make()
+    private func rename(_ path: String, key: String, name: String, mutationId: String) async throws {
         for attempt in 0..<2 {
             guard let version = try await decode(JSONValue.self, "GET", path)[key]?["version"]?.stringValue else { throw AgentClientError.invalidResponse }
             do {
@@ -218,8 +241,8 @@ public final class AgentClient: Sendable {
     // MARK: Surfaces
 
     /// Takes a Surface out of the reader's sidebar; its content stays for everyone.
-    public func leaveSurface(_ surfaceId: String) async throws {
-        _ = try await send("POST", "/v0/surfaces/\(Self.escape(surfaceId))/leave", json: .object(["mutationId": .string(ClientID.make())]))
+    public func leaveSurface(_ surfaceId: String, mutationId: String = ClientID.make()) async throws {
+        _ = try await send("POST", "/v0/surfaces/\(Self.escape(surfaceId))/leave", json: .object(["mutationId": .string(mutationId)]))
     }
 
     /// The joined Surfaces; nil where the daemon serves none (`404`, `501`).
@@ -313,7 +336,9 @@ public final class AgentClient: Sendable {
 
     /// Always steering, as desktop sends: mid-turn it is taken at the next
     /// boundary rather than waiting behind the run; idle, it starts one.
-    public func sendMessage(_ agentId: String, id: String, text: String, images: [(mimeType: String, data: Data)], mode: AgentWire.Mode) async throws {
+    /// `progress` hears each image's share written, in order, as the body goes out.
+    public func sendMessage(_ agentId: String, id: String, text: String, images: [(mimeType: String, data: Data)], mode: AgentWire.Mode,
+        progress: (@Sendable ([Double]) -> Void)? = nil) async throws {
         guard images.allSatisfy({ $0.data.count <= AttachmentRules.maxInlineImageBytes }),
               images.reduce(0, { $0 + $1.data.count }) <= AttachmentRules.maxInlineImageTotalBytes else {
             throw AttachmentRules.invalid("Inline images exceed the model's image limit.")
@@ -323,14 +348,27 @@ public final class AgentClient: Sendable {
             "id": .string(id), "text": .string(caption), "delivery": .string("steer"),
             "clientMetadata": .object(["composer": .string("mobile")]),
         ]
+        let encoded = images.map { $0.data.base64EncodedString() }
         if !images.isEmpty {
             // /send prepends its required top-level text to these rich blocks.
-            object["content"] = .array(images.map {
-                .object(["type": .string("image"), "mimeType": .string($0.mimeType), "data": .string($0.data.base64EncodedString())])
+            object["content"] = .array(zip(images, encoded).map {
+                .object(["type": .string("image"), "mimeType": .string($0.0.mimeType), "data": .string($0.1)])
             })
         }
         object["mode"] = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(mode))
-        _ = try await send("POST", "/v0/agents/\(Self.escape(agentId))/send", json: .object(object))
+        let path = "/v0/agents/\(Self.escape(agentId))/send"
+        guard let progress, !images.isEmpty else {
+            _ = try await send("POST", path, json: .object(object))
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        let body = try encoder.encode(JSONValue.object(object))
+        // Where each picture's base64 is in the body: the bytes written
+        // so far say how far each one is.
+        let ranges = UploadRanges(body: body, encoded: encoded)
+        progress(ranges.shares(sent: 0))
+        _ = try await send("POST", path, raw: body, sent: { progress(ranges.shares(sent: $0)) })
     }
 
     /// The composer's draft as the computer keeps it for this person.
@@ -364,6 +402,24 @@ public final class AgentClient: Sendable {
         }
         let path = "/v0/agents/\(Self.escape(agentId))/messages/\(Self.escape(messageId))/\(mode == nil ? "retry" : "switch")"
         return try await decode(Response.self, "POST", path, json: .object(body)).message
+    }
+
+    /// The question the agent is waiting on, or nil when none is.
+    public func question(_ agentId: String) async throws -> AgentWire.Question? {
+        struct Response: Decodable { var question: AgentWire.Question? }
+        return try await decode(Response.self, "GET", "/v0/agents/\(Self.escape(agentId))/question").question
+    }
+
+    /// Answers a question: each prompt's option labels or typed text, by
+    /// its ID. The first answer wins; a late one is refused with the
+    /// question as it now stands.
+    public func answerQuestion(_ agentId: String, questionId: String, answers: [String: [String]], mutationId: String) async throws -> AgentWire.Question {
+        struct Response: Decodable { var question: AgentWire.Question }
+        let body: JSONValue = .object([
+            "answers": .object(answers.mapValues { .array($0.map(JSONValue.string)) }),
+            "mutationId": .string(mutationId),
+        ])
+        return try await decode(Response.self, "POST", "/v0/agents/\(Self.escape(agentId))/question/\(Self.escape(questionId))/answer", json: body).question
     }
 
     public func markRead(_ agentId: String) async throws {
@@ -529,7 +585,7 @@ public final class AgentClient: Sendable {
     }
 }
 
-/// The task, workspace and conversation a client names for new work.
+/// The task, workspace and conversation a client names for a new task.
 public struct Identity: Equatable, Sendable {
     public let taskId: String
     public let workspaceId: String

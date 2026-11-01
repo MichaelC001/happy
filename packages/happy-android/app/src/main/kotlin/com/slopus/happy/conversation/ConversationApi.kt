@@ -8,6 +8,7 @@ import com.slopus.happy.connection.TransportResponse
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -22,12 +23,28 @@ class ConversationApiException(val status: Int, val code: String?, override val 
 /** One request to the paired agent, answered whatever its status; the agent connection's client does the transport. */
 typealias AgentRequest = suspend (method: String, path: String, body: JsonElement?) -> TransportResponse
 
-/** The client-chosen ids of a task made on first send (`POST /v0/tasks`); the same ids again are the same task. */
+/**
+ * The client-chosen ids of new work made on first send (`POST /v0/tasks` or
+ * `/v0/bots`); the same ids again are the same task or bot.
+ */
 data class NewTask(val taskId: String, val workspaceId: String, val agentId: String, val mutationId: String) {
     companion object {
         fun make() = NewTask(ConversationApi.clientId(), ConversationApi.clientId(), ConversationApi.clientId(), ConversationApi.clientId())
     }
 }
+
+/** What new work is made as. */
+enum class WorkKind { Task, Bot }
+
+/**
+ * New work as chosen before its first send (iOS's `NewTask.Choice`): a task
+ * unless a bot was picked, and the name given, blank for the computer to
+ * name it from its first message.
+ */
+data class WorkChoice(val kind: WorkKind = WorkKind.Task, val name: String = "")
+
+/** New work left before its first message, as it was left: compose again opens it. */
+data class UnsentWork(val task: NewTask, val choice: WorkChoice, val draft: String)
 
 /**
  * The conversation routes of the Happy Agent API (API.md, "Agents",
@@ -39,17 +56,23 @@ open class ConversationApi(private val request: AgentRequest) {
 
     private suspend fun call(method: String, path: String, body: JsonElement? = null): JsonObject = decode(request(method, path, body))
 
-    /** A new chat: a task, its folder and its one agent, made together. Answers `{task, membership}`. */
-    open suspend fun createTask(task: NewTask): JsonObject = call(
-        "POST",
-        "/v0/tasks",
-        buildJsonObject {
+    /**
+     * A new chat: a task (`{task, membership}`) or a bot (`{bot}`), its folder
+     * and its one agent, made together under [task]'s ids, as desktop's
+     * `createTask` and `createBot` make them. A blank name is left out rather
+     * than sent, which the computer would refuse.
+     */
+    open suspend fun createWork(task: NewTask, choice: WorkChoice = WorkChoice()): JsonObject {
+        val owner = if (choice.kind == WorkKind.Bot) "bot" else "task"
+        val body = buildJsonObject {
             put("id", task.taskId)
             put("workspaceId", task.workspaceId)
             put("agentId", task.agentId)
             put("mutationId", task.mutationId)
-        },
-    ).takeIf { it["task"].obj != null } ?: throw invalid()
+            choice.name.trim().takeIf { it.isNotEmpty() }?.let { put("name", it) }
+        }
+        return call("POST", "/v0/${owner}s", body).takeIf { it[owner].obj != null } ?: throw invalid()
+    }
 
     /**
      * The agent of this computer's Chief of Staff: the active bot whose
@@ -65,10 +88,15 @@ open class ConversationApi(private val request: AgentRequest) {
     open suspend fun bootstrap(agentId: String): Bootstrap =
         Bootstrap.parse(call("GET", "/v0/agents/${escape(agentId)}/bootstrap")) ?: throw invalid()
 
-    /** The newest runs, or the runs before [before]. Tool data is left out where a presentation stands for it. */
-    open suspend fun messages(agentId: String, before: String? = null, limit: Int = 100): MessagesPage {
+    /**
+     * The newest runs, the runs before the run [before], or the messages
+     * after the message [after] (API.md: what extends the newest run and the
+     * runs started since). Tool data is left out where a presentation stands for it.
+     */
+    open suspend fun messages(agentId: String, before: String? = null, limit: Int = 100, after: String? = null): MessagesPage {
         val query = StringBuilder("limit=$limit&omitToolData=true")
         before?.let { query.append("&before=").append(escape(it)) }
+        after?.let { query.append("&after=").append(escape(it)) }
         return MessagesPage.parse(call("GET", "/v0/agents/${escape(agentId)}/messages?$query")) ?: throw invalid()
     }
 
@@ -93,6 +121,26 @@ open class ConversationApi(private val request: AgentRequest) {
             put("mode", mode.json())
         }
         return Message.parse(call("POST", "/v0/agents/${escape(agentId)}/send", body)["message"])
+    }
+
+    /**
+     * Writes [bytes] at [path] in the workspace, new only (`expectedHash:
+     * null`). The same bytes already there, a retry whose answer was lost,
+     * count as written (iOS `AttachmentRules.upload`).
+     */
+    open suspend fun uploadFile(workspaceId: String, path: String, bytes: ByteArray) {
+        val hash = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        val body = buildJsonObject {
+            put("path", path)
+            put("content", java.util.Base64.getEncoder().encodeToString(bytes))
+            put("expectedHash", JsonNull)
+        }
+        val response = request("PUT", "/v0/workspaces/${escape(workspaceId)}/file", body)
+        if (response.status == 409) {
+            val answer = runCatching { json.parseToJsonElement(response.text).obj }.getOrNull()
+            if (answer?.get("code").str == "hash_mismatch" && answer?.get("hash").str == hash) return
+        }
+        if (decode(response)["hash"].str != hash) throw invalid()
     }
 
     open suspend fun abort(agentId: String) {
@@ -132,7 +180,7 @@ open class ConversationApi(private val request: AgentRequest) {
 
     /** The bytes of one item a tool call presented (`media` presentation). */
     open suspend fun media(agentId: String, toolCallId: String, index: Int): ByteArray {
-        val response = request("GET", "/v0/agents/${escape(agentId)}/tool-calls/${escape(toolCallId)}/media/$index", null)
+        val response = request("GET", mediaPath(agentId, toolCallId, index), null)
         if (response.status !in 200..299) decode(response)
         return response.body
     }
@@ -160,28 +208,28 @@ open class ConversationApi(private val request: AgentRequest) {
         return call("POST", "/v0/secrets", body)["secret"].obj?.get("id").str ?: throw invalid()
     }
 
-    /** One artifact as the catalog has it (API.md "Artifacts"). */
-    open suspend fun artifact(artifactId: String): JsonObject =
-        call("GET", "/v0/artifacts/${escape(artifactId)}")["artifact"].obj ?: throw invalid()
-
-    /** A version's manifest: its title, its entry's path and every file it holds. [number] or `latest`. */
-    open suspend fun artifactVersion(artifactId: String, number: String = "latest"): JsonObject =
-        call("GET", "/v0/artifacts/${escape(artifactId)}/versions/${escape(number)}")["version"].obj ?: throw invalid()
-
-    /** Tombstones stay readable, but their versions and files no longer do (API.md). */
-    open suspend fun readArtifact(artifactId: String): Artifact? {
-        val metadata = artifact(artifactId)
-        val version = if (Artifact.isDeleted(metadata)) JsonObject(emptyMap()) else artifactVersion(artifactId)
-        return Artifact.parse(metadata, version)
+    /** A todo list's active todos, then its completed ones (API.md "Surfaces"). */
+    open suspend fun todos(surfaceId: String): List<Todo> {
+        val path = "/v0/surfaces/todo/${escape(surfaceId)}"
+        fun parse(answer: JsonObject) = answer["todos"].arr.orEmpty().mapNotNull { item ->
+            val o = item.obj ?: return@mapNotNull null
+            Todo(o["id"].str ?: return@mapNotNull null, o["text"].str.orEmpty(), o["status"].str == "completed")
+        }
+        return parse(call("GET", path)) + parse(call("GET", "$path?scope=completed"))
     }
 
-    /** The bytes of one file of one version, asked for by its exact manifest path. */
-    open suspend fun artifactFile(artifactId: String, number: String, path: String): ByteArray {
-        val route = path.split('/').joinToString("/") { escape(it) }
-        val response = request("GET", "/v0/artifacts/${escape(artifactId)}/versions/${escape(number)}/files/$route", null)
-        if (response.status !in 200..299) decode(response)
-        return response.body
+    /** A new todo at the top of the list; [id] is its retry key. */
+    open suspend fun addTodo(surfaceId: String, id: String, text: String) {
+        call("POST", "/v0/surfaces/todo/${escape(surfaceId)}", buildJsonObject {
+            put("id", id)
+            put("text", text)
+            put("mutationId", clientId())
+        })
     }
+
+    /** A document as Markdown, its read-only projection. */
+    open suspend fun document(surfaceId: String): String =
+        call("GET", "/v0/surfaces/document/${escape(surfaceId)}")["document"].obj?.get("text").str.orEmpty()
 
     companion object {
         private val json = Json { ignoreUnknownKeys = true }
@@ -189,6 +237,10 @@ open class ConversationApi(private val request: AgentRequest) {
         private const val ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
         fun escape(component: String): String = URLEncoder.encode(component, "UTF-8").replace("+", "%20")
+
+        /** One item a tool call presented; it answers a `Range` with that range (`206`). */
+        fun mediaPath(agentId: String, toolCallId: String, index: Int): String =
+            "/v0/agents/${escape(agentId)}/tool-calls/${escape(toolCallId)}/media/$index"
 
         /** A CUID2-shaped id the daemon accepts from a client (`^[a-z][a-z0-9]+$`, 24 long). */
         fun clientId(): String = buildString {

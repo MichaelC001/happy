@@ -56,6 +56,12 @@ data class MediaItem(
     val mimeType: String,
     val width: Double? = null,
     val height: Double? = null,
+    /** Pixels per point of a capture (2 for a retina screenshot): it is never drawn past [width] / [scale]. */
+    val scale: Double? = null,
+    /** The picture's ThumbHash, base64: its shape before the bytes come. */
+    val thumbhash: String? = null,
+    /** Its length in bytes, when stated: a recording streams by range from it. */
+    val size: Double? = null,
 ) {
     val isVisual: Boolean get() = kind == "image" || kind == "video"
 
@@ -68,6 +74,9 @@ data class MediaItem(
                 mimeType = o["mimeType"].str.orEmpty(),
                 width = o["width"].num,
                 height = o["height"].num,
+                scale = o["scale"].num,
+                thumbhash = o["thumbhash"].str,
+                size = o["size"].num,
             )
         }
     }
@@ -78,8 +87,9 @@ sealed interface Presentation {
     data class Command(val command: String, val output: String?) : Presentation
     data class Exploration(val operations: List<String>) : Presentation
     data class Search(val query: String, val target: String) : Presentation
-    data class Media(val items: List<MediaItem>) : Presentation
-    data class Artifact(val artifactId: String, val artifactType: String?, val title: String?, val version: Int?) : Presentation
+    /** [columns] is the grid the producer asked for (`layout` `{type: "columns", columns}`, 1 or 2), else 0: justified rows. */
+    data class Media(val items: List<MediaItem>, val columns: Int = 0) : Presentation
+    data class Artifact(val artifactId: String, val artifactType: String?, val title: String?, val version: Int?, val shows: String? = null) : Presentation
 
     companion object {
         fun parse(value: JsonElement?): Presentation? {
@@ -93,10 +103,16 @@ sealed interface Presentation {
                     },
                 )
                 "search" -> Search(o["query"].str ?: return null, o["target"].str ?: "web")
-                "media" -> Media(o["items"].arr.orEmpty().mapNotNull(MediaItem::parse))
-                "artifact" -> Artifact(o["artifactId"].str ?: return null, o["artifactType"].str, o["title"].str, o["version"].num?.toInt())
+                "media" -> Media(o["items"].arr.orEmpty().mapNotNull(MediaItem::parse), columns(o["layout"]))
+                "artifact" -> Artifact(o["artifactId"].str ?: return null, o["artifactType"].str, o["title"].str, o["version"].num?.toInt(), o["shows"].str)
                 else -> null
             }
+        }
+
+        private fun columns(layout: JsonElement?): Int {
+            val o = layout.obj ?: return 0
+            val columns = o["columns"].num
+            return if (o["type"].str == "columns" && (columns == 1.0 || columns == 2.0)) columns.toInt() else 0
         }
     }
 }
@@ -222,9 +238,21 @@ data class AgentInfo(
     val updatedAt: Long?,
     val subagentsRunning: Int,
     val subagentsTotal: Int,
+    /** Whether the agent's send route takes the person's messages; absent on older daemons. */
+    val canSendMessages: Boolean? = null,
+    /** A user-interactive subtask its parent manages; absent (false) on older daemons. */
+    val subtask: Boolean? = null,
 ) {
     val isWorking: Boolean get() = status != "idle"
     val isSubagent: Boolean get() = parentAgentId != null
+
+    /**
+     * Whether the person can send here: the agent's own `canSendMessages`,
+     * else the daemon's rule for it (ApiResourceProjection): a root or a
+     * user-interactive subtask, not archived. An internal subagent, driven
+     * by its parent, takes none.
+     */
+    val sendable: Boolean get() = canSendMessages ?: ((parentAgentId == null || subtask == true) && archivedAt == null)
 
     /** `agent.updated` `changes` laid over this copy: present and null clears, absent leaves it. */
     fun merge(changes: JsonObject): AgentInfo = copy(
@@ -235,6 +263,12 @@ data class AgentInfo(
         updatedAt = changes["updatedAt"].long ?: updatedAt,
         subagentsRunning = changes["subagents"].obj?.get("running")?.num?.toInt() ?: subagentsRunning,
         subagentsTotal = changes["subagents"].obj?.get("total")?.num?.toInt() ?: subagentsTotal,
+        // Sent with every archive and restore; from a daemon that doesn't, the fallback answers again.
+        canSendMessages = when {
+            "canSendMessages" in changes -> changes["canSendMessages"].bool
+            "archivedAt" in changes -> null
+            else -> canSendMessages
+        },
     )
 
     companion object {
@@ -252,6 +286,8 @@ data class AgentInfo(
                 updatedAt = o["updatedAt"].long,
                 subagentsRunning = o["subagents"].obj?.get("running")?.num?.toInt() ?: 0,
                 subagentsTotal = o["subagents"].obj?.get("total")?.num?.toInt() ?: 0,
+                canSendMessages = o["canSendMessages"].bool,
+                subtask = o["subtask"].bool,
             )
         }
     }
@@ -377,3 +413,6 @@ data class SecretSummary(
         }
     }
 }
+
+/** One todo of a todo list Surface. */
+data class Todo(val id: String, val text: String, val done: Boolean)

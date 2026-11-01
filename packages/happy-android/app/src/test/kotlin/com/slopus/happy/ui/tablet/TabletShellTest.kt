@@ -24,6 +24,7 @@ import com.slopus.happy.ui.assertDp
 import com.slopus.happy.ui.bounds
 import com.slopus.happy.ui.chat.ChatScreenTags
 import com.slopus.happy.ui.components.HeaderTags
+import com.slopus.happy.ui.components.HomeCardSpec
 import com.slopus.happy.ui.files.ChangesTags
 import com.slopus.happy.ui.home.FlatRowTags
 import com.slopus.happy.ui.home.HomeDockTags
@@ -38,6 +39,7 @@ import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import com.slopus.happy.ui.layout.ContentTokens
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -49,8 +51,9 @@ private const val TABLET_WIDTH = 1280
 
 /**
  * SidebarNavigator.tsx on a signed-in window: the sidebar (30% of the window,
- * 250–360) beside the stack from 768 wide, the persistent header's zen and
- * back over both, Home blank in the detail; just the stack below 768.
+ * 250–360) beside the stack from 840 wide (Material expanded), the persistent
+ * header's zen and back over both, Home blank in the detail; just the stack
+ * below 840, which keeps a book foldable one pane both ways (750 and 832).
  */
 @OptIn(ExperimentalTestApi::class)
 @RunWith(AndroidJUnit4::class)
@@ -175,22 +178,24 @@ class TabletShellTest {
      * one screen: a second tap adds no entry, so one Back leaves.
      */
     @Test
-    fun newSessionOpensInTheDetail() {
+    fun newSessionComposesInTheDetail() {
         session("a", 200)
         signIn()
         waitFor(FlatRowTags.ROW)
         rule.onAllNodesWithTag(HomeDockTags.DOCK, useUnmergedTree = true).assertCountEquals(0)
+        // The compose chat, not the new-session screen, beside the sidebar.
         rule.node(TabletSidebarTags.NEW_SESSION).performClick()
-        waitFor(NewSessionTags.SCREEN)
-        assertDp("new session in the detail", 360, rule.node(NewSessionTags.SCREEN).bounds.left)
-        assertDp("its own back, 48 wide", 48, rule.node(NewSessionTags.BACK).bounds.let { it.right - it.left })
+        waitFor(ChatScreenTags.SCREEN)
+        rule.onAllNodesWithTag(NewSessionTags.SCREEN, useUnmergedTree = true).assertCountEquals(0)
+        assertDp("the compose chat in the detail", 360, rule.node(ChatScreenTags.SCREEN).bounds.left)
+        assertDp("to the window's edge", TABLET_WIDTH, rule.node(ChatScreenTags.SCREEN).bounds.right)
 
         rule.node(TabletSidebarTags.NEW_SESSION).performClick()
         rule.waitForIdle()
-        rule.onAllNodesWithTag(NewSessionTags.SCREEN, useUnmergedTree = true).assertCountEquals(1)
-        rule.node(NewSessionTags.BACK).performClick()
+        rule.onAllNodesWithTag(ChatScreenTags.SCREEN, useUnmergedTree = true).assertCountEquals(1)
+        rule.node(TabletShellTags.BACK).performClick()
         waitFor(HomeTags.TABLET_BLANK)
-        rule.onAllNodesWithTag(NewSessionTags.SCREEN, useUnmergedTree = true).assertCountEquals(0)
+        rule.onAllNodesWithTag(ChatScreenTags.SCREEN, useUnmergedTree = true).assertCountEquals(0)
     }
 
     @Test
@@ -253,24 +258,52 @@ class TabletShellTest {
         assertDp("detail after it", 252, rule.node(TabletShellTags.DETAIL).bounds.left)
     }
 
+    // At exactly 840, Material's expanded class, the shell starts: a 252 sidebar (30%).
+    @Test
+    @Config(qualifiers = "w840dp-h750dp-xhdpi")
+    fun theShellStartsAt840() {
+        session("a", 200)
+        signIn()
+        waitFor(FlatRowTags.ROW)
+        val sidebar = rule.node(TabletSidebarTags.SIDEBAR).bounds
+        assertDp("sidebar 30% of 840", 252, sidebar.right - sidebar.left)
+        assertDp("detail after it", 252, rule.node(TabletShellTags.DETAIL).bounds.left)
+    }
+
     // The same foldable upright, 673 wide, and a phone: no shell, the phone home.
     @Test
     @Config(qualifiers = "w673dp-h841dp-xhdpi")
-    fun foldablePortraitIsAPhone() = assertPhoneHome()
+    fun foldablePortraitIsAPhone() = assertPhoneHome(ContentTokens.Medium.keyline(673.dp))
+
+    // happy-app's old 768 cutoff: medium, one pane.
+    @Test
+    @Config(qualifiers = "w768dp-h1024dp-xhdpi")
+    fun at768ItIsOnePane() = assertPhoneHome(ContentTokens.Medium.keyline(768.dp))
+
+    // A Galaxy Z Fold7 on its side, 832 wide: medium, one pane, the centred column.
+    @Test
+    @Config(qualifiers = "w832dp-h750dp-xxhdpi")
+    fun foldSidewaysIsOnePane() = assertPhoneHome(ContentTokens.Medium.keyline(832.dp))
+
+    // The Fold upright, 750 wide: one pane.
+    @Test
+    @Config(qualifiers = "w750dp-h832dp-xxhdpi")
+    fun foldUprightIsOnePane() = assertPhoneHome(ContentTokens.Medium.keyline(750.dp))
 
     @Test
     @Config(qualifiers = PHONE)
-    fun phoneIsUnchanged() = assertPhoneHome()
+    fun phoneIsUnchanged() = assertPhoneHome(HomeCardSpec.inset)
 
-    private fun assertPhoneHome() {
+    /** The phone's home, its rows' cards [cardInset] in: 16 on a phone, Material's 24 margin on a medium window. */
+    private fun assertPhoneHome(cardInset: androidx.compose.ui.unit.Dp) {
         session("a", 200)
         signIn()
         waitFor(FlatRowTags.ROW)
         rule.onAllNodesWithTag(TabletSidebarTags.SIDEBAR, useUnmergedTree = true).assertCountEquals(0)
         rule.onAllNodesWithTag(TabletShellTags.HEADER, useUnmergedTree = true).assertCountEquals(0)
         rule.node(AccountMenuTags.BUTTON).assertExists()
-        rule.node(HomeDockTags.DOCK).assertExists()
-        assertDp("home row from the left edge", 0, rule.node(FlatRowTags.ROW).bounds.left)
+        rule.node(HomeTags.COMPOSE).assertExists()
+        assertDp("home row inset in its card", cardInset, rule.node(FlatRowTags.ROW).bounds.left)
         rule.node(FlatRowTags.ROW).performClick()
         waitFor(ChatScreenTags.SCREEN)
         assertDp("the chat keeps its back button", 48, rule.node(HeaderTags.LEFT).bounds.let { it.right - it.left })

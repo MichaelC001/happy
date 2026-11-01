@@ -194,36 +194,16 @@ public final class RemoteImageView: UIImageView {
             image = cached
             return
         }
-        image = thumbhash.flatMap(pictures.cachedPlaceholderImage)
+        image = ThumbHashImages.image(thumbhash)
         task = Task { @MainActor [weak self] in
-            if self?.image == nil, let thumbhash, let placeholder = await pictures.placeholderImage(thumbhash) {
-                guard !Task.isCancelled, let self, self.isShowing(url, from: pictures) else { return }
-                if self.image == nil { self.image = placeholder }
-            }
             let image = await pictures.image(url)
             guard !Task.isCancelled, let self, self.isShowing(url, from: pictures), let image else { return }
-            self.image = image
+            ImageFade.show(image, in: self, fade: true)
         }
     }
 
     private func isShowing(_ url: URL, from pictures: AccountPictures) -> Bool {
         self.url == url && self.pictures === pictures
-    }
-}
-
-/// A generated avatar as a picture, for a row's 29pt icon slot.
-@MainActor
-enum AvatarSnapshot {
-    static func image(_ content: AvatarView.Content, size: CGFloat, traits: UITraitCollection) -> UIImage {
-        let view = AvatarView(frame: CGRect(x: 0, y: 0, width: size, height: size))
-        view.content = content
-        view.layoutIfNeeded()
-        let format = UIGraphicsImageRendererFormat(for: traits)
-        return UIGraphicsImageRenderer(size: view.bounds.size, format: format).image { context in
-            traits.performAsCurrent {
-                view.layer.render(in: context.cgContext)
-            }
-        }
     }
 }
 
@@ -629,79 +609,4 @@ public final class CenteredMessageView: UIView {
     }
 }
 
-/// settings/connect/claude.tsx `OAuthViewUnsupported`: connecting Claude
-/// happens in a terminal, so the screen shows the command.
-public final class ConnectCommandView: UIView {
-    let titleLabel = StyledLabel(style: TextStyles.connectTitle, color: Palette.text, alignment: .center)
-    let bodyLabel = StyledLabel(style: TextStyles.connectBody, color: Palette.textSecondary, alignment: .center)
-    let terminal = UIView()
-    let commandLabel = UILabel()
-    private let command: String
-
-    public init(title: String, body: String, command: String) {
-        self.command = command
-        super.init(frame: .zero)
-        backgroundColor = UIColor(Palette.groupedBackground)
-        titleLabel.string = title
-        bodyLabel.string = body
-        // On iOS the glass surface is transparent; only its hairline shows.
-        terminal.layer.cornerRadius = ConnectCommandLayout.Metrics.terminalCornerRadius
-        terminal.layer.cornerCurve = .continuous
-        terminal.clipsToBounds = true
-        commandLabel.numberOfLines = 0
-        renderCommand()
-        commandLabel.accessibilityLabel = command
-        addSubview(titleLabel)
-        addSubview(bodyLabel)
-        addSubview(terminal)
-        terminal.addSubview(commandLabel)
-        updateBorder()
-        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitDisplayScale.self]) { (self: Self, _) in
-            self.updateBorder()
-        }
-        registerForTraitChanges(UIView.textSizeTraits) { (self: Self, _) in
-            self.renderCommand()
-            self.setNeedsLayout()
-        }
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is not supported")
-    }
-
-    /// The command at the size it is drawn at.
-    private func renderCommand() {
-        let style = traitCollection.textEnvironment.map { TextStyles.connectCommand.scaled($0.scale) } ?? TextStyles.connectCommand
-        let text = NSMutableAttributedString(attributedString: style.attributedString("$ ", color: UIColor(Palette.commandPrompt)))
-        // happy-app draws it white on a transparent card, which vanishes in
-        // light mode; the text colour reads in both (see FEATURES.md).
-        text.append(style.attributedString(command, color: UIColor(Palette.text)))
-        commandLabel.attributedText = text
-    }
-
-    public func layout() -> ConnectCommandLayout {
-        ConnectCommandLayout(
-            size: bounds.size,
-            safeArea: LayoutInsets(safeAreaInsets),
-            title: titleLabel.measurable,
-            body: bodyLabel.measurable,
-            command: commandLabel.measurable
-        )
-    }
-
-    public override func layoutSubviews() {
-        super.layoutSubviews()
-        let layout = layout()
-        titleLabel.setLayoutFrame(layout.title)
-        bodyLabel.setLayoutFrame(layout.body)
-        terminal.setLayoutFrame(layout.terminal)
-        commandLabel.setLayoutFrame(layout.command)
-    }
-
-    private func updateBorder() {
-        terminal.layer.borderColor = UIColor(Palette.glassBorder).resolvedColor(with: traitCollection).cgColor
-        terminal.layer.borderWidth = hairline
-    }
-}
 #endif

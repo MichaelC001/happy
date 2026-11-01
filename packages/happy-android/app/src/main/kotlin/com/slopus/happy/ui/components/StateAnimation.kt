@@ -50,11 +50,10 @@ import com.slopus.happy.ui.theme.happyTextStyle
  * (SHA-256 below): MIT, Happy Coder Contributors, this repository's own
  * happy-app animations. Errors, offline, a search that found nothing and
  * small inline tiles get no picture, as on desktop: a glyph at most.
+ * Waiting has none either (desktop's snail): a read shows the platform's
+ * spinner ([LoadingIndicator]).
  */
 enum class StateArt(@RawRes val raw: Int) {
-    /** Something is being read and it takes a moment (snail, `6a9c7b64…`). */
-    Waiting(R.raw.state_snail),
-
     /** What is missing can be made right here, beside the button that makes it (wand, `8de70508…`). */
     Make(R.raw.state_wand),
 

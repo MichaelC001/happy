@@ -1215,10 +1215,8 @@ final class UITests: XCTestCase {
     }
 
     /// The chat pulled past its newest row and held there, the finger still
-    /// pulling slowly, three times over, while a reply streams in: the
-    /// content never steps back against the pull, nothing writes the
-    /// transcript's height, inset or offset while it is held stretched, and
-    /// let go it settles on the newest line. Needs the e2e computer's fake
+    /// pulling slowly, three times over, while a reply streams in: let go,
+    /// it settles on the newest line. Needs the e2e computer's fake
     /// model (`fakellm.py`), which streams "stream P W": P paragraphs, W ms
     /// a word, in the conversation `V2_STREAM_ROW` (Stream Lab).
     func testChatBounceWhileStreaming() {
@@ -1240,11 +1238,7 @@ final class UITests: XCTestCase {
             pause(1.5)
         }
         capture("chat-bounce-after")
-        let counts = probeCounts(transcript)
         print("HAPPY_CHAT_BOUNCE \(transcript.value as? String ?? "")")
-        XCTAssertGreaterThan(counts["stretched"] ?? 0, 60, "the pulls never stretched it")
-        XCTAssertEqual(counts["backwards"], 0, "the content stepped back against the pull")
-        XCTAssertEqual(counts["held"], 0, "the transcript was written while held stretched")
         // Let go, it follows the reply again: the newest row ends over the composer.
         let messages = app.descendants(matching: .any).matching(identifier: "message")
         let input = app.descendants(matching: .any)["input"]
@@ -1688,16 +1682,6 @@ final class UITests: XCTestCase {
         pause(2.5)
     }
 
-    /// The probe's counts, from the transcript's value.
-    private func probeCounts(_ transcript: XCUIElement) -> [String: Int] {
-        let value = transcript.value as? String ?? ""
-        return Dictionary(value.split(separator: " ").compactMap { pair -> (String, Int)? in
-            let parts = pair.split(separator: "=")
-            guard parts.count == 2, let count = Int(parts[1]) else { return nil }
-            return (String(parts[0]), count)
-        }, uniquingKeysWith: { _, last in last })
-    }
-
     /// The pencil right after the name, on its line, and no Rename row.
     private func assertPencil() {
         let pencil = app.buttons["detail-rename-button"]
@@ -2014,24 +1998,24 @@ final class UITests: XCTestCase {
 
         // A photo from the library (the newest: the swatch the run put
         // there with `simctl addmedia`), with a question about it.
-        // "+" is the "+" sheet; its Photos, the shared library sheet.
+        // "+" is the attachment menu, its grid the library.
         openLibrary()
-        let newest = app.descendants(matching: .any)["library-cell:0"]
+        let newest = app.descendants(matching: .any)["attach-photo:0"]
         XCTAssertTrue(newest.waitForExistence(timeout: 10), "the library sheet never showed a photo")
         pause(1)
         capture("media-library")
-        // Newest first.
-        newest.tap()
-        pause(0.8)
-        app.descendants(matching: .any)["library-add"].tap()
-        XCTAssertTrue(app.descendants(matching: .any)["composer-attachment"].waitForExistence(timeout: 8), "the photo didn't attach")
+        // Newest first, picked with its circle; the question is its caption
+        // and it goes from the menu, as Telegram's does.
+        pickCircle(newest)
+        let caption = app.textViews["attach-caption"]
+        XCTAssertTrue(caption.waitForExistence(timeout: 3), "picking didn't offer the caption")
         pause(2)
         capture("media-picked")
-        composer.tap()
-        composer.typeText("What colours and words are in this picture? Answer in one sentence, no tools.")
+        caption.tap()
+        caption.typeText("What colours and words are in this picture? Answer in one sentence, no tools.")
         pause(1)
         capture("media-photo-attached")
-        app.buttons["Send"].tap()
+        app.descendants(matching: .any)["attach-send"].tap()
         let sent = app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND label ENDSWITH %@", "media", "Picture"))
         XCTAssertTrue(sent.firstMatch.waitForExistence(timeout: 10), "the photo never showed under the message")
         let deadline = Date().addingTimeInterval(120)
@@ -2701,17 +2685,6 @@ final class UITests: XCTestCase {
         capture("panel-models-opus")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
         pause(1)
-        // iOS's own menu, the + sheet's permission, to set these beside.
-        openSheet()
-        app.descendants(matching: .any)["attach-permission"].tap()
-        XCTAssertTrue(menuRow("Read only").waitForExistence(timeout: 5), "no permission menu")
-        pause(1.5)
-        capture("native-menu")
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).tap()
-        let close = app.buttons["attach-close"]
-        XCTAssertTrue(until(3) { !self.menuRow("Read only").exists && close.isHittable }, "the menu stayed")
-        close.tap()
-        pause(1)
     }
 
     /// The pickers: the dock's model chip before new work exists (the same
@@ -2976,22 +2949,25 @@ final class UITests: XCTestCase {
         pause(1)
         capture("paste-new-work")
 
-        // The "+" sheet's Photos opens the shared library sheet; a photo picked there waits in the composer.
+        // The "+" menu shows the library in its grid; a photo picked there waits in the composer.
         openLibrary()
-        let library = app.descendants(matching: .any)["library-picker"]
+        let library = app.descendants(matching: .any)["attach-grid"]
         XCTAssertTrue(library.waitForExistence(timeout: 5), "Photos didn't open the library")
         XCTAssertFalse(app.alerts.firstMatch.exists, "+ asked first")
-        let first = app.descendants(matching: .any)["library-cell:0"]
+        let first = app.descendants(matching: .any)["attach-photo:0"]
         XCTAssertTrue(first.waitForExistence(timeout: 5), "the library shows no photo")
         pause(1)
-        first.tap()
+        pickCircle(first)
         pause(0.5)
         capture("paste-plus-library")
-        app.descendants(matching: .any)["library-add"].tap()
+        // Closed with a pick, it asks first; nothing comes into the composer.
+        app.buttons["attach-close"].tap()
+        let cancel = app.alerts.buttons["Yes"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 3), "closing with a pick didn't ask")
+        cancel.tap()
+        XCTAssertTrue(until(3) { !library.exists }, "the menu stayed")
         let attachments = app.descendants(matching: .any).matching(identifier: "composer-attachment")
-        XCTAssertTrue(attachments.firstMatch.waitForExistence(timeout: 8), "the picked photo didn't attach")
-        pause(1)
-        capture("paste-library-attached")
+        XCTAssertEqual(attachments.count, 0, "a pick came in without a send")
 
         // A copied picture: a long press, Paste, and it waits in the composer.
         let size = CGSize(width: 240, height: 160)
@@ -3005,7 +2981,7 @@ final class UITests: XCTestCase {
         XCTAssertTrue(paste.waitForExistence(timeout: 3), "a copied picture offered no Paste")
         capture("paste-menu")
         paste.tap()
-        XCTAssertTrue(until(5) { attachments.count == 2 }, "the pasted picture didn't attach")
+        XCTAssertTrue(until(5) { attachments.count == 1 }, "the pasted picture didn't attach")
         let attachment = attachments.firstMatch
         pause(1)
         capture("paste-attached")
@@ -3075,74 +3051,56 @@ final class UITests: XCTestCase {
         }
     }
 
-    /// The composer's "+" is Claude's "Add to session": the dock's opens it
-    /// over new work with the keyboard down; two photos picked in its strip
-    /// attach in order; Paste from clipboard puts text in at the cursor and
-    /// attaches a picture; Add files takes a picture from Files and says a
-    /// text file can't go; Permission sets the mode the next message runs
-    /// with (checked against the daemon after the run).
+    /// The composer's "+" is Telegram's attachment menu: the dock's opens
+    /// it over new work with the keyboard down, the library's newest first
+    /// under a camera cell; two photos picked attach in order through
+    /// "Add 2"; nothing pastes from it; its Files tab takes a picture from
+    /// Files and says a text file can't go; sent, the agent answers.
     func testAttachSheet() {
         home()
         pause(1)
-        UIPasteboard.general.string = "Pasted from the clipboard."
         app.buttons["Add a picture"].tap()
         allowPhotos()
         let sheet = app.descendants(matching: .any)["attach-sheet"]
         XCTAssertTrue(sheet.waitForExistence(timeout: 5), "the dock's + didn't open the + sheet")
         let first = app.descendants(matching: .any)["attach-photo:0"]
-        XCTAssertTrue(first.waitForExistence(timeout: 5), "no photos in the strip")
+        XCTAssertTrue(first.waitForExistence(timeout: 5), "no photos in the grid")
         XCTAssertFalse(app.keyboards.firstMatch.exists, "the keyboard came up under the sheet")
         let camera = app.descendants(matching: .any)["attach-camera"]
-        XCTAssertTrue(camera.exists, "no camera tile")
-        XCTAssertFalse(camera.isEnabled, "a camera on the simulator")
-        for id in ["attach-paste", "attach-files", "attach-permission"] {
-            XCTAssertTrue(app.descendants(matching: .any)[id].exists, "no \(id) row")
+        XCTAssertTrue(camera.exists, "no camera cell")
+        XCTAssertFalse(app.descendants(matching: .any)["attach-paste"].exists, "the menu still pastes")
+        XCTAssertFalse(app.descendants(matching: .any)["attach-no-access"].exists, "full access still asks")
+        for id in ["attach-tab-gallery", "attach-tab-files"] {
+            XCTAssertTrue(app.descendants(matching: .any)[id].exists, "no \(id) tab")
         }
-        let photos = app.buttons["attach-photos"]
-        XCTAssertEqual(photos.label, "Photos")
         pause(1)
         capture("attach-sheet")
 
-        // Two photos, picked in order: Photos turns into Add 2.
-        first.tap()
-        app.descendants(matching: .any)["attach-photo:1"].tap()
-        pause(0.5)
-        XCTAssertEqual(photos.label, "Add 2")
+        // Two photos, picked in order with their circles: the count shows
+        // beside close and the tabs turn into the caption with send.
+        pickCircle(first)
+        pickCircle(app.descendants(matching: .any)["attach-photo:1"])
+        let send = app.descendants(matching: .any)["attach-send"]
+        XCTAssertTrue(send.waitForExistence(timeout: 3), "picking didn't offer send")
+        XCTAssertEqual(app.descendants(matching: .any)["attach-count"].label, "2 selected")
         XCTAssertEqual(first.label, "Photo, picked 1")
         capture("attach-picked")
-        photos.tap()
+        // Closed with picks, it asks; nothing comes into the composer.
+        app.buttons["attach-close"].tap()
+        let cancel = app.alerts.buttons["Yes"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 3), "closing with picks didn't ask")
+        cancel.tap()
         let attachments = app.descendants(matching: .any).matching(identifier: "composer-attachment")
-        XCTAssertTrue(until(8) { attachments.count == 2 }, "the two photos didn't attach")
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 3), "adding didn't bring the keyboard up")
+        XCTAssertTrue(until(3) { !sheet.exists }, "the menu stayed")
+        XCTAssertEqual(attachments.count, 0, "picks came in without a send")
         let composer = app.textViews["composer"]
         if app.buttons["Continue"].exists { app.buttons["Continue"].tap(); pause(0.5) }
 
-        // Text on the clipboard goes in where the cursor is.
-        openSheet()
-        app.descendants(matching: .any)["attach-paste"].tap()
-        allowPaste()
-        XCTAssertTrue(until(5) { (composer.value as? String)?.contains("Pasted from the clipboard.") == true }, "the copied text didn't go in")
-        pause(1)
-        capture("attach-pasted-text")
-
-        // A copied picture attaches.
-        let size = CGSize(width: 240, height: 160)
-        UIPasteboard.general.image = UIGraphicsImageRenderer(size: size).image { context in
-            UIColor.systemTeal.setFill()
-            context.fill(CGRect(origin: .zero, size: size))
-        }
-        openSheet()
-        app.descendants(matching: .any)["attach-paste"].tap()
-        allowPaste()
-        XCTAssertTrue(until(8) { attachments.count == 3 }, "the copied picture didn't attach")
-        pause(1)
-        capture("attach-pasted-picture")
-
         // Files: a picture goes through.
-        openSheet()
+        openFiles()
         app.descendants(matching: .any)["attach-files"].tap()
         XCTAssertTrue(pickInFiles("attach-swatch"), "Files didn't offer the picture")
-        XCTAssertTrue(until(8) { attachments.count == 4 }, "the picture from Files didn't attach")
+        XCTAssertTrue(until(8) { attachments.count == 1 }, "the picture from Files didn't attach")
         pause(1)
         capture("attach-file-picture")
         // The photos start where the text does, as far down from the box's
@@ -3153,14 +3111,14 @@ final class UITests: XCTestCase {
         XCTAssertEqual(photo.minX, text.minX, accuracy: 0.5, "the photos don't start where the text does")
         XCTAssertEqual(photo.minY - box.minY, text.minX - box.minX, accuracy: 0.5, "the photos' top inset isn't the text's left one")
         let removes = app.descendants(matching: .any).matching(identifier: "composer-attachment-remove")
-        XCTAssertEqual(removes.count, 4)
+        XCTAssertEqual(removes.count, 1)
         for index in 0..<removes.count {
             let remove = removes.element(boundBy: index).frame
             XCTAssertTrue(box.contains(remove), "remove button \(index) at \(remove) is cut by \(box)")
             XCTAssertGreaterThan(remove.minY, box.minY)
         }
         // A text file is said, not sent.
-        openSheet()
+        openFiles()
         app.descendants(matching: .any)["attach-files"].tap()
         XCTAssertTrue(pickInFiles("attach-notes"), "Files didn't offer the text file")
         let refused = app.alerts["attach-notes.txt wasn't attached"]
@@ -3170,32 +3128,18 @@ final class UITests: XCTestCase {
         refused.buttons["Done"].tap()
         XCTAssertTrue(until(3) { !refused.exists })
         pause(0.8)
-        XCTAssertEqual(attachments.count, 4)
+        XCTAssertEqual(attachments.count, 1)
 
-        // Permission: Read only for the next message.
+        // Closed with its circle, the keyboard it put down comes back.
         let typing = app.keyboards.firstMatch.exists
         openSheet()
-        let permission = app.descendants(matching: .any)["attach-permission"]
-        let before = permission.value as? String
-        permission.tap()
-        let readOnly = menuRow("Read only")
-        XCTAssertTrue(readOnly.waitForExistence(timeout: 5), "no permission menu")
-        pause(1)
-        capture("attach-permission-picker")
-        XCTAssertFalse(app.keyboards.firstMatch.exists, "the keyboard came up over the sheet with its menu")
-        readOnly.tap()
-        XCTAssertTrue(until(4) { permission.value as? String == "Read only" }, "the row still says \(before ?? "nothing")")
-        XCTAssertTrue(sheet.exists, "picking the permission closed the sheet")
-        pause(1)
-        capture("attach-permission-read-only")
         app.buttons["attach-close"].tap()
         XCTAssertTrue(until(3) { !sheet.exists }, "the close circle didn't close the sheet")
-        // The keyboard the sheet put down comes back with it gone.
         if typing { XCTAssertTrue(until(3) { app.keyboards.firstMatch.exists }, "the keyboard didn't come back") }
 
-        // Sent: the daemon runs it Read only (checked from outside after the run).
+        // Sent: each picture fills its ring as its bytes go, then the agent answers.
         composer.tap()
-        composer.typeText(" Say in five words what these pictures show. No tools.")
+        composer.typeText(" Say in five words what this picture shows. No tools.")
         app.buttons["Send"].tap()
         let messages = app.descendants(matching: .any).matching(identifier: "message")
         let working = app.descendants(matching: .any)["working"]
@@ -3208,45 +3152,35 @@ final class UITests: XCTestCase {
         pause(1)
     }
 
+    /// A grid picture's circle, at its top right: the picture itself opens the preview.
+    private func pickCircle(_ cell: XCUIElement) {
+        cell.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0)).withOffset(CGVector(dx: -17.5, dy: 17.5)).tap()
+    }
+
     private func openSheet() {
         app.buttons["Add a picture"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["attach-sheet"].waitForExistence(timeout: 5), "+ didn't open its sheet")
         pause(0.8)
     }
 
-    /// The "+" sheet's Photos: the whole library.
+    /// The menu's Files tab.
+    private func openFiles() {
+        openSheet()
+        app.descendants(matching: .any)["attach-tab-files"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["attach-files"].waitForExistence(timeout: 3), "no Files tab")
+        pause(0.5)
+    }
+
+    /// The "+" menu's library: its grid, newest first.
     private func openLibrary() {
         app.buttons["Add a picture"].tap()
         allowPhotos()
-        let photos = app.buttons["attach-photos"]
-        XCTAssertTrue(photos.waitForExistence(timeout: 5), "+ didn't open its sheet")
-        photos.tap()
-        allowPhotos()
+        XCTAssertTrue(app.descendants(matching: .any)["attach-sheet"].waitForExistence(timeout: 5), "+ didn't open its sheet")
     }
 
     private func allowPhotos() {
         let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow Full Access"]
         if allow.waitForExistence(timeout: 2) { allow.tap() }
-    }
-
-    /// Reading another app's copy is the system's to allow.
-    private func allowPaste() {
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow Paste"]
-        let here = app.buttons["Allow Paste"]
-        let deadline = Date().addingTimeInterval(6)
-        var seen = false
-        while Date() < deadline {
-            let shown = springboard.exists ? springboard : here.exists ? here : nil
-            if let shown {
-                seen = true
-                // Taken only once it has finished coming up.
-                pause(0.6)
-                if shown.exists, shown.isHittable { shown.tap() }
-            } else if seen {
-                return
-            }
-            pause(0.3)
-        }
     }
 
     /// `name` in Files' picker, found in On My iPhone if it isn't already

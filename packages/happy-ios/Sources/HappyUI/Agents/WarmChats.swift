@@ -225,7 +225,7 @@ final class WarmChats {
         if putAway { candidates.removeAll { $0.agentId == chat.agentId } }
         if !Self.enabled || putAway, chat.watchers.isEmpty {
             stop(chat)
-            chats.removeValue(forKey: chat.agentId)
+            Self.letGo(chats.removeValue(forKey: chat.agentId))
             return
         }
         if opened {
@@ -250,7 +250,7 @@ final class WarmChats {
         let stays = Warmth.retained(kept, wanted: ranked, prefetched: constrained ? 0 : Warmth.Limits.prefetched)
         for (id, chat) in chats where !stays.contains(id) {
             stop(chat)
-            chats.removeValue(forKey: id)
+            Self.letGo(chats.removeValue(forKey: id))
         }
     }
 
@@ -323,6 +323,7 @@ final class WarmChats {
         guard planned.contains(chat.agentId) else {
             if chat.plans != nil {
                 chat.planning?.cancel()
+                Self.letGo((chat.planner, chat.plans))
                 chat.plans = nil
                 chat.planner = ChatPlanner(syntax: syntax)
             }
@@ -332,7 +333,8 @@ final class WarmChats {
         var references = references
         references.subagents = chat.snapshot.subagentTitles
         let key = ChatPlanner.Key(width: layout.width, maxContentWidth: ContentWidth.maxWidth, environment: layout.environment, references: references, subagentTitles: chat.snapshot.subagentTitles)
-        let items = chat.snapshot.items
+        // As its screen opens it: every finished turn folded.
+        let items = TurnFold.fold(chat.snapshot.items, expanded: [])
         if chat.plans?.items == items, chat.plans?.key == key { return }
         chat.planning?.cancel()
         let planner = chat.planner
@@ -382,7 +384,7 @@ final class WarmChats {
     private func dropUnheld() {
         for (id, chat) in chats where chat.watchers.isEmpty {
             stop(chat)
-            chats.removeValue(forKey: id)
+            Self.letGo(chats.removeValue(forKey: id))
         }
     }
 
@@ -393,6 +395,28 @@ final class WarmChats {
         started = false
         for chat in chats.values { stop(chat) }
         chats.removeAll()
+    }
+
+    /// Frees what a conversation let go of kept off the main thread. Its
+    /// rows and its planner's layouts are thousands of objects; freed here,
+    /// they held the main thread up to 17 ms on the finger's touch-down that
+    /// warms a row (an older chat leaving the budget) and 70 ms as a glide
+    /// came to rest, so the next drag's first frames came late. The queue
+    /// takes the last reference a moment later, once every one on the main
+    /// thread has gone.
+    private static func letGo(_ value: Any?) {
+        guard let value else { return }
+        let retired = Retired(value)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(250)) {
+            withExtendedLifetime(retired) {}
+        }
+    }
+
+    /// What `letGo` hands to its queue. Nothing reads it there: it is only
+    /// freed, which any thread may do.
+    private final class Retired: @unchecked Sendable {
+        let value: Any
+        init(_ value: Any) { self.value = value }
     }
 }
 #endif

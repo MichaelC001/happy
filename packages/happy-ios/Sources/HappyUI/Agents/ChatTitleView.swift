@@ -21,6 +21,9 @@ final class ChatTitleView: UIView {
         didSet { updateAccessibility() }
     }
 
+    /// Its width changed: the header that holds it places it again.
+    var onResize: (() -> Void)?
+
     /// In the header: what activating it does instead of renaming.
     var onOpen: (() -> Void)? {
         didSet { updateAccessibility() }
@@ -61,10 +64,12 @@ final class ChatTitleView: UIView {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    private var layout: ChatTitleLayout {
+    private func layout(room: CGFloat? = nil) -> ChatTitleLayout {
         let textWidth = label.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: ChatTitleLayout.height)).width
-        return ChatTitleLayout(textWidth: textWidth, maxWidth: maxWidth, editing: field != nil)
+        return ChatTitleLayout(textWidth: textWidth, maxWidth: maxWidth, editing: field != nil, room: room)
     }
+
+    private var layout: ChatTitleLayout { layout() }
 
     override var intrinsicContentSize: CGSize { layout.size }
 
@@ -72,7 +77,8 @@ final class ChatTitleView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let layout = layout
+        // Its header's capsule may hand it less than its widest.
+        let layout = self.layout(room: bounds.width)
         label.frame = layout.text
         field?.frame = layout.text
     }
@@ -83,8 +89,8 @@ final class ChatTitleView: UIView {
         setNeedsLayout()
         // The header places the name and its capsule, editing or not.
         superview?.setNeedsLayout()
-        guard frame.size != size else { return }
-        frame.size = size
+        if frame.size != size { frame.size = size }
+        onResize?()
     }
 
     private func updateAccessibility() {

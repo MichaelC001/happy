@@ -9,55 +9,107 @@ import kotlinx.serialization.json.JsonObject
 sealed interface AgentFeedRow {
     val key: String
 
-    /** A section heading: bots, tasks, or one project. */
+    /** Where a section starts: its rows are one card. It has no title, as on iOS. */
     data class Section(val section: AgentFeedSection) : AgentFeedRow {
         override val key get() = "section-${section.key}"
     }
 
-    /** One conversation; [depth] 1 and 2 are subtasks under the row above. */
+    /** Desktop's fixed Artifacts row, first on home: the agent's artifacts, newest first. */
+    data object Artifacts : AgentFeedRow {
+        override val key get() = "artifacts"
+    }
+
+    /**
+     * A Surface the person joined: a todo list, a document, a calendar, a
+     * system monitor or a chat ([type]). It opens on its own page.
+     */
+    data class Surface(val id: String, val name: String, val type: String) : AgentFeedRow {
+        override val key get() = "surface-$id"
+    }
+
+    /**
+     * A project, or one of its worktrees at [depth] 1: its conversations
+     * follow, a level in. It opens nothing. A project wears a [mark]; a
+     * worktree none. [running]: work runs in one of the conversations under
+     * it and none waits on a question (desktop's project and workspace
+     * `activity`).
+     */
+    data class Folder(val id: String, val name: String, val depth: Int, val mark: FolderMark? = null, val running: Boolean = false) : AgentFeedRow {
+        override val key get() = "folder-$id"
+    }
+
+    /** One conversation; its subtasks follow it, a level in. */
     data class Conversation(
         val agentId: String,
         /** The bot's or task's name, the agent's title, or null before it has one. */
         val title: String?,
         val kind: ConversationKind,
-        /** Where it runs: the workspace, for an agent in a project's child workspace. */
-        val detail: String?,
         val depth: Int,
-        /** What the avatar is drawn from, and a bot's ThumbHash. */
-        val avatarId: String,
+        /** A bot's picture as the agent serves it (`/v0/bots/:id/avatar`) and its ThumbHash; null where it has none. */
+        val picture: String? = null,
         val thumbhash: String? = null,
+        /** What a bot or task wears without a picture: the placeholder its own ID picks (happy-ios's `.placeholder(seed:)`). */
+        val seed: String? = null,
+        /** The person's Happy (the `chief_of_staff` bot): Happy's mark, as on happy-ios. */
+        val happy: Boolean = false,
         val working: Boolean = false,
         val unread: Boolean = false,
         /** A question waits for the person. */
         val blocked: Boolean = false,
         val activityAt: Long = 0,
-        /** The conversation this subtask is under; null at the top. */
+        /** The conversation this subtask is under; null for any other. */
         val parentId: String? = null,
-        /** How many subtask rows follow under this one, at any depth. */
-        val childCount: Int = 0,
+        /** Its turn sits in a scheduled wait. */
+        val waiting: Boolean = false,
+        /** One of its subtasks listed under it is [running]. */
+        val delegating: Boolean = false,
     ) : AgentFeedRow {
         override val key get() = "agent-$agentId"
+
+        /**
+         * Desktop's `activity == "running"` (summaryActivity): a question
+         * waiting on the person outranks everything; then work handed to a
+         * subtask counts as this conversation's; then its own turn runs,
+         * outside a scheduled wait. A running conversation's title shimmers.
+         */
+        val running: Boolean get() = !blocked && (delegating || (working && !waiting))
     }
 }
 
 enum class ConversationKind { Bot, Task, Project, Subtask }
 
+/** What a project's folder wears (API.md "Projects", `avatar`). */
 @Immutable
-sealed interface AgentFeedSection {
-    val key: String
+sealed interface FolderMark {
+    /** The project picture the person chose or the agent made, read from [path] over its [thumbhash]. */
+    data class Picture(val path: String, val thumbhash: String?) : FolderMark
 
-    data object Bots : AgentFeedSection {
-        override val key = "bots"
-    }
+    /** The built-in home project (`{ "kind": "home" }`): desktop's home glyph; it has no picture. */
+    data object Home : FolderMark
 
-    data object Tasks : AgentFeedSection {
-        override val key = "tasks"
-    }
+    /** No picture: the placeholder the project's ID picks, as everything else without one wears. */
+    data class Placeholder(val seed: String) : FolderMark
 
-    data class Project(val id: String, val name: String, val thumbhash: String?, val home: Boolean) : AgentFeedSection {
-        override val key get() = "project-$id"
+    companion object {
+        /**
+         * [project]'s mark from its `avatar`: `kind: "image"` is a picture
+         * at `GET /v0/projects/:id/avatar`, `kind: "home"` the home
+         * project; null or anything else is no picture. The wire carries
+         * no URL (desktop's `avatar.url` is its own renderer's projection),
+         * so the picture is always the agent's own, read over the tunnel.
+         */
+        fun of(id: String, project: JsonObject): FolderMark {
+            val avatar = project["avatar"] as? JsonObject
+            return when (avatar?.string("kind")) {
+                "image" -> Picture("/v0/projects/${AgentClient.escape(id)}/avatar", avatar.string("thumbhash"))
+                "home" -> Home
+                else -> Placeholder(id)
+            }
+        }
     }
 }
+
+enum class AgentFeedSection(val key: String) { Places("places"), Bots("bots"), Tasks("tasks"), Projects("projects") }
 
 /** What home shows for an agent connection. [loaded] is false until a snapshot (cached or read) is in. */
 @Immutable
@@ -73,15 +125,21 @@ data class AgentFeed(val loaded: Boolean = false, val rows: List<AgentFeedRow> =
         val Empty = AgentFeed()
 
         /**
-         * The conversations the person can open, in the agent's own orders,
-         * never by activity, so nothing moves while nothing is done: bots
+         * iOS's home (SidebarRows.swift), in the agent's own orders, never
+         * by activity, so nothing moves while nothing is done: Artifacts and
+         * the Surfaces the person joined (in their own order), the bots
          * (catalog order), then the tasks in the person's list (their
-         * order), then each project's conversations, its root workspace's
-         * first and then each child workspace's. Under each, its active
-         * subtasks, at most two levels (API.md, "Agents"). Archived ones,
-         * hidden subagents and Stem Cells' Surfaces are left out.
+         * order), then the projects, each a folder over its root
+         * workspace's conversations, then each worktree's folder over its
+         * own. Under each conversation, its active subtasks, at most two
+         * levels (API.md, "Agents"); a worktree a bot's or task's subtask
+         * works in is listed under that subtask only. Archived ones, hidden
+         * subagents and Stem Cells' Surfaces are left out, and the projects
+         * altogether while the person hides them on the desktop
+         * ([AgentCatalog.projectsHidden]), and the Surfaces being left
+         * ([leaving]), gone at once while the agent is asked.
          */
-        fun derive(catalog: AgentCatalog): AgentFeed {
+        fun derive(catalog: AgentCatalog, leaving: Set<String> = emptySet()): AgentFeed {
             if (!catalog.loaded) return Empty
             val rows = ArrayList<AgentFeedRow>()
             val shown = HashSet<String>()
@@ -89,35 +147,48 @@ data class AgentFeed(val loaded: Boolean = false, val rows: List<AgentFeedRow> =
             fun active(resource: JsonObject) = resource["archivedAt"].isNullish() &&
                 (resource.string("status") ?: "active") == "active"
 
+            /** Adds the conversation's row and its subtasks'; whether it is running. */
             fun agentRows(
-                agentId: String, title: String?, kind: ConversationKind, detail: String?, avatarId: String, thumbhash: String?, depth: Int,
-                parentId: String? = null,
-            ) {
-                val agent = catalog.agents[agentId] ?: return
-                val wire = AgentCatalog.decodeAgent(agent) ?: return
-                if (wire.archivedAt != null || !wire.visible || !shown.add(agentId)) return
+                agentId: String, title: String?, kind: ConversationKind, depth: Int,
+                picture: String? = null, thumbhash: String? = null, parentId: String? = null, nesting: Int = 0,
+                seed: String? = null, happy: Boolean = false,
+            ): Boolean {
+                val agent = catalog.agents[agentId] ?: return false
+                val wire = AgentCatalog.decodeAgent(agent) ?: return false
+                if (wire.archivedAt != null || !wire.visible || !shown.add(agentId)) return false
                 val at = rows.size
                 rows += AgentFeedRow.Conversation(
                     agentId = agentId,
                     title = title?.takeIf { it.isNotBlank() } ?: wire.title?.takeIf { it.isNotBlank() },
                     kind = kind,
-                    detail = detail,
                     depth = depth,
-                    avatarId = avatarId,
+                    picture = picture,
                     thumbhash = thumbhash,
+                    seed = seed,
+                    happy = happy,
                     working = wire.working,
                     unread = wire.unread != null,
                     blocked = wire.pendingQuestionId != null,
                     activityAt = wire.unread?.since ?: wire.updatedAt,
                     parentId = parentId,
+                    waiting = wire.wait != null,
                 )
-                if (depth >= 2) return
-                for (child in (agent["subtasks"] as? JsonArray).orEmpty()) {
-                    val childId = (child as? JsonObject)?.string("id") ?: continue
-                    agentRows(childId, null, ConversationKind.Subtask, null, childId, null, depth + 1, agentId)
+                var delegating = false
+                if (nesting < 2) {
+                    for (child in (agent["subtasks"] as? JsonArray).orEmpty()) {
+                        val childId = (child as? JsonObject)?.string("id") ?: continue
+                        if (agentRows(childId, null, ConversationKind.Subtask, depth + 1, parentId = agentId, nesting = nesting + 1)) delegating = true
+                    }
                 }
-                val children = rows.size - at - 1
-                if (children > 0) rows[at] = (rows[at] as AgentFeedRow.Conversation).copy(childCount = children)
+                val row = rows[at] as AgentFeedRow.Conversation
+                if (delegating) rows[at] = row.copy(delegating = true)
+                return (rows[at] as AgentFeedRow.Conversation).running
+            }
+
+            /** Marks the folder at [at] running when a conversation listed after it runs and none waits on a question. */
+            fun folderActivity(at: Int) {
+                val under = rows.subList(at + 1, rows.size).filterIsInstance<AgentFeedRow.Conversation>()
+                if (under.none { it.blocked } && under.any { it.running }) rows[at] = (rows[at] as AgentFeedRow.Folder).copy(running = true)
             }
 
             fun section(section: AgentFeedSection, body: () -> Unit) {
@@ -127,39 +198,75 @@ data class AgentFeed(val loaded: Boolean = false, val rows: List<AgentFeedRow> =
                 if (rows.size == at + 1) rows.removeAt(at)
             }
 
+            val bots = catalog.bots.values.filter(::active).sortedWith(byOrderKey)
+            val tasks = catalog.memberships.values.sortedWith(byOrderKey)
+                .mapNotNull { membership -> membership.string("taskId")?.let(catalog.tasks::get)?.takeIf(::active) }
+            // The worktrees bots' and tasks' subtasks work in: listed under those subtasks, not again under their project.
+            val owned = HashSet<String>()
+            fun collect(agentId: String) {
+                for (child in (catalog.agents[agentId]?.get("subtasks") as? JsonArray).orEmpty()) {
+                    val id = (child as? JsonObject)?.string("id") ?: continue
+                    (catalog.agents[id] ?: child).string("workspaceId")?.let(owned::add)
+                    collect(id)
+                }
+            }
+            (bots + tasks).forEach { owner -> (owner["agent"] as? JsonObject)?.string("id")?.let(::collect) }
+
+            section(AgentFeedSection.Places) {
+                rows += AgentFeedRow.Artifacts
+                catalog.surfaces.values
+                    .filter { it.string("status") != "archived" && it["archivedAt"].isNullish() }
+                    .mapNotNull { surface ->
+                        val member = (surface["members"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>()
+                            .firstOrNull { catalog.userId != null && it.string("userId") == catalog.userId } ?: return@mapNotNull null
+                        surface to member.string("orderKey").orEmpty()
+                    }
+                    .sortedWith(compareBy({ it.second }, { it.first.string("id") }))
+                    .forEach { (surface, _) ->
+                        val id = surface.string("id")?.takeIf { it !in leaving } ?: return@forEach
+                        rows += AgentFeedRow.Surface(id, surface.string("name").orEmpty(), surface.string("type").orEmpty())
+                    }
+            }
             section(AgentFeedSection.Bots) {
-                catalog.bots.values.filter(::active).sortedWith(byOrderKey).forEach { bot ->
+                bots.forEach { bot ->
                     val agentId = (bot["agent"] as? JsonObject)?.string("id") ?: return@forEach
                     val id = bot.string("id") ?: return@forEach
-                    val thumbhash = (bot["avatar"] as? JsonObject)?.string("thumbhash")
-                    agentRows(agentId, bot.string("name"), ConversationKind.Bot, null, id, thumbhash, 0)
+                    val avatar = bot["avatar"] as? JsonObject
+                    val picture = avatar?.let { "/v0/bots/${AgentClient.escape(id)}/avatar" }
+                    val happy = bot.string("systemKey") == "chief_of_staff"
+                    agentRows(agentId, bot.string("name"), ConversationKind.Bot, 0, picture, avatar?.string("thumbhash"), seed = id, happy = happy)
                 }
             }
             section(AgentFeedSection.Tasks) {
-                catalog.memberships.values.sortedWith(byOrderKey).forEach { membership ->
-                    val task = membership.string("taskId")?.let(catalog.tasks::get)?.takeIf(::active) ?: return@forEach
+                tasks.forEach { task ->
                     val agentId = (task["agent"] as? JsonObject)?.string("id") ?: return@forEach
-                    agentRows(agentId, task.string("name"), ConversationKind.Task, null, agentId, null, 0)
+                    agentRows(agentId, task.string("name"), ConversationKind.Task, 0, seed = task.string("id") ?: agentId)
                 }
             }
-            catalog.projects.values.filter(::active).sortedWith(byOrderKey).forEach { project ->
-                val id = project.string("id") ?: return@forEach
-                val avatar = project["avatar"] as? JsonObject
-                val heading = AgentFeedSection.Project(id, project.string("name").orEmpty(), avatar?.string("thumbhash"), avatar?.string("kind") == "home")
-                section(heading) {
-                    fun series(owner: JsonObject, detail: String?) {
+            if (!catalog.projectsHidden) section(AgentFeedSection.Projects) {
+                catalog.projects.values.filter(::active).sortedWith(byOrderKey).forEach { project ->
+                    val id = project.string("id") ?: return@forEach
+                    val projectAt = rows.size
+                    rows += AgentFeedRow.Folder(id, project.string("name").orEmpty(), 0, FolderMark.of(id, project))
+                    fun series(owner: JsonObject, depth: Int) {
                         (owner["agents"] as? JsonArray).orEmpty().forEach { embedded ->
                             val agentId = (embedded as? JsonObject)?.string("id") ?: return@forEach
                             // A workspace-bound subtask shows under the work that made it.
                             if (catalog.agents[agentId]?.get("subtask")?.toString() == "true") return@forEach
-                            agentRows(agentId, null, ConversationKind.Project, detail, agentId, null, 0)
+                            agentRows(agentId, null, ConversationKind.Project, depth)
                         }
                     }
-                    series(project, null)
+                    series(project, 1)
                     catalog.workspaces.values
-                        .filter { it.string("projectId") == id && it.string("id") != id && active(it) }
+                        .filter { it.string("projectId") == id && it.string("id") != id && active(it) && it.string("id") !in owned }
                         .sortedWith(byOrderKey)
-                        .forEach { workspace -> series(workspace, workspace.string("name")) }
+                        .forEach { workspace ->
+                            val workspaceAt = rows.size
+                            rows += AgentFeedRow.Folder(workspace.string("id").orEmpty(), workspace.string("name").orEmpty(), 1)
+                            series(workspace, 2)
+                            folderActivity(workspaceAt)
+                        }
+                    folderActivity(projectAt)
                 }
             }
             return AgentFeed(loaded = true, rows = rows)

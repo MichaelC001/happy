@@ -615,8 +615,8 @@ final class ChatScreenLayoutTests: XCTestCase {
         XCTAssertEqual(layout.oldestEdgeInset, 171)
         assertFrame(layout.list, rect(0, 0, 393, 852))
         assertFrame(layout.placeholder, rect(0, 159, 393, 529))
-        // The scrim stays the header's own.
-        assertFrame(layout.headerScrim, rect(0, 0, 393, 111))
+        // The scrim stays the header's own: 34 past the bar, not the strip.
+        assertFrame(layout.headerScrim, rect(0, 0, 393, 137))
     }
 
     func testOnATabletTheListStartsUnderTheStrip() {
@@ -768,20 +768,25 @@ final class QuestionSheetLayoutTests: XCTestCase {
 }
 
 final class LegacyChatHeaderLayoutTests: XCTestCase {
-    func testTheCapsuleHugsATitleAlone() {
+    /// A short title's capsule is Telegram's minimum, 150 inside, the
+    /// title centred in it.
+    func testAShortTitleIsTheMinimumCapsule() {
         let layout = ChatHeaderTitleLayout(maxWidth: 245, title: text("Fix the login", lineHeight: 20, maxLines: 1), subtitle: nil, changes: nil)
-        assertSize(layout.size, CGSize(width: 132, height: 44))
-        assertFrame(layout.title, rect(14, 12, 104, 20))
+        assertSize(layout.size, CGSize(width: 178, height: 44))
+        assertFrame(layout.title, rect(37, 12, 104, 20))
         XCTAssertNil(layout.subtitle)
         XCTAssertNil(layout.changes)
+        // Less room than the minimum: the room.
+        let squeezed = ChatHeaderTitleLayout(maxWidth: 120, title: text("Fix", lineHeight: 20, maxLines: 1), subtitle: nil, changes: nil)
+        assertSize(squeezed.size, CGSize(width: 120, height: 44))
     }
 
     func testTheBranchAndLineChangesShareARowUnderTheTitle() {
         let layout = ChatHeaderTitleLayout(maxWidth: 245, title: text("Chat", lineHeight: 20, maxLines: 1), subtitle: text("main", lineHeight: 14, maxLines: 1), changes: CGSize(width: 40, height: 13))
-        assertSize(layout.size, CGSize(width: 104, height: 44))
-        assertFrame(layout.title, rect(36, 5, 32, 20))
-        assertFrame(layout.subtitle!, rect(14, 25, 32, 14))
-        assertFrame(layout.changes!, rect(50, 25.5, 40, 13))
+        assertSize(layout.size, CGSize(width: 178, height: 44))
+        assertFrame(layout.title, rect(73, 5, 32, 20))
+        assertFrame(layout.subtitle!, rect(51, 25, 32, 14))
+        assertFrame(layout.changes!, rect(87, 25.5, 40, 13))
     }
 
     func testALongTitleStopsAtTheInsetAndTheBranchGivesWayToTheCounts() {
@@ -800,8 +805,9 @@ final class LegacyChatHeaderLayoutTests: XCTestCase {
 
     func testTheHeaderScrimAndTheEmptyChatsPlace() {
         let layout = LegacyChatScreenLayout(.init(size: phone, safeArea: phoneUnderBar, keyboardTop: nil, accessories: [.inset(block(height: 60))], composerHeight: 70))
-        // The bar and 8 past it; the placeholder between the bar and the dock.
-        assertFrame(layout.headerScrim, rect(0, 0, 393, 111))
+        // The header's edge, to 34 past the bar; the placeholder between
+        // the bar and the dock.
+        assertFrame(layout.headerScrim, rect(0, 0, 393, 137))
         assertFrame(layout.placeholder, rect(0, 103, 393, 585))
         let typing = LegacyChatScreenLayout(.init(size: phone, safeArea: phoneUnderBar, keyboardTop: 500, composerHeight: 70))
         assertFrame(typing.placeholder, rect(0, 103, 393, 327))

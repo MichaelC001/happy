@@ -7,15 +7,16 @@ import UIKit
 import UniformTypeIdentifiers
 
 /// The person's own profile on a paired computer, opened from Settings'
-/// Profile row: their picture, large and round, with "Change Photo" (the
-/// system's photo picker) under it, the name as a field in a settings
-/// card, and "Remove Photo" while there is a picture. A change shows at
-/// once and stays until the computer answers (`ProfileSource`); a failure
-/// puts the computer's back and says so.
+/// Profile row: their picture (else the placeholder their ID picks), large
+/// and round, with "Change Photo" (the system's photo picker) under it, the
+/// name as a field in a settings card, and "Remove Photo" while there is a
+/// picture. A change shows at once and stays until the computer answers
+/// (`ProfileSource`); a failure puts the computer's back and says so.
 final class ProfileViewController: UIViewController, UITextFieldDelegate, PHPickerViewControllerDelegate {
     private let source: ProfileSource
     private let scroll = UIScrollView()
     private let avatar = UIImageView()
+    private let livePlaceholder = AvatarPlaceholderSlot()
     private let changePhoto = UIButton(type: .system)
     /// Where the name is typed, over its card's row.
     let nameField = UITextField()
@@ -28,7 +29,9 @@ final class ProfileViewController: UIViewController, UITextFieldDelegate, PHPick
     var shownRowIDs: [[String]] { rows.map { $0.map(\.id) } }
     /// Runs the row `id`'s action, as a finger on it would.
     func tapRow(_ id: String) { rows.joined().first { $0.id == id }?.action?() }
-    var shownPhoto: UIImage? { avatar.image === Self.placeholder ? nil : avatar.image }
+    var shownPhoto: UIImage? { avatar.image === source.placeholder ? nil : avatar.image }
+    /// What the circle shows: the photo, or the placeholder without one.
+    var shownAvatar: UIImage? { avatar.image }
 
     init(source: ProfileSource) {
         self.source = source
@@ -37,8 +40,6 @@ final class ProfileViewController: UIViewController, UITextFieldDelegate, PHPick
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
-
-    private static let placeholder = Glyphs.image("person-outline", size: 48)
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -51,8 +52,8 @@ final class ProfileViewController: UIViewController, UITextFieldDelegate, PHPick
         HeaderBar.edge(scroll, in: self)
         avatar.clipsToBounds = true
         avatar.layer.cornerRadius = ProfileLayout.Metrics.avatar / 2
-        avatar.tintColor = UIColor(Palette.settingsText)
         avatar.accessibilityIdentifier = "profile-avatar"
+        livePlaceholder.liveHost = avatar
         avatar.isUserInteractionEnabled = true
         avatar.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(pickPhoto)))
         scroll.addSubview(avatar)
@@ -97,15 +98,13 @@ final class ProfileViewController: UIViewController, UITextFieldDelegate, PHPick
 
     private func apply() {
         let state = source.state
-        if let photo = source.photo {
-            avatar.image = photo
-            avatar.contentMode = .scaleAspectFill
-            avatar.backgroundColor = nil
-        } else {
-            avatar.image = Self.placeholder
-            avatar.contentMode = .center
-            avatar.backgroundColor = UIColor(Palette.settingsAddFill)
-        }
+        // Their own picture (dissolved in over its thumbhash), else the one
+        // their ID picks, over an empty circle until it is decoded.
+        let picture = source.photo ?? source.placeholder
+        ImageFade.show(picture, in: avatar, fade: avatar.image != nil)
+        avatar.contentMode = .scaleAspectFill
+        avatar.backgroundColor = picture == nil ? UIColor(Palette.settingsAddFill) : nil
+        livePlaceholder.animate(seed: source.photo == nil ? source.placeholderSeed : nil)
         // Never under the person's fingers.
         if !nameField.isFirstResponder, nameField.text != state.name { nameField.text = state.name }
         var rows: [[SettingsRow]] = [[SettingsRow(id: "profile-name", title: "", accessory: .none, action: { [weak self] in self?.nameField.becomeFirstResponder() })]]
@@ -129,7 +128,7 @@ final class ProfileViewController: UIViewController, UITextFieldDelegate, PHPick
         let width = view.bounds.width
         scroll.frame = view.bounds
         let specs = rows.map { card in
-            card.map { SettingsLayout.RowSpec(hasIcon: $0.icon != nil, valueWidth: SettingsCardView.valueWidth($0.value), accessory: $0.accessory) }
+            card.map { SettingsLayout.RowSpec(hasIcon: $0.hasIcon, valueWidth: SettingsCardView.valueWidth($0.value), accessory: $0.accessory) }
         }
         let layout = ProfileLayout(width: width, buttonWidth: changePhoto.titleLabel?.intrinsicContentSize.width ?? 0, cards: specs)
         avatar.frame = layout.avatar

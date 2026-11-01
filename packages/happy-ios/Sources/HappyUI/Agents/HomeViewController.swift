@@ -19,22 +19,18 @@ final class HomeViewController: UIViewController {
     private let context: AppContext
     /// The computer this screen always shows; nil to follow the choice.
     private let fixedAgentConnection: String?
-    private let sidebar = SidebarView()
-    private let banner = BannerView()
+    private let sidebar = SidebarList()
     private let empty = EmptyView()
     private var session: Session?
     private var accountsObservation: AccountsObservation?
     private var snapshot = Snapshot()
     private var agentHome = HomeSnapshot()
     private var connectionWatch: Task<Void, Never>?
-    /// New work on its way to the screen, by the store's ask: a second tap
-    /// meanwhile gets the same and opens nothing more.
-    private var opening: Set<UUID> = []
-    /// Stories, in a band under the bar: open above the list, or put away.
-    /// Nothing at all while Stories are off.
-    private lazy var stories = StoriesHomeController(host: self)
-    /// How the stories last changed the list's room, while it is applied.
-    private var storiesChange: StoriesHomeController.Change?
+    private var headerWatch: Watch?
+    /// No network at all: the header says so, so the list doesn't too.
+    private var waitingForNetwork = false
+    /// A new task on its way to the screen: a second tap meanwhile opens nothing more.
+    private var opening = false
     /// Search, in the bar, while it is open.
     private var search: Search?
     /// What search finds, over home.
@@ -56,8 +52,6 @@ final class HomeViewController: UIViewController {
         var run: () -> Void
     }
 
-    /// The stories' band, under the bar.
-    private let storiesBand = StoriesBandView()
     /// Search ended here (a quick action took the screen): the bar's
     /// search field closes too.
     var onSearchEnded: (() -> Void)?
@@ -65,11 +59,14 @@ final class HomeViewController: UIViewController {
     /// Every snapshot shown, for the screen around this one.
     var onSnapshot: ((Snapshot) -> Void)?
 
-    /// Home's list, under the bar: the scroll edge the bar shades.
-    var list: UIScrollView { sidebar }
+    /// The scroll edge the bar shades: it follows home's list.
+    var list: UIScrollView { sidebar.edge }
+
+    /// Home's list, under the bar.
+    var homeList: SidebarList { sidebar }
 
     /// Search's results over home, while something answers.
-    var resultsList: UIScrollView? { search != nil ? resultsView.list : nil }
+    var resultsList: UIScrollView? { search != nil ? resultsView.list.edge : nil }
 
     /// The bar home lays its content under.
     var contentInsets = HomeContentInsets(safeArea: .zero, dock: 0) {
@@ -92,12 +89,8 @@ final class HomeViewController: UIViewController {
         // The conversation's own ground, light and dark; the list on it is
         // grouped, a quiet card per section, Happy's own card first.
         view.backgroundColor = UIColor(Palette.groupedGround)
-        sidebar.style = .grouped
         view.addSubview(sidebar)
-        view.addSubview(storiesBand)
-        stories.install(in: storiesBand)
         view.addSubview(empty)
-        view.addSubview(banner)
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChange(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         resultsView.isHidden = true
         resultsView.alpha = 0
@@ -115,15 +108,10 @@ final class HomeViewController: UIViewController {
         }
         sidebar.preview = { [weak self] row in self?.preview(for: row) }
         sidebar.onOpenPreview = { [weak self] row in self?.open(row, animated: false) }
-        sidebar.delegate = self
-        stories.onInsetChange = { [weak self] change in self?.storiesMoved(change) }
-        // Agent stories turn the conversations' rows into story rows.
-        stories.onRings = { [weak self] _ in self?.showRows() }
-        sidebar.onOpenStory = { [weak self] row, ring in
-            guard let agentId = row.agentId else { return }
-            self?.stories.openRing(agentId: agentId, name: row.label, from: ring)
-        }
-        stories.list = sidebar
+        sidebar.onWillBeginDragging = { [weak self] in self?.listWillBeginDragging() }
+        sidebar.onScroll = { [weak self] in self?.listDidScroll() }
+        sidebar.onDidEndDragging = { [weak self] decelerate in self?.listDidEndDragging(decelerate: decelerate) }
+        sidebar.onDidEndDecelerating = { [weak self] in self?.listDidEndDecelerating() }
         empty.onPair = { [weak self] in
             guard let self else { return }
             AccountAdding.begin(context: context, from: self)
@@ -165,8 +153,8 @@ final class HomeViewController: UIViewController {
         // Another computer's sidebar: what was searched was the last one's.
         endSearch(animated: false)
         connectionWatch?.cancel(); connectionWatch = nil
+        headerWatch = nil; waitingForNetwork = false
         session = id.flatMap { Session.session(for: $0, context: context) }
-        stories.attach(session)
         sidebar.images = session?.images
         resultsView.list.images = session?.images
         sidebar.apply([])
@@ -179,14 +167,20 @@ final class HomeViewController: UIViewController {
                     self.applyConnection(snapshot)
                 }
             }
+            headerWatch = session.watchHeader { [weak self] state in
+                guard let self, waitingForNetwork != (state == .waitingForNetwork) else { return }
+                waitingForNetwork = state == .waitingForNetwork
+                applyConnection(agentHome)
+            }
             // New work opens on the computer's models: read ahead of compose.
             session.models.load()
         }
         applyChrome()
     }
 
-    /// Connection snapshots may change the notice over the list. Its
-    /// arrival never changes the rows' inset or screen positions.
+    /// Connection snapshots may change the notice at the top of the list,
+    /// which comes and goes as a row does (`SidebarList.notice`): the rows'
+    /// inset stays, and rows on screen move only at the list's top.
     func applyConnection(_ home: HomeSnapshot) {
         agentHome = home
         let previous = snapshot.rows
@@ -195,9 +189,10 @@ final class HomeViewController: UIViewController {
         snapshot.live = agentHome.live
         snapshot.rows = agentHome.rows
         snapshot.allRows = agentHome.allRows
-        snapshot.error = agentHome.error
+        // A refused action says why for a moment, where a lost connection would.
+        snapshot.error = (waitingForNetwork ? nil : agentHome.error) ?? agentHome.notice.map { $0.isEmpty ? Strings.refused : $0 }
         onSnapshot?(snapshot)
-        if previous != snapshot.rows { showRows() }
+        if previous != snapshot.rows { sidebar.apply(snapshot.rows) }
         if search != nil { showResults() }
         warmUp()
         applyChrome()
@@ -209,11 +204,10 @@ final class HomeViewController: UIViewController {
         empty.message = !hasAgentConnection ? Strings.noAgentConnection : Strings.unsupported
         empty.showsPair = !hasAgentConnection
         sidebar.isHidden = !empty.isHidden
-        stories.isSuppressed = sidebar.isHidden
         let reason = { (text: String) in text.isEmpty ? Strings.unanswered : text }
-        let notice = snapshot.creationError.map { Strings.newWorkFailed(reason($0)) } ?? snapshot.error.map(reason)
+        let notice = snapshot.error.map(reason)
         // Prioritizing being off is Settings' business: home says nothing of it.
-        banner.configure(notice: notice)
+        sidebar.notice = notice
         view.setNeedsLayout()
     }
 
@@ -234,6 +228,8 @@ final class HomeViewController: UIViewController {
         search = Search()
         resultsView.clear()
         showResults()
+        // The status bar takes the results to their top, never home under them.
+        sidebar.list.scrollsToTop = false
         resultsView.isHidden = false
         UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
             self.resultsView.alpha = 1
@@ -249,6 +245,7 @@ final class HomeViewController: UIViewController {
             guard let self, search == nil else { return }
             resultsView.clear()
             resultsView.isHidden = true
+            sidebar.list.scrollsToTop = true
         }
         if animated {
             UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
@@ -261,15 +258,6 @@ final class HomeViewController: UIViewController {
         onSearchEnded?()
     }
 
-    /// Home's own rows, with the stories' rings.
-    private func showRows() {
-        sidebar.apply(shownRows)
-    }
-
-    /// The rows the list draws: the list with the stories' rings, its tree kept.
-    private var shownRows: [Row] {
-        SidebarRows.withStories(snapshot.rows, rings: stories.rings)
-    }
 
     /// What answers the query, in the results over home: the rows that
     /// answer it, then the quick actions and settings that do. Nothing
@@ -365,63 +353,30 @@ final class HomeViewController: UIViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let bounds = view.bounds
-        let bannerHeight = banner.isEmpty ? 0 : banner.sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height
         // Search's results keep clear of the keyboard; home's list never
         // changes for them.
-        // On a wide window the list, the stories, what search finds and the
-        // empty state all hold to `ContentWidth.maxWidth` and sit in the
-        // middle; a phone is as wide as it ever was.
-        let layout = HomeLayout(size: bounds.size, contentTop: contentInsets.contentTop, chromeTop: contentInsets.chromeTop, listBottom: contentInsets.listBottom, bannerHeight: bannerHeight, storiesHeight: sidebar.isHidden ? 0 : stories.inset, maxWidth: ContentWidth.maxWidth, bannerOverlaysList: true)
+        // On a wide window the list, what search finds and the empty state
+        // all hold to `ContentWidth.maxWidth` and sit in the middle; a
+        // phone is as wide as it ever was.
+        let layout = HomeLayout(size: bounds.size, contentTop: contentInsets.contentTop, chromeTop: contentInsets.chromeTop, listBottom: contentInsets.listBottom, maxWidth: ContentWidth.maxWidth)
         resultsView.frame = layout.content
         // The results start right at the bar's foot, with no gap of home's.
         let searchInsets = searchContentInsets ?? contentInsets
         resultsView.insets = UIEdgeInsets(top: searchInsets.chromeTop, left: 0, bottom: searchInsets.listBottom, right: 0)
-        banner.frame = layout.banner
-        storiesBand.frame = CGRect(x: layout.content.minX, y: contentInsets.chromeTop, width: layout.content.width, height: max(0, bounds.height - contentInsets.chromeTop))
         sidebar.frame = layout.content
         session?.warm.layOut(width: layout.content.width, environment: traitCollection.textEnvironment)
         let insets = UIEdgeInsets(layout.listInsets)
-        if sidebar.contentInset != insets {
-            let atTop = sidebar.contentOffset.y <= -sidebar.contentInset.top + 1
-            sidebar.contentInset = insets
-            sidebar.verticalScrollIndicatorInsets = UIEdgeInsets(layout.indicatorInsets)
-            switch storiesChange {
-            case .held:
-                // The stories opened or closed under the finger: the list stays.
-                break
-            case .animated:
-                // They opened or closed on their own: the list goes to its new top.
-                sidebar.contentOffset.y = -insets.top
-            case .immediate, nil:
-                // A shrinking top (Stories turned off) leaves nothing scrolled past it.
-                if atTop || (!sidebar.isDragging && sidebar.contentOffset.y < -insets.top) { sidebar.contentOffset.y = -insets.top }
-            }
+        let indicator = UIEdgeInsets(layout.indicatorInsets)
+        if sidebar.contentInsets != insets {
+            // A shrinking top leaves nothing scrolled past it.
+            let atTop = sidebar.isAtTop
+            sidebar.setInsets(insets, indicator: indicator, keepsTop: atTop || (!sidebar.isDragging && sidebar.contentOffsetY < -insets.top))
+        } else {
+            sidebar.setInsets(insets, indicator: indicator, keepsTop: false)
         }
         empty.frame = layout.empty
     }
 
-    override func didMove(toParent parent: UIViewController?) {
-        super.didMove(toParent: parent)
-        if parent == nil { stories.install(in: nil) }
-    }
-
-    /// The stories' room above the list changed: the list keeps still under
-    /// a finger, and otherwise moves to its new top, animated as Telegram's
-    /// chat list scrolls to its stories.
-    private func storiesMoved(_ change: StoriesHomeController.Change) {
-        storiesChange = change
-        defer { storiesChange = nil }
-        view.setNeedsLayout()
-        switch change {
-        case .held, .immediate:
-            view.layoutIfNeeded()
-        case .animated:
-            let animator = UIViewPropertyAnimator(duration: 0.3, controlPoint1: CGPoint(x: 0.33, y: 0.52), controlPoint2: CGPoint(x: 0.25, y: 0.99)) { [weak self] in
-                self?.view.layoutIfNeeded()
-            }
-            animator.startAnimation()
-        }
-    }
 
     // MARK: Acts
 
@@ -454,7 +409,7 @@ final class HomeViewController: UIViewController {
             sidebar.selectedRowId = row.id
             session.warm.tap(agentId)
             let space = row.spaceId.flatMap { id in snapshotSpace(id) }
-            let chat = ChatViewController(session: session, agentId: agentId, title: row.label, spaceId: row.spaceId, seedling: space)
+            let chat = ChatViewController(session: session, agentId: agentId, title: row.label, spaceId: row.spaceId, intro: space)
             navigationController?.pushViewController(chat, animated: animated)
         default:
             break
@@ -467,7 +422,7 @@ final class HomeViewController: UIViewController {
     private func preview(for row: Row) -> UIViewController? {
         guard let session, row.kind == .space || row.kind == .session, row.targetKind != "surface", let agentId = row.agentId else { return nil }
         let space = row.spaceId.flatMap { id in snapshotSpace(id) }
-        let chat = ChatViewController(session: session, agentId: agentId, title: row.label, spaceId: row.spaceId, seedling: space, previewing: true)
+        let chat = ChatViewController(session: session, agentId: agentId, title: row.label, spaceId: row.spaceId, intro: space, previewing: true)
         let window = view.window
         let screen = window?.bounds.size ?? view.bounds.size
         let insets = window?.safeAreaInsets ?? view.safeAreaInsets
@@ -477,7 +432,6 @@ final class HomeViewController: UIViewController {
 
     private func snapshotSpace(_ spaceId: String) -> ChatViewController.Intro? {
         guard let row = snapshot.rows.first(where: { $0.spaceId == spaceId }) else { return nil }
-        if case .seedling(let seed) = row.mark { return .seedling(seed: seed) }
         if case .clay(let slug) = row.mark { return .clay(slug) }
         return nil
     }
@@ -487,25 +441,22 @@ final class HomeViewController: UIViewController {
         makeNewWork()
     }
 
-    /// New work, right below Happy: the row and its empty conversation exist
-    /// at once, and the conversation is pushed with the keyboard coming up,
-    /// or, for a picture, the "+" sheet over it. Leaving new work never
-    /// closes it, so new work already standing empty is opened instead,
-    /// where it is (desktop's rule): from the bar any, newest first; from a
-    /// heading's "+" only one under that heading.
-    func makeNewWork(in sectionId: String? = nil, library: Bool = false) {
-        guard let session, navigationController?.topViewController === parent || navigationController?.topViewController === self else { return }
+    /// A new task: its empty conversation is pushed with the keyboard
+    /// coming up, or, for a picture, the "+" sheet over it. Nothing is made
+    /// on the computer and no row shows until its first message is sent,
+    /// so leaving it leaves nothing behind; compose again before then opens
+    /// the same one, with what was typed in it.
+    func makeNewWork(library: Bool = false) {
+        guard let session, !opening, navigationController?.topViewController === parent || navigationController?.topViewController === self else { return }
+        opening = true
         let store = session.store
         Task { @MainActor in
-            let going = await store.goToNewWork(under: sectionId)
-            guard opening.insert(going.id).inserted else { return }
-            Haptics.play(.newWork)
-            let creation = await going.work.value
-            opening.remove(going.id)
-            // Another ask got to the screen first.
+            defer { opening = false }
+            let task = await store.newTask()
+            // Gone from the screen meanwhile: nothing is pushed over another.
             guard navigationController?.topViewController === parent || navigationController?.topViewController === self else { return }
-            sidebar.selectedRowId = "space:\(creation.spaceId)"
-            let chat = NewWork.chat(session, creation: creation, library: library)
+            Haptics.play(.newWork)
+            let chat = NewWork.chat(session, task: task, library: library)
             guard let navigation = navigationController else { return }
             navigation.pushViewController(chat, animated: true)
             // Over the screen it goes to, as that screen comes in.
@@ -514,28 +465,23 @@ final class HomeViewController: UIViewController {
     }
 }
 
-extension HomeViewController: UIScrollViewDelegate {
-    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        stories.listWillBeginDragging()
+extension HomeViewController {
+    private func listWillBeginDragging() {
         // Scrolling is being in the list: Prioritizing's batches wait.
         if let store = session?.store { Task { await store.attentionInput() } }
     }
 
-    func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        stories.listDidScroll()
+    private func listDidScroll() {
+        #if DEBUG || HAPPY_FIXTURES
+        GymFrameMeter.noteScroll()
+        #endif
     }
 
-    func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
-        stories.listWillEndDragging(target: targetContentOffset)
-    }
-
-    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        stories.listDidEndDragging(decelerate: decelerate)
+    private func listDidEndDragging(decelerate: Bool) {
         if !decelerate { warmUp() }
     }
 
-    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-        stories.listDidEndDecelerating()
+    private func listDidEndDecelerating() {
         warmUp()
     }
 
@@ -543,52 +489,8 @@ extension HomeViewController: UIScrollViewDelegate {
     /// ahead what is on screen and around it.
     private func warmUp() {
         guard let session, !snapshot.allRows.isEmpty else { return }
-        sidebar.layoutIfNeeded()
         let shown = sidebar.shownRows
         session.warm.update(rows: shown.isEmpty ? snapshot.rows : shown, visible: shown.isEmpty ? nil : sidebar.visibleRange, references: snapshot.references)
-    }
-}
-
-/// The note above the list: the last thing the computer refused.
-final class BannerView: UIView {
-    private let title = UILabel()
-    private let card = UIView()
-    private(set) var isEmpty = true
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        card.backgroundColor = UIColor(Palette.rowSelected)
-        card.layer.cornerRadius = 12
-        card.layer.cornerCurve = .continuous
-        addSubview(card)
-        title.font = Fonts.ui(.semiBold, size: 15)
-        title.textColor = UIColor(Palette.rowTextActive)
-        card.addSubview(title)
-        isHidden = true
-    }
-
-    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
-
-    func configure(notice: String?) {
-        isEmpty = notice == nil
-        isHidden = isEmpty
-        title.text = notice
-        setNeedsLayout()
-    }
-
-    private func layout(width: CGFloat) -> BannerLayout {
-        BannerLayout(width: width, title: title.measurable, detail: nil, button: nil)
-    }
-
-    override func sizeThatFits(_ size: CGSize) -> CGSize {
-        isEmpty ? .zero : layout(width: size.width).size
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let layout = layout(width: bounds.width)
-        card.frame = layout.card
-        title.frame = layout.title
     }
 }
 

@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.conversation
 
+import com.slopus.happy.ui.page
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -8,18 +9,18 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
-import androidx.navigation.compose.composable
 import androidx.navigation.toRoute
 import com.slopus.happy.AppGraph
 import com.slopus.happy.R
@@ -28,21 +29,29 @@ import com.slopus.happy.agent.AgentEvent
 import com.slopus.happy.agent.AgentLinkStatus
 import com.slopus.happy.agent.AgentSession
 import com.slopus.happy.chat.obj
-import com.slopus.happy.conversation.AgentInfo
-import com.slopus.happy.conversation.ArtifactView
 import com.slopus.happy.conversation.AgentRequest
 import com.slopus.happy.conversation.Conversation
 import com.slopus.happy.conversation.ConversationApi
 import com.slopus.happy.conversation.ConversationApiException
+import com.slopus.happy.conversation.ConversationKeeper
 import com.slopus.happy.conversation.ConversationSignal
 import com.slopus.happy.conversation.MediaItem
-import com.slopus.happy.conversation.Mode
 import com.slopus.happy.conversation.NewTask
+import com.slopus.happy.conversation.UnsentWork
+import com.slopus.happy.conversation.WorkChoice
+import com.slopus.happy.conversation.WorkKind
+import kotlinx.serialization.json.JsonObject
 import com.slopus.happy.ui.components.Alert
 import com.slopus.happy.ui.components.AlertButton
 import com.slopus.happy.ui.components.HappyAlert
+import com.slopus.happy.ui.artifacts.openArtifact
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import com.slopus.happy.ui.artifacts.BrowserRoute
+import com.slopus.happy.ui.artifacts.computerName
+import com.slopus.happy.ui.browser.LinkOpener
+import com.slopus.happy.ui.browser.ProvideLinks
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
@@ -59,29 +68,22 @@ import kotlinx.serialization.Serializable
 /** The connection's Chief of Staff chat, found when opened, with [prefix] waiting in its composer. */
 @Serializable data class ChiefOfStaffRoute(val connectionId: String, val prefix: String)
 
-/** One artifact of the computer this conversation is on. */
-@Serializable data class ArtifactRoute(val connectionId: String, val artifactId: String)
-
-/** A conversation's details. */
+/** A conversation's agent page ([AgentPageEntry]). */
 @Serializable data class ConversationDetailsRoute(val connectionId: String, val agentId: String)
 
 /** The conversation screens. HappyApp's NavHost calls this once. */
 fun NavGraphBuilder.conversationRoutes(graph: AppGraph, nav: NavHostController) {
-    composable<ConversationRoute> { entry ->
+    page<ConversationRoute> { entry ->
         val route = entry.toRoute<ConversationRoute>()
         ConversationEntry(graph, nav, route)
     }
-    composable<ChiefOfStaffRoute> { entry ->
+    page<ChiefOfStaffRoute> { entry ->
         val route = entry.toRoute<ChiefOfStaffRoute>()
         ChiefOfStaffEntry(graph, nav, route)
     }
-    composable<ArtifactRoute> { entry ->
-        val route = entry.toRoute<ArtifactRoute>()
-        ArtifactEntry(graph, nav, route)
-    }
-    composable<ConversationDetailsRoute> { entry ->
+    page<ConversationDetailsRoute> { entry ->
         val route = entry.toRoute<ConversationDetailsRoute>()
-        ConversationDetails(graph, nav, route)
+        AgentPageEntry(graph, nav, route)
     }
 }
 
@@ -114,6 +116,25 @@ fun NavHostController.composeConversation(connectionId: String) {
     }
 }
 
+/**
+ * The chat of [agentId] held on this back stack, if its screen's state is
+ * still kept there: a page over it reads what it already shows instead of
+ * waiting for the computer. Never makes one.
+ */
+internal fun NavHostController.heldConversation(agentId: String): Conversation? {
+    val none = object : ViewModelProvider.Factory {}
+    return currentBackStack.value.asReversed().asSequence()
+        .filter { it.destination.hasRoute<ConversationRoute>() }
+        .mapNotNull { entry ->
+            try {
+                ViewModelProvider.create(entry.viewModelStore, none)["conversation", ConversationHolder::class].conversation
+            } catch (_: Exception) {
+                null
+            }
+        }
+        .firstOrNull { it.agentId == agentId }
+}
+
 /** The agent connection's client as a conversation asks it: refusals become [ConversationApiException]. */
 internal fun AgentSession.conversationRequest(): AgentRequest = { method, path, body ->
     try {
@@ -121,6 +142,13 @@ internal fun AgentSession.conversationRequest(): AgentRequest = { method, path, 
     } catch (e: AgentApiException) {
         throw ConversationApiException(e.status, e.code, e.message)
     }
+}
+
+/** Where [agentId]'s newest history is kept, beside the connection's catalog and gone with it. */
+internal fun AgentSession.conversationKeeper(agentId: String): ConversationKeeper = object : ConversationKeeper {
+    private val key = "conversation$agentId"
+    override fun read(): JsonObject? = cachedResource(key)
+    override fun write(value: JsonObject) = keepResource(key, value)
 }
 
 /** The connection's journal as one conversation hears it: its own events, and a resync on every (re)connect. */
@@ -134,23 +162,33 @@ internal fun Flow<AgentEvent>.signalsFor(agentId: String): Flow<ConversationSign
 
 /**
  * The conversation a back stack entry shows, kept through recreation. A
- * new chat's ids are made once and saved, so after process death the same
- * chat comes back (and its task, made again with the same ids, is the same
- * task); once made it opens as the chat it became.
+ * new chat's ids, kind and name are saved, so after process death the same
+ * chat comes back (and its task or bot, made again with the same ids, is the
+ * same one); once made it opens as the chat it became. Left before its first
+ * message, it is the connection's unsent work, which the next compose opens
+ * as it was left (iOS's Store `unsent`).
  */
-private class ConversationHolder(session: AgentSession, route: ConversationRoute, saved: SavedStateHandle) : ViewModel() {
+internal class ConversationHolder(private val session: AgentSession, route: ConversationRoute, private val saved: SavedStateHandle) : ViewModel() {
     /** Not viewModelScope: a send or draft save in flight finishes after the screen goes. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     val conversation: Conversation
+    private val task: NewTask?
 
     init {
-        val task = if (route.agentId != null) null else NewTask(
-            saved.get<String>(TASK) ?: ConversationApi.clientId().also { saved[TASK] = it },
-            saved.get<String>(WORKSPACE) ?: ConversationApi.clientId().also { saved[WORKSPACE] = it },
-            saved.get<String>(AGENT) ?: ConversationApi.clientId().also { saved[AGENT] = it },
-            saved.get<String>(MUTATION) ?: ConversationApi.clientId().also { saved[MUTATION] = it },
+        // A new chat that is not this entry's own yet takes the work left unsent, if any.
+        val unsent = if (route.agentId == null && saved.get<String>(TASK) == null) session.unsentWork?.also { session.unsentWork = null } else null
+        task = if (route.agentId != null) null else NewTask(
+            saved.get<String>(TASK) ?: (unsent?.task?.taskId ?: ConversationApi.clientId()).also { saved[TASK] = it },
+            saved.get<String>(WORKSPACE) ?: (unsent?.task?.workspaceId ?: ConversationApi.clientId()).also { saved[WORKSPACE] = it },
+            saved.get<String>(AGENT) ?: (unsent?.task?.agentId ?: ConversationApi.clientId()).also { saved[AGENT] = it },
+            saved.get<String>(MUTATION) ?: (unsent?.task?.mutationId ?: ConversationApi.clientId()).also { saved[MUTATION] = it },
         )
+        val choice = unsent?.choice ?: WorkChoice(
+            if (saved.get<String>(KIND) == WorkKind.Bot.name) WorkKind.Bot else WorkKind.Task,
+            saved.get<String>(NAME).orEmpty(),
+        )
+        unsent?.let { setChoiceSaved(it.choice) }
         val agentId = route.agentId ?: task!!.agentId
         conversation = Conversation(
             api = ConversationApi(session.conversationRequest()),
@@ -158,18 +196,39 @@ private class ConversationHolder(session: AgentSession, route: ConversationRoute
             scope = scope,
             agentId = agentId,
             newTask = task.takeIf { saved.get<Boolean>(CREATED) != true },
+            initialDraft = unsent?.draft.orEmpty(),
             // The row that was tapped already had a name: the bar has it from the first frame.
             knownTitle = route.agentId?.let(session.feed.value::title),
+            initialChoice = choice,
             onTaskCreated = { answer ->
                 saved[CREATED] = true
                 answer["task"].obj?.let { session.upsertTask(it, answer["membership"].obj) }
+                answer["bot"].obj?.let(session::upsertBot)
             },
+            keeper = session.conversationKeeper(agentId),
         )
         conversation.start()
         saved.takePrefill(route.prefill)?.let(conversation::prefill)
     }
 
+    /** Task or Bot and the name, kept with the entry as they are picked. */
+    fun setChoice(choice: WorkChoice) {
+        setChoiceSaved(choice)
+        conversation.setChoice(choice)
+    }
+
+    private fun setChoiceSaved(choice: WorkChoice) {
+        saved[KIND] = choice.kind.name
+        saved[NAME] = choice.name
+    }
+
     override fun onCleared() {
+        val state = conversation.state.value
+        val work = state.newWork
+        // Left unmade and not on its way: the next compose opens it as it was.
+        if (task != null && work != null && !work.making && saved.get<Boolean>(CREATED) != true) {
+            session.unsentWork = UnsentWork(task, work.choice, state.draft)
+        }
         conversation.close()
     }
 
@@ -179,6 +238,8 @@ private class ConversationHolder(session: AgentSession, route: ConversationRoute
         const val AGENT = "agentId"
         const val MUTATION = "mutationId"
         const val CREATED = "created"
+        const val KIND = "kind"
+        const val NAME = "name"
     }
 }
 
@@ -208,7 +269,10 @@ internal fun linkStatusText(status: AgentLinkStatus?, syncing: Boolean = false):
 private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: ConversationRoute) {
     val session = remember(route.connectionId) { graph.agentSessions.session(route.connectionId) }
     if (session == null) {
-        ConversationDetailsScreen(null, null, stringResource(R.string.conversation_unavailable)) { nav.popBackStack() }
+        AgentPageScreen(
+            AgentPageState(route.agentId.orEmpty(), reading = false, error = stringResource(R.string.conversation_unavailable)),
+            AgentPageActions(onBack = { nav.popBackStack() }),
+        )
         return
     }
     val holder = viewModel(key = "conversation") { ConversationHolder(session, route, createSavedStateHandle()) }
@@ -218,64 +282,63 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
     val syncing by session.isSyncing.collectAsStateWithLifecycle()
     val settings by graph.settings.settings.collectAsStateWithLifecycle()
     DisposableEffect(conversation) { onDispose { conversation.setVisible(false) } }
-    ConversationScreen(
-        state = state,
-        connection = linkStatusText(status, syncing),
-        bubbleColor = settings.userMessageBubbleColor,
-        actions = remember(conversation, nav) {
-            ConversationScreenActions(
-                onBack = { nav.popBackStack() },
-                onCompose = { nav.composeConversation(route.connectionId) },
-                onDetails = { nav.navigate(ConversationDetailsRoute(route.connectionId, conversation.agentId)) },
-                onDraftChange = conversation::setDraft,
-                onSend = { words, files -> conversation.send(words, files) },
-                onModeChange = conversation::setMode,
-                onStop = conversation::stop,
-                onRetrySend = conversation::retrySend,
-                onDiscardSend = conversation::discardSend,
-                onRetryFailure = conversation::retryFailure,
-                onAnswer = conversation::answer,
-                onLoadOlder = { retry -> conversation.loadOlder(retry) },
-                onOpenArtifact = { artifactId -> nav.navigate(ArtifactRoute(route.connectionId, artifactId)) },
-                onRetryLoad = conversation::retryLoad,
-                loadMedia = conversation::media,
-                onVisible = conversation::setVisible,
-                // The values typed into a secret go in this one request to the computer and nowhere else.
-                secrets = SecretRequestActions(
-                    secrets = { ConversationApi(session.conversationRequest()).secrets() },
-                    create = { id, description, values -> ConversationApi(session.conversationRequest()).createSecret(id, description, values) },
-                ),
-            )
-        },
-    )
-    state.alert?.let { message ->
+    // A link in this chat browses through this chat's agent's workspace (iOS's openBrowser(session:agentID:)).
+    val context = LocalContext.current
+    val computer = computerName(graph, route.connectionId)
+    val links = remember(nav, computer, conversation.agentId) {
+        LinkOpener.agent(context, computer) { url -> nav.navigate(BrowserRoute(route.connectionId, url, conversation.agentId)) }
+    }
+    ProvideLinks(links) {
+        ConversationScreen(
+            state = state,
+            connection = linkStatusText(status, syncing),
+            bubbleColor = settings.userMessageBubbleColor,
+            actions = remember(conversation, nav) {
+                ConversationScreenActions(
+                    onBack = { nav.popBackStack() },
+                    onCompose = { nav.composeConversation(route.connectionId) },
+                    onDetails = { nav.navigate(ConversationDetailsRoute(route.connectionId, conversation.agentId)) },
+                    onDraftChange = conversation::setDraft,
+                    onSend = { words, attachments -> conversation.send(words, attachments) },
+                    onModeChange = conversation::setMode,
+                    onStop = conversation::stop,
+                    onRetrySend = conversation::retrySend,
+                    onDiscardSend = conversation::discardSend,
+                    onRetryFailure = conversation::retryFailure,
+                    onAnswer = conversation::answer,
+                    onLoadOlder = { retry -> conversation.loadOlder(retry) },
+                    onOpenArtifact = { row -> nav.openArtifact(route.connectionId, row.ref) },
+                    onRetryLoad = conversation::retryLoad,
+                    loadMedia = conversation::media,
+                    // A recording streams a range at a time, as iOS's MediaStream asks.
+                    loadMediaRange = { ref, range ->
+                        session.client.send(
+                            "GET",
+                            ConversationApi.mediaPath(conversation.agentId, ref.toolCallId, ref.index),
+                            headers = mapOf("Range" to "bytes=${range.first}-${range.last}"),
+                        )
+                    },
+                    onVisible = conversation::setVisible,
+                    onChoiceChange = holder::setChoice,
+                    // The values typed into a secret go in this one request to the computer and nowhere else.
+                    secrets = SecretRequestActions(
+                        secrets = { ConversationApi(session.conversationRequest()).secrets() },
+                        create = { id, description, values -> ConversationApi(session.conversationRequest()).createSecret(id, description, values) },
+                    ),
+                )
+            },
+        )
+    }
+    // New work that could not be made says why; nothing was sent, and the composer keeps it all.
+    val message = state.alert?.let { problemText(it) } ?: state.workFailure?.let { failure ->
+        stringResource(if (failure.kind == WorkKind.Bot) R.string.new_work_bot_failed else R.string.new_work_task_failed, problemText(failure.reason))
+    }
+    message?.let {
         val title = stringResource(R.string.common_error)
         val ok = stringResource(R.string.common_ok)
-        HappyAlert(Alert(title, message, listOf(AlertButton(ok))), onDismiss = conversation::dismissAlert)
+        HappyAlert(Alert(title, it, listOf(AlertButton(ok))), onDismiss = conversation::dismissAlert)
     }
 }
-
-@Composable
-private fun ConversationDetails(graph: AppGraph, nav: NavHostController, route: ConversationDetailsRoute) {
-    val session = remember(route.connectionId) { graph.agentSessions.session(route.connectionId) }
-    val unavailable = stringResource(R.string.conversation_unavailable)
-    val read by produceState<Triple<AgentInfo?, Mode?, String?>>(Triple(null, null, null), session, route.agentId) {
-        value = if (session == null) {
-            Triple(null, null, unavailable)
-        } else {
-            try {
-                val start = ConversationApi(session.conversationRequest()).bootstrap(route.agentId)
-                Triple(start.agent, start.draft?.mode ?: start.mode, null)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Triple(null, null, Conversation.describe(e))
-            }
-        }
-    }
-    ConversationDetailsScreen(read.first, read.second, read.third) { nav.popBackStack() }
-}
-
 
 /**
  * Finds the connection's Chief of Staff ([ConversationApi.chiefOfStaffAgentId])
@@ -289,6 +352,7 @@ private fun ChiefOfStaffEntry(graph: AppGraph, nav: NavHostController, route: Ch
     val missing = stringResource(R.string.conversation_chief_missing)
     val unavailable = stringResource(R.string.conversation_unavailable)
     var attempt by rememberSaveable { mutableIntStateOf(0) }
+    val resources = LocalResources.current
     var problem by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(session, attempt) {
         problem = null
@@ -301,7 +365,7 @@ private fun ChiefOfStaffEntry(graph: AppGraph, nav: NavHostController, route: Ch
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            problem = Conversation.describe(e)
+            problem = resources.problemText(Conversation.describe(e))
             return@LaunchedEffect
         }
         if (agentId == null) {
@@ -313,85 +377,4 @@ private fun ChiefOfStaffEntry(graph: AppGraph, nav: NavHostController, route: Ch
         }
     }
     ChiefOfStaffScreen(problem, onRetry = { attempt++ }, onBack = { nav.popBackStack() })
-}
-
-/**
- * One artifact, read through the connection this conversation is on, so
- * its own credential carries the request and nothing of it is handed to
- * anything else. Its pictures are read here; words are read here; a video
- * or document is handed to whatever on the phone reads it, through the
- * same one directory as a conversation's media. A read that fails, a
- * deleted artifact and an offline computer each say so, with Retry.
- */
-@Composable
-private fun ArtifactEntry(graph: AppGraph, nav: NavHostController, route: ArtifactRoute) {
-    val session = remember(route.connectionId) { graph.agentSessions.session(route.connectionId) }
-    ArtifactRouteContent(session, route.artifactId, onBack = { nav.popBackStack() }) {
-        session?.let { ConversationApi(it.conversationRequest()) }
-    }
-}
-
-/**
- * [ArtifactEntry]'s body, moved out unchanged. [connection] is only a key:
- * when it changes, the artifact is read again (the session there); the loader
- * uses nothing of it. [api] makes a client each time one is needed, null for
- * a connection this device doesn't have. Internal, not private, only so the
- * instrumented harness (src/androidTest) drives this loader rather than a
- * copy of it.
- */
-@Composable
-internal fun ArtifactRouteContent(connection: Any?, artifactId: String, onBack: () -> Unit, api: () -> ConversationApi?) {
-    val unavailable = stringResource(R.string.conversation_unavailable)
-    val deleted = stringResource(R.string.conversation_artifact_deleted)
-    var attempt by rememberSaveable { mutableIntStateOf(0) }
-    val pictures = rememberPictureViewer()
-    val media = rememberMediaOpener()
-    val content by produceState<ArtifactContent>(ArtifactContent.Reading, connection, artifactId, attempt) {
-        value = ArtifactContent.Reading
-        val api = api()
-        if (api == null) {
-            value = ArtifactContent.Failed(unavailable)
-            return@produceState
-        }
-        value = try {
-            val artifact = api.readArtifact(artifactId)
-            when {
-                artifact == null -> ArtifactContent.Failed(unavailable)
-                artifact.deleted -> ArtifactContent.Failed(deleted)
-                else -> when (val view = artifact.view()) {
-                    is ArtifactView.Words -> {
-                        val entry = artifact.entryFile
-                        val words = entry?.let { String(api.artifactFile(artifact.id, artifact.version.toString(), it.path), Charsets.UTF_8) }.orEmpty()
-                        ArtifactContent.Ready(artifact, ArtifactView.Words(words), emptyMap())
-                    }
-                    is ArtifactView.Pictures -> {
-                        val bytes = view.files.associate { it.path to api.artifactFile(artifact.id, artifact.version.toString(), it.path) }
-                        ArtifactContent.Ready(artifact, view, bytes)
-                    }
-                    else -> ArtifactContent.Ready(artifact, view, emptyMap())
-                }
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            ArtifactContent.Failed(Conversation.describe(e))
-        }
-    }
-    val ready = content as? ArtifactContent.Ready
-    val openable = (ready?.view as? ArtifactView.Openable)?.file
-    ArtifactScreen(
-        content = content,
-        onBack = onBack,
-        onRetry = { attempt++ },
-        onOpenPicture = pictures::show,
-        onOpenFile = { file ->
-            val artifact = ready?.artifact ?: return@ArtifactScreen
-            val key = "artifact-${artifact.id}-${artifact.version}"
-            media.open(key, MediaItem("file", file.path, file.mimeType)) {
-                api()!!.artifactFile(artifact.id, artifact.version.toString(), file.path)
-            }
-        },
-        opening = openable?.let { media.state("artifact-${ready.artifact.id}-${ready.artifact.version}") },
-    )
-    PictureViewerHost(pictures)
 }

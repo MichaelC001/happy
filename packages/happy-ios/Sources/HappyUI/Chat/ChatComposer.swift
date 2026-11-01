@@ -128,15 +128,36 @@ public protocol ChatComposerView: UIView {
     func focus()
     func blur()
     var hasPermissionMenu: Bool { get }
-    func chatMenuElements(onInfo: @escaping () -> Void) -> [UIMenuElement]
+    /// The permission modes the session's profile offers; nil for none.
+    var permissionChoice: PermissionModeChoice? { get }
+    /// The session's status for the header's capsule, under its name
+    /// (online, last seen, thinking, waiting on the person); nil before
+    /// the session is known.
+    var headerStatus: ChatHeaderStatus? { get }
 }
 
 extension ChatComposerView {
     public var hasPermissionMenu: Bool { false }
-    public func chatMenuElements(onInfo: @escaping () -> Void) -> [UIMenuElement] {
-        let details = UIAction(title: Strings.Home.details) { _ in onInfo() }
-        details.accessibilityIdentifier = "chat-info"
-        return [details]
+    public var permissionChoice: PermissionModeChoice? { nil }
+    public var headerStatus: ChatHeaderStatus? { nil }
+}
+
+/// A session's status as its header says it: the words and their tone.
+public struct ChatHeaderStatus: Equatable {
+    public var text: String
+    public var color: UIColor
+    /// Work under way ("thinking…", a chat being started): the words carry
+    /// the sheen.
+    public var working = false
+    /// The account's link on its way ("connecting…"): the spinner before
+    /// the words, as home's title has it.
+    public var spins = false
+
+    public init(text: String, color: UIColor, working: Bool = false, spins: Bool = false) {
+        self.text = text
+        self.color = color
+        self.working = working
+        self.spins = spins
     }
 }
 
@@ -160,10 +181,14 @@ public protocol ChatComposerDelegate: AnyObject {
     /// the newest message and, as happy-app does, dismisses any question
     /// the agent was waiting on, since the message answers it.
     func composer(_ composer: any ChatComposerView, didSend localId: String)
+
+    /// `headerStatus` changed.
+    func composerDidChangeHeaderStatus(_ composer: any ChatComposerView)
 }
 
 extension ChatComposerDelegate {
     public func composerDidRestore(_ composer: any ChatComposerView, generation: Int) {}
+    public func composerDidChangeHeaderStatus(_ composer: any ChatComposerView) {}
 }
 
 /// How long the chat waits for its composer's opening draft.

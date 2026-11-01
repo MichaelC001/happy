@@ -87,7 +87,7 @@ final class HostedV2SelectionTests: XCTestCase {
         Row(id: "space:happy", nodeId: "happy", kind: .space, label: "Happy", mark: .happy, isHappy: true, agentId: "agent-happy", spaceId: "happy"),
         Row(id: "section:priority", nodeId: "priority", kind: .section, label: "Priority", collapsed: false),
         Row(id: "space:ios", nodeId: "ios", kind: .space, label: "iOS selection reset", mark: .glyph("tasks"), agentId: "agent-ios", spaceId: "ios"),
-        Row(id: "space:stories", nodeId: "stories", kind: .space, label: "Stories", mark: .glyph("agents"), agentId: "agent-stories", spaceId: "stories"),
+        Row(id: "space:notes", nodeId: "notes", kind: .space, label: "Notes", mark: .glyph("agents"), agentId: "agent-notes", spaceId: "notes"),
         Row(id: "space:bench", nodeId: "bench", kind: .space, label: "Agent benchmark", mark: .glyph("agents"), agentId: "agent-bench", spaceId: "bench"),
     ]
 
@@ -123,14 +123,15 @@ final class HostedV2SelectionTests: XCTestCase {
         defer { window.isHidden = true }
         window.layoutIfNeeded()
 
-        let sidebar = try XCTUnwrap(Self.subview(SidebarView.self, in: home.view))
+        let sidebar = try XCTUnwrap(Self.subview(SidebarList.self, in: home.view))
         sidebar.apply(Self.rows)
+        await sidebar.settle()
         home.view.layoutIfNeeded()
         let row = try XCTUnwrap(rowView(sidebar, "space:ios"))
         XCTAssertNil(selectedRows(sidebar))
 
         // The tap lights the row, and it stays lit while the chat comes in.
-        sidebar.tap(row, at: CGPoint(x: row.frame.midX, y: row.frame.midY))
+        sidebar.tap(row, at: CGPoint(x: row.box.midX, y: row.box.midY))
         let chat = try XCTUnwrap(navigation.topViewController as? ChatViewController)
         XCTAssertEqual(selectedRows(sidebar), ["space:ios"])
         XCTAssertNotNil(navigation.transitionCoordinator, "the chat is still coming in")
@@ -168,7 +169,7 @@ final class HostedV2SelectionTests: XCTestCase {
         keep(window, "after-swipe-back")
 
         // Again, and back by the back button's pop.
-        sidebar.tap(row, at: CGPoint(x: row.frame.midX, y: row.frame.midY))
+        sidebar.tap(row, at: CGPoint(x: row.box.midX, y: row.box.midY))
         XCTAssertEqual(selectedRows(sidebar), ["space:ios"])
         try await settle(navigation)
         navigation.popViewController(animated: true)
@@ -177,13 +178,13 @@ final class HostedV2SelectionTests: XCTestCase {
         XCTAssertNil(selectedRows(sidebar))
     }
 
-    private func rowView(_ sidebar: SidebarView, _ id: String) -> RowView? {
-        sidebar.subviews.compactMap { $0 as? RowView }.first { $0.row?.id == id }
+    private func rowView(_ sidebar: SidebarList, _ id: String) -> SidebarItemView? {
+        sidebar.view(for: id)
     }
 
     /// The rows drawn selected, nil when none is.
-    private func selectedRows(_ sidebar: SidebarView) -> [String]? {
-        let ids = sidebar.subviews.compactMap { $0 as? RowView }.filter(\.selected).compactMap(\.row?.id)
+    private func selectedRows(_ sidebar: SidebarList) -> [String]? {
+        let ids = sidebar.mountedViews.filter(\.selected).map(\.row.id)
         return ids.isEmpty ? nil : ids.sorted()
     }
 

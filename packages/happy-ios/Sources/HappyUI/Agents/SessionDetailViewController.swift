@@ -40,7 +40,7 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
     private var pendingAsk = (media: false, links: false)
     private var reader = Shared.Reader()
     private var previewing: Task<Void, Never>?
-    private lazy var loader = MediaLoader(client: session.client, agentId: agentId)
+    private lazy var loader = MediaLoader(client: session.client, agentId: agentId, library: session.media)
     private var preview: FilePreview?
     /// Four rows of media, five links; each "Show more" as many again.
     private static let mediaPage = 12
@@ -51,14 +51,23 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
     private var family: [Row] = []
     private var completedOpen = false
     private var heldName: String?
+    /// The computer answered when last heard: back after a gap, the
+    /// pictures that failed are asked again.
+    private var live = true
 
     private let scroll = DetailScrollView()
-    private let mark = DetailMarkView()
-    private let name = UILabel()
-    private let pencil = UIButton(type: .system)
+    /// Its avatar, name and what it is: the legacy session's profile's too.
+    let header = ProfileHeaderView()
+    private var name: UILabel { header.name }
+    private var pencil: UIButton { header.pencil }
     private var nameField: RenameField?
-    private let subtitle = UILabel()
     private let tiles = (0..<3).map { _ in DetailTileView() }
+    /// The chat's permission mode, which its header's More menu used to
+    /// pick, asked of the chat under this screen each layout; nil opened
+    /// from anywhere else. Its modes open as a pull-down from the row.
+    var permissionChoice: (() -> PermissionModeChoice?)?
+    /// The cards under the tiles: the chat's controls.
+    private lazy var sections = ProfileSections(in: scroll)
     private let mediaHeading = DetailTileView.heading()
     private let mediaCard = DetailMediaCardView()
     private let linksHeading = DetailTileView.heading()
@@ -70,6 +79,11 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
     private let running = DetailActivityCardView()
     private let completed = DetailActivityCardView()
     private var watch: Watch?
+    private var homeWatch: Watch?
+    /// What the spaces sidebar holds, and what home lists: its row is
+    /// home's, else the sidebar's.
+    private var spaceRows: [Row] = []
+    private var homeRows: [Row] = []
     private var following: Task<Void, Never>?
 
     private static let treePadding: CGFloat = 8
@@ -96,36 +110,19 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
         scroll.delegate = self
         scroll.keyboardDismissMode = .interactive
         view.addSubview(scroll)
-        mark.images = session.images
-        scroll.addSubview(mark)
-        name.font = Fonts.ui(.medium, size: 28)
-        name.textColor = UIColor(Palette.settingsText)
-        name.textAlignment = .center
-        name.lineBreakMode = .byTruncatingTail
-        name.accessibilityIdentifier = "detail-name"
-        name.accessibilityTraits = .header
+        header.images = session.images
+        // The placeholder home's row wears, from the first frame.
+        header.avatar = .mark(SidebarRows.profileMark(nil, agentId: agentId))
         name.isUserInteractionEnabled = true
         name.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(nameTapped)))
-        scroll.addSubview(name)
-        pencil.setImage(Glyphs.image("pencil", size: 16), for: .normal)
-        pencil.tintColor = UIColor(Palette.settingsSecondary)
-        pencil.accessibilityLabel = Strings.rename
-        pencil.accessibilityIdentifier = "detail-rename-button"
-        pencil.isHidden = true
         pencil.addAction(UIAction { [weak self] _ in self?.beginRename() }, for: .touchUpInside)
-        scroll.addSubview(pencil)
-        subtitle.font = Fonts.ui(.regular, size: 17)
-        subtitle.textColor = UIColor(Palette.settingsSecondary)
-        subtitle.textAlignment = .center
-        subtitle.accessibilityIdentifier = "detail-subtitle"
-        scroll.addSubview(subtitle)
+        scroll.addSubview(header)
         for (tile, id) in zip(tiles, ["model", "effort", "started"]) {
             tile.accessibilityIdentifier = "detail-tile:\(id)"
             scroll.addSubview(tile)
         }
         mediaHeading.text = Strings.media.uppercased()
         scroll.addSubview(mediaHeading)
-        mediaCard.source = loader
         mediaCard.accessibilityIdentifier = "detail-media"
         mediaCard.onSelect = { [weak self] index in self?.openMedia(index) }
         mediaCard.onMore = { [weak self] in self?.showMore(media: true) }
@@ -161,7 +158,17 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
 
         navigationItem.largeTitleDisplayMode = .never
 
-        watch = session.watch { [weak self] snapshot in self?.follow(snapshot) }
+        watch = session.watch { [weak self] snapshot in
+            guard let self else { return }
+            if snapshot.live, !live { loader.retryFailed() }
+            live = snapshot.live
+            spaceRows = snapshot.allRows
+            follow()
+        }
+        homeWatch = session.watchHome { [weak self] home in
+            self?.homeRows = home.allRows
+            self?.follow()
+        }
         session.warm.watch(warm.chat, token: warm.token) { [weak self] snapshot in
             guard let self else { return }
             let items = chat.items
@@ -210,6 +217,7 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
         probe?.link.invalidate()
         #endif
         watch?.invalidate()
+        homeWatch?.invalidate()
         let feed = feed
         Task { await feed.stop() }
         session.warm.release(warm.chat, token: warm.token, opened: false)
@@ -229,10 +237,12 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
 
     // MARK: What it shows
 
-    /// Its row as the sidebar has it now: name, mark, kind, and its family.
-    private func follow(_ snapshot: Snapshot) {
-        let rows = snapshot.allRows
-        let found = spaceId.flatMap { id in rows.first { $0.spaceId == id && $0.kind == .space } } ?? rows.first { $0.agentId == agentId && ($0.kind == .space || $0.kind == .session) }
+    /// Its row as home lists it now (else as the spaces sidebar has it):
+    /// name, mark, kind, and its family.
+    private func follow() {
+        let home = SidebarRows.row(agentId: agentId, spaceId: spaceId, in: homeRows)
+        let rows = home == nil ? spaceRows : homeRows
+        let found = home ?? SidebarRows.row(agentId: agentId, spaceId: spaceId, in: spaceRows)
         row = found
         if let heldName, found?.label == heldName { self.heldName = nil }
         applyName()
@@ -250,8 +260,8 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
     /// doesn't hold, what its screen and the daemon call it.
     private func applyName() {
         name.text = heldName ?? row?.label ?? detail?.title ?? fallbackTitle ?? Strings.untitledSession
-        mark.mark = row?.mark ?? .glyph("agents")
-        subtitle.text = row.map { Self.subtitle($0) } ?? Self.subtitle(subtask: detail?.subtask == true, working: detail?.working == true)
+        header.avatar = .mark(SidebarRows.profileMark(row, agentId: agentId))
+        header.subtitle.text = row.map { Self.subtitle($0) } ?? Self.subtitle(subtask: detail?.subtask == true, working: detail?.working == true)
         // The name is as wide as its text, its pencil just after it.
         view.setNeedsLayout()
     }
@@ -403,22 +413,20 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
         ).contentHeight
         let workCount = (detail?.running.count ?? 0) + (detail?.terminals.count ?? 0)
         let settled = detail?.completed.count ?? 0
+        sections.show(permissionChoice?().map { [ProfileSection(id: "controls", rows: [Self.permissionRow($0) { [weak self] in self?.permissionChoice?() } relaid: { [weak self] in self?.view.setNeedsLayout() }])] } ?? [])
         let layout = SessionDetailLayout(
-            width: width, nameHeight: ceil(name.font.lineHeight),
-            nameWidth: name.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: name.font.lineHeight)).width,
-            renames: canRename, subtitleHeight: ceil(subtitle.font.lineHeight), tiles: tiles.count,
+            width: width, nameHeight: header.nameHeight, nameWidth: header.nameWidth,
+            renames: canRename, subtitleHeight: header.subtitleHeight, tiles: tiles.count,
+            sections: sections.specs(width: width),
             media: .init(count: shownMedia.count, more: hasMore(shared.media.count, limit: mediaLimit)),
             links: .init(count: shownLinks.count, more: hasMore(shared.links.count, limit: linksLimit)),
             family: familyHeight, running: workCount, completed: settled,
             countWidth: SettingsCardView.valueWidth("\(settled)") ?? 0, open: completedOpen
         )
-        mark.frame = layout.mark
-        name.frame = layout.name
+        header.place(layout.header, width: width, editing: nameField != nil)
         nameField?.frame = layout.field
-        pencil.isHidden = layout.pencilTouch == nil || nameField != nil
-        if let frame = layout.pencilTouch { pencil.frame = frame }
-        subtitle.frame = layout.subtitle
         for (tile, frame) in zip(tiles, layout.tiles) { tile.place(frame) }
+        sections.place(layout.sections)
         mediaHeading.isHidden = layout.media == nil
         mediaCard.isHidden = layout.media == nil
         if let frame = layout.mediaHeading { mediaHeading.frame = frame }
@@ -444,6 +452,15 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
         // Grown or shrunk while pulled past an end, it takes its new size
         // once it is back (it bounces to its old end first) or at rest.
         if let size = heldSize.laidOut(size, current: scroll.contentSize, holding: holding) { scroll.contentSize = size }
+    }
+
+    /// The chat's permission mode as a row: the current one as its value,
+    /// its modes a pull-down asked of `choice` each time it opens; the
+    /// legacy session's profile has the same row.
+    static func permissionRow(_ current: PermissionModeChoice, choice: @escaping () -> PermissionModeChoice?, relaid: @escaping () -> Void) -> SettingsRow {
+        var row = SettingsRow(id: "permission-mode", title: Strings.ChatActions.permissionMode, icon: ("shield-checkmark-outline", .blue), value: current.current, accessory: .none)
+        row.pullDown = { choice()?.uiMenu(picked: relaid) }
+        return row
     }
 
     private var heldSize = SessionDetailLayout.HeldSize()
@@ -543,18 +560,17 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
         guard let agentId = row.agentId, row.kind == .space || row.kind == .session, row.targetKind != "surface" else { return }
         if agentId == self.agentId { navigationController?.popViewController(animated: true); return }
         let intro: ChatViewController.Intro? = switch row.mark {
-        case .seedling(let seed): .seedling(seed: seed)
         case .clay(let slug): .clay(slug)
         default: nil
         }
-        navigationController?.pushViewController(ChatViewController(session: session, agentId: agentId, title: row.label, spaceId: row.spaceId, seedling: intro), animated: true)
+        navigationController?.pushViewController(ChatViewController(session: session, agentId: agentId, title: row.label, spaceId: row.spaceId, intro: intro), animated: true)
     }
 
     private func openChild(_ children: [SessionDetail.Child]?, _ index: Int) {
         guard let children, children.indices.contains(index) else { return }
         let child = children[index]
         let title = child.title ?? Strings.subagent
-        navigationController?.pushViewController(ChatViewController(session: session, agentId: child.id, title: title, spaceId: nil, seedling: nil), animated: true)
+        navigationController?.pushViewController(ChatViewController(session: session, agentId: child.id, title: title, spaceId: nil, intro: nil), animated: true)
     }
 
     /// A picture in the viewer, paging through every picture shared; a
@@ -563,6 +579,13 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
         let media = shownMedia
         guard media.indices.contains(index) else { return }
         let one = media[index]
+        let loader = loader
+        // Not here yet: the tap reads it, as the chat's ring does; a
+        // recording plays as it streams.
+        if case .tool(let file) = one, file.isVisual, !file.isVideo, !loader.isDownloaded(one.key) {
+            loader.toggleDownload(one.key)
+            return
+        }
         if case .tool(let file) = one, !file.isVisual {
             // The last file asked for, while this screen still shows.
             previewing?.cancel()
@@ -575,16 +598,11 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
             }
             return
         }
-        if let player = loader.player(one.key) {
-            let playback = AVPlayerViewController()
-            playback.player = player
-            present(playback, animated: true) { player.play() }
-            return
-        }
+        if VideoOpening.shared.open(boardKey: loader.download(one.key)?.boardKey, from: self, player: { loader.player(one.key) }) { return }
         let pictures = shared.media.filter(\.isPicture).map { picture -> Picture in
             switch picture {
             case .picture: Picture(key: picture.key, thumbhash: nil, label: Strings.picture)
-            case .tool(let media): Picture(key: media.key, thumbhash: media.item.thumbhash, label: media.item.name)
+            case .tool(let media): Picture(media)
             }
         }
         guard let at = pictures.firstIndex(where: { $0.key == one.key }) else { return }
@@ -594,7 +612,7 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
     private func openLink(_ index: Int) {
         let links = shownLinks
         guard links.indices.contains(index), let url = URL(string: links[index].url) else { return }
-        UIApplication.shared.open(url)
+        openBrowser(url, session: session, agentID: agentId)
     }
 
     private func toggleCompleted() {
@@ -678,6 +696,12 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
     }
 
     func gestureRecognizer(_ gesture: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+}
+
+/// The shared media's squares are the chat's tiles, reading from this
+/// screen's loader.
+extension SessionDetailViewController: ChatMediaProviding {
+    var chatMedia: ChatMediaSource? { loader }
 }
 
 /// The detail's scroll: a drag begun on a media cell, or any control,
@@ -909,7 +933,7 @@ final class DetailActivityCardView: UIView {
 }
 
 /// The detail's mark, large: the seedling, its clay icon, Happy's own,
-/// a picture, or a glyph on a tile.
+/// a picture or placeholder, or a glyph on a tile.
 final class DetailMarkView: UIView {
     var images: Images?
     var mark: Row.Mark = .none {
@@ -917,12 +941,16 @@ final class DetailMarkView: UIView {
     }
     private let seedling = MarkView()
     private let picture = UIImageView()
-    private var job: Task<Void, Never>?
+    private let markPicture = MarkPicture()
+    private let placeholder = AvatarPlaceholderSlot()
+    /// What it draws, for tests.
+    var pictureImage: UIImage? { picture.image }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         picture.contentMode = .scaleAspectFit
         picture.clipsToBounds = true
+        placeholder.liveHost = picture
         addSubview(seedling)
         addSubview(picture)
         isAccessibilityElement = false
@@ -936,10 +964,12 @@ final class DetailMarkView: UIView {
         picture.frame = bounds
         if case .glyph = mark { picture.layer.cornerRadius = bounds.width * 0.28 }
         if case .image = mark { picture.layer.cornerRadius = bounds.width * 0.22 }
+        if case .placeholder = mark { picture.layer.cornerRadius = bounds.width * 0.22 }
     }
 
     private func apply() {
-        job?.cancel(); job = nil
+        markPicture.cancel()
+        placeholder.cancel()
         seedling.isHidden = true
         seedling.seed = nil
         picture.isHidden = false
@@ -958,12 +988,10 @@ final class DetailMarkView: UIView {
             picture.image = ClayIconImages.image(slug)
         case .image(let path, let thumbhash):
             picture.contentMode = .scaleAspectFill
-            let pixels = Int(SessionDetailLayout.Metrics.mark * 3)
-            picture.image = images?.cachedPicture(path, thumbhash: thumbhash, pixels: pixels) ?? Images.placeholder(thumbhash)
-            job = Task { [weak self] in
-                guard let image = await self?.images?.picture(path, thumbhash: thumbhash, pixels: pixels), !Task.isCancelled else { return }
-                self?.picture.image = image
-            }
+            markPicture.load(path, thumbhash: thumbhash, pixels: Int(SessionDetailLayout.Metrics.mark * 3), images: images, into: picture)
+        case .placeholder(let seed):
+            picture.contentMode = .scaleAspectFill
+            placeholder.show(seed: seed, side: SessionDetailLayout.Metrics.mark) { [weak self] in self?.picture.image = $0 }
         case .glyph(let name):
             picture.contentMode = .center
             picture.backgroundColor = UIColor(Palette.settingsTilePurple)

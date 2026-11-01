@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
+import android.util.Base64
 import androidx.test.platform.app.InstrumentationRegistry
 import com.slopus.happy.connection.TransportResponse
 import com.slopus.happy.conversation.AgentRequest
@@ -22,6 +23,8 @@ import java.util.Collections
  */
 class FixtureTransport {
     val requests: MutableList<String> = Collections.synchronizedList(ArrayList())
+    /** What sends and file writes carried, in order: the route and the JSON body. */
+    val bodies: MutableList<Pair<String, JsonElement?>> = Collections.synchronizedList(ArrayList())
 
     /** The pending question `GET .../question` answers with, or none. */
     @Volatile var question: String? = null
@@ -33,12 +36,15 @@ class FixtureTransport {
         InstrumentationRegistry.getInstrumentation().context.assets.open("sample.mp4").use { it.readBytes() }
     }
 
-    val request: AgentRequest = { method: String, path: String, _: JsonElement? ->
+    val request: AgentRequest = { method: String, path: String, body: JsonElement? ->
         requests += "$method $path"
-        answer(method, path.substringBefore('?'))
+        if (method == "PUT" || path.endsWith("/send")) bodies += "$method $path" to body
+        answer(method, path.substringBefore('?'), body)
     }
 
-    private fun answer(method: String, route: String): TransportResponse = when {
+    private fun answer(method: String, route: String, body: JsonElement?): TransportResponse = when {
+        // A workspace file write: its hash back, as the computer answers.
+        method == "PUT" && route == "/v0/workspaces/fx-workspace/file" -> json("""{"hash":"${sha256(body)}"}""")
         // The conversation only asks for a question the agent says is pending.
         route == "/v0/agents/$AGENT/bootstrap" -> json(bootstrap(if (question != null) "fx-q" else null))
         route == "/v0/agents/$AGENT/messages" -> json(PAGE)
@@ -63,6 +69,12 @@ class FixtureTransport {
         // Draft saves, read marks and the like: accepted and forgotten.
         method != "GET" -> json("{}")
         else -> TransportResponse(404, body = """{"error":"not in the fixture","code":"not_found"}""".toByteArray())
+    }
+
+    private fun sha256(body: JsonElement?): String {
+        val content = (body as? kotlinx.serialization.json.JsonObject)?.get("content")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content }.orEmpty()
+        val bytes = java.util.Base64.getDecoder().decode(content)
+        return java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     }
 
     private fun json(text: String) = TransportResponse(200, mapOf("content-type" to "application/json"), text.toByteArray())
@@ -91,8 +103,11 @@ class FixtureTransport {
         private fun card(id: String, artifactId: String, type: String, title: String) =
             """{"type":"tool_call","id":"$id","name":"create_artifact","status":"completed","presentation":{"type":"artifact","artifactId":"$artifactId","artifactType":"$type","title":"$title","version":1}}"""
 
-        private val PAGE = """{"hasMore":false,"runs":[{"id":"r1","status":"completed","startedAt":1,"messages":[
-            {"id":"m1","role":"user","createdAt":1,"content":[{"type":"text","text":"Show me the samples."}],"metadata":{}},
+        /** The person's message carries one portrait photo, as a phone sends it: inline, base64. */
+        private val PAGE by lazy { page() }
+
+        private fun page() = """{"hasMore":false,"runs":[{"id":"r1","status":"completed","startedAt":1,"messages":[
+            {"id":"m1","role":"user","createdAt":1,"content":[{"type":"text","text":"Show me the samples."},{"type":"image","mimeType":"image/png","data":"${Base64.encodeToString(portrait(), Base64.NO_WRAP)}"}],"metadata":{}},
             {"id":"m2","role":"agent","createdAt":2,"content":[
                 {"type":"text","text":"Here they are. Every one of these is a test fixture."},
                 {"type":"tool_call","id":"c1","name":"present_files","status":"completed","presentation":{"type":"media","items":[
@@ -124,6 +139,16 @@ class FixtureTransport {
 
         /** A secret request with two synthetic variables; nothing is ever saved from it. */
         const val SECRET_QUESTION = """{"id":"fx-q","status":"pending","context":"The fixture needs a token.","questions":[{"id":"secret","header":"Secret","question":"Fixture token","multiSelect":false,"options":[],"secretRequest":{"suggestedId":"fixture-api","description":"Fixture credentials","environmentVariables":[{"name":"FIXTURE_TOKEN","description":"A made-up token"},{"name":"FIXTURE_ORGANIZATION","description":null}]}}]}"""
+
+        /** A synthetic 300 × 480 portrait, for the person's own photo. */
+        private fun portrait(): ByteArray {
+            val bitmap = Bitmap.createBitmap(300, 480, Bitmap.Config.ARGB_8888)
+            Canvas(bitmap).apply {
+                drawColor(Color.rgb(160, 64, 96))
+                drawText("PHOTO", 70f, 250f, Paint().apply { color = Color.WHITE; textSize = 56f; isAntiAlias = true })
+            }
+            return ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        }
 
         private fun picture(): ByteArray {
             val bitmap = Bitmap.createBitmap(640, 400, Bitmap.Config.ARGB_8888)

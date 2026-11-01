@@ -1,18 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   An agent connection's home, search and settings (ui/connection). Not in
-  happy-app's catalogs; English only, as iOS's are.
+  happy-app's catalogs. Translated in values-*/ (AndroidStringsTranslatedTest).
 -->
-<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
-    <string name="agent_home_bots">Bots</string>
-    <string name="agent_home_tasks">Tasks</string>
-    <string name="agent_home_kind_bot">Bot</string>
-    <string name="agent_home_kind_task">Task</string>
-    <string name="agent_home_kind_project">Main</string>
-    <string name="agent_home_kind_subtask">Subtask</string>
-    <string name="agent_home_thinking">Thinking…</string>
+<resources>
     <string name="agent_home_working">Working…</string>
-    <string name="agent_home_waiting">Waiting for your answer</string>
     <string name="agent_home_show_subtasks">Show subtasks</string>
     <string name="agent_home_hide_subtasks">Hide subtasks</string>
     <string name="agent_home_connecting">Connecting to %1$s…</string>
@@ -26,23 +18,29 @@
     <string name="agent_home_status_revoked">removed</string>
     <string name="agent_home_status_update">update required</string>
 
-    <string name="agent_search_open">Search</string>
+    <string name="agent_artifacts_untitled">Untitled</string>
+    <string name="agent_artifacts_empty">No artifacts yet.</string>
+    <string name="agent_artifacts_failed">Couldn\'t read the artifacts</string>
+    <string name="agent_surface_add_todo">Add a todo</string>
+    <string name="agent_surface_no_todos">Nothing here yet.</string>
+    <string name="agent_surface_todo_done">done</string>
+    <string name="agent_surface_empty_document">This document is empty.</string>
+    <string name="agent_surface_open_on_computer">Open this on your computer to use it.</string>
+    <string name="agent_surface_failed">Couldn\'t read this</string>
+
     <string name="agent_search_placeholder">Search conversations and settings</string>
     <string name="agent_search_clear">Clear</string>
     <string name="agent_search_conversations">Conversations</string>
     <string name="agent_search_actions">Quick actions</string>
-    <string name="agent_search_settings">Settings</string>
     <string name="agent_search_no_results">No results for “%1$s”</string>
-    <string name="agent_search_new_chat">New chat</string>
     <string name="agent_search_add">Add account or agent</string>
     <string name="agent_search_open_settings">Open settings</string>
 
-    <string name="agent_settings_status">Status</string>
     <string name="agent_settings_edit_name">Edit name</string>
     <string name="agent_settings_edit_avatar">Edit avatar</string>
     <!-- Typed into the Chief of Staff's composer, unsent; the trailing space is deliberate. -->
-    <string name="agent_settings_edit_name_prefix">"Change this agent connection\'s name to "</string>
-    <string name="agent_settings_edit_avatar_prefix">"Change this agent connection\'s avatar: "</string>
+    <string name="agent_settings_edit_name_prefix">"Change your name to "</string>
+    <string name="agent_settings_edit_avatar_prefix">"Change your avatar to "</string>
     <string name="agent_settings_profile_footer">Your Chief of Staff makes the change. Nothing is sent until you send it.</string>
     <string name="agent_settings_connect">Connect Agent</string>
     <string name="agent_settings_connected">Connected</string>

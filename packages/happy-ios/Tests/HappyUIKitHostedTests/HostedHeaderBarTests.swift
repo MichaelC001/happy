@@ -47,7 +47,7 @@ final class HostedHeaderBarTests: XCTestCase {
         Row(id: "space:\(index)", nodeId: "n\(index)", kind: .space, label: "Work item \(index)", mark: .glyph(index.isMultiple(of: 2) ? "tasks" : "agents"), agentId: "agent-\(index)", spaceId: "s\(index)")
     }
 
-    private func agentHome(style: UIUserInterfaceStyle) async throws -> (UIWindow, UINavigationController, AgentHomeViewController, SidebarView) {
+    private func agentHome(style: UIUserInterfaceStyle) async throws -> (UIWindow, UINavigationController, AgentHomeViewController, SidebarList) {
         let controller = AccountController(
             serverConfig: ServerConfig(storage: InMemoryKeyValueStore()),
             clientID: "ios/test",
@@ -75,8 +75,9 @@ final class HostedHeaderBarTests: XCTestCase {
         let window = hostedKeyWindow(in: scene, root: navigation)
         window.overrideUserInterfaceStyle = style
         window.layoutIfNeeded()
-        let sidebar = try XCTUnwrap(Self.subview(SidebarView.self, in: home.view) { $0.accessibilityIdentifier != "search-results-list" })
+        let sidebar = try XCTUnwrap(Self.subview(SidebarList.self, in: home.view))
         sidebar.apply(Self.rows)
+        await sidebar.settle()
         home.view.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(200))
         return (window, navigation, home, sidebar)
@@ -84,13 +85,13 @@ final class HostedHeaderBarTests: XCTestCase {
 
     private struct ListState: Equatable {
         var ids: [String]
-        var offset: CGPoint
+        var offset: CGFloat
         var inset: UIEdgeInsets
         var frame: CGRect
     }
 
-    private func state(_ sidebar: SidebarView) -> ListState {
-        ListState(ids: sidebar.rows.map(\.id), offset: sidebar.contentOffset, inset: sidebar.contentInset, frame: sidebar.frame)
+    private func state(_ sidebar: SidebarList) -> ListState {
+        ListState(ids: sidebar.rows.map(\.id), offset: sidebar.contentOffsetY, inset: sidebar.contentInsets, frame: sidebar.frame)
     }
 
     func testAgentHomeBarIsClearWithTheSwitcherAloneAtTheLeft() async throws {
@@ -118,7 +119,7 @@ final class HostedHeaderBarTests: XCTestCase {
             defer { window.isHidden = true }
             keep(window, "home-top-\(name)")
             // Mid-scroll: the case that moved before.
-            sidebar.contentOffset.y = 400
+            sidebar.setContentOffsetY(400)
             home.view.layoutIfNeeded()
             try await Task.sleep(for: .milliseconds(200))
             keep(window, "home-scrolled-\(name)")
@@ -157,8 +158,9 @@ final class HostedHeaderBarTests: XCTestCase {
             type("settings", into: home.search)
             try await Task.sleep(for: .milliseconds(200))
             let open = try XCTUnwrap(results.list.rows.first { $0.id == "search:actions:settings" })
-            let row = try XCTUnwrap(results.list.subviews.compactMap { $0 as? RowView }.first { $0.row?.id == open.id })
-            results.list.tap(row, at: CGPoint(x: row.frame.midX, y: row.frame.midY))
+            await results.list.settle()
+            let row = try XCTUnwrap(results.list.view(for: open.id))
+            results.list.tap(row, at: CGPoint(x: row.box.midX, y: row.box.midY))
             try await settle(navigation)
             XCTAssertTrue(navigation.topViewController is SettingsViewController)
             navigation.popViewController(animated: true)
@@ -182,25 +184,30 @@ final class HostedHeaderBarTests: XCTestCase {
         for (style, name) in [(UIUserInterfaceStyle.light, "light"), (.dark, "dark")] {
             let (window, navigation, home, sidebar) = try await agentHome(style: style)
             defer { window.isHidden = true }
-            let row = try XCTUnwrap(sidebar.subviews.compactMap { $0 as? RowView }.first { $0.row?.id == "space:1" })
-            sidebar.tap(row, at: CGPoint(x: row.frame.midX, y: row.frame.midY))
+            let row = try XCTUnwrap(sidebar.view(for: "space:1"))
+            sidebar.tap(row, at: CGPoint(x: row.box.midX, y: row.box.midY))
             try await settle(navigation)
             let chat = try XCTUnwrap(navigation.topViewController as? ChatViewController)
-            XCTAssertEqual(chat.navigationItem.rightBarButtonItems?.map(\.accessibilityIdentifier), ["chat-more", "compose"])
-            XCTAssertNil(chat.navigationItem.rightBarButtonItems?.first?.primaryAction, "UIKit owns the toolbar menu presentation")
-            XCTAssertNotNil(chat.navigationItem.rightBarButtonItems?.first?.menu)
-            let more = try XCTUnwrap(chat.navigationItem.rightBarButtonItems?.first?.image)
-            var pixels = [UInt8](repeating: 0, count: 32 * 32 * 4)
-            let drawn = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { _ in
-                more.withTintColor(.black, renderingMode: .alwaysOriginal).draw(in: CGRect(x: 0, y: 0, width: 32, height: 32))
-            }
-            let visible = try pixels.withUnsafeMutableBytes { bytes in
-                let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 32 * 4,
-                                                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-                context.draw(try XCTUnwrap(drawn.cgImage), in: CGRect(x: 0, y: 0, width: 32, height: 32))
-                return stride(from: 3, to: bytes.count, by: 4).contains { bytes[$0] > 0 }
-            }
-            XCTAssertTrue(visible, "the More glyph must draw visible pixels")
+            // Back, the name, and Compose alone: no More menu.
+            XCTAssertEqual(chat.navigationItem.rightBarButtonItems?.map(\.accessibilityIdentifier), ["compose"])
+            XCTAssertNil(chat.navigationItem.leftBarButtonItems, "Back alone at the left")
+            XCTAssertNotNil(chat.navigationItem.rightBarButtonItems?.first?.primaryAction, "Compose composes at a tap")
+            // The name and status sit on one capsule of the system's glass,
+            // the bar's 44 tall, inside the room the bar gave the title.
+            let header = try XCTUnwrap(chat.navigationItem.titleView as? ChatHeaderView)
+            XCTAssertTrue(header.capsule.effect is UIGlassEffect, "the title is on Liquid Glass, not a blur")
+            XCTAssertEqual(header.capsule.frame.height, ChatHeaderLayout.Metrics.height)
+            XCTAssertTrue(header.bounds.contains(header.capsule.frame), "the capsule runs past what the bar gave it")
+            // On the line of the bar's buttons, which sit at the top of its 54.
+            let capsule = header.capsule.convert(header.capsule.bounds, to: navigation.navigationBar)
+            XCTAssertEqual(capsule.midY, header.convert(header.bounds, to: navigation.navigationBar).midY, accuracy: 1, "the capsule is off the title's line")
+            XCTAssertTrue(navigation.navigationBar.bounds.contains(capsule), "the capsule leaves the bar")
+            XCTAssertGreaterThan(capsule.minX, 16 + 44, "the capsule runs under Back")
+            // "Work item 1" is short: the capsule is Telegram's minimum, on
+            // the bar's middle.
+            XCTAssertEqual(capsule.midX, navigation.navigationBar.bounds.midX, accuracy: 1, "a short title is off the bar's middle")
+            XCTAssertEqual(capsule.width, ChatHeaderLayout.Metrics.minContent + 2 * ChatHeaderLayout.Metrics.padding, "a short title's capsule isn't the minimum")
+            XCTAssertNotNil(Self.subview(UILabel.self, in: header.capsule.contentView) { $0.accessibilityIdentifier == "chat-status" }, "the status is on the glass")
             XCTAssertNil(chat.navigationItem.standardAppearance, "the bar's own, shared look")
             Self.assertClear(navigation.navigationBar)
             keep(window, "chat-\(name)")
@@ -285,7 +292,9 @@ final class HostedHeaderBarTests: XCTestCase {
         try await until { navigation.topViewController === chat && navigation.transitionCoordinator == nil }
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertTrue(chat.navigationItem.hidesBackButton, "a tablet's chat has no back button")
-        XCTAssertTrue(chat.navigationItem.rightBarButtonItems?.contains { $0.accessibilityIdentifier == "chat-more" } == true, "legacy permissions and details remain reachable from the header")
+        // Compose alone at the right, in every build: the permission mode is
+        // on the session's info, and no debug fixtures sit in the bar.
+        XCTAssertEqual(chat.navigationItem.rightBarButtonItems?.map(\.accessibilityIdentifier), ["compose"])
         XCTAssertEqual(chat.navigationItem.leftBarButtonItem?.customView?.accessibilityIdentifier, "account-switcher", "with a chat open the accounts are still reachable")
         keep(window, "tablet-chat")
 
@@ -329,8 +338,10 @@ final class HostedHeaderBarTests: XCTestCase {
         // The button draws the first active one, so the tick belongs there.
         let shown = try XCTUnwrap(accounts.first(where: \.isActive))
         XCTAssertEqual(ticked.first?.accessibilityIdentifier, "account-\(shown.id)")
-        // Every account is still offered, with Add and Manage Accounts.
-        XCTAssertEqual(actions.count, accounts.count + 2)
+        // Every account is still offered, with Add; Manage Accounts is
+        // gone (Settings' accounts card signs one out from its row).
+        XCTAssertEqual(actions.count, accounts.count + 1)
+        XCTAssertFalse(actions.contains { $0.accessibilityIdentifier == "account-manage" })
     }
 
     /// No ground, no blur, no line, the same scrolled as at the edge: the

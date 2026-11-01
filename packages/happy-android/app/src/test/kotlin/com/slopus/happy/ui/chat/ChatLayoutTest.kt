@@ -14,6 +14,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -40,6 +41,7 @@ import com.slopus.happy.ui.assertActionsLabelled
 import com.slopus.happy.ui.assertBox
 import com.slopus.happy.ui.assertDp
 import com.slopus.happy.ui.bounds
+import com.slopus.happy.ui.components.GlassBarTags
 import com.slopus.happy.ui.components.HeaderTags
 import com.slopus.happy.ui.hasRole
 import com.slopus.happy.ui.node
@@ -292,6 +294,27 @@ class ChatLayoutTest {
         val composer = rule.node(ComposerTags.COMPOSER).bounds
         val footer = rule.node(ChatListTags.FOOTER).bounds
         assertDp("8 under the footer", 8, composer.top - footer.bottom)
+    }
+
+    // The header is glass: the transcript runs the full height under it, as the agent chat's does.
+    @Test
+    fun transcriptRunsUnderTheGlassBar() {
+        val rows = (0 until 20).map { ChatReduction.buildRow(ChatMessage.AgentText("a$it", it.toLong(), "Reply $it"), true)!! }.asReversed()
+        rule.setHappyContent {
+            ChatScreen(
+                state = ChatState(ChatSnapshot(rows, loaded = true), session(), sessionLoaded = true, online = true),
+                draft = "",
+                bubbleColor = "gray",
+                actions = ChatScreenActions(),
+            )
+        }
+        val glass = rule.node(GlassBarTags.BAR).bounds
+        val list = rule.node(ChatListTags.LIST).bounds
+        assertDp("the bar is the 64 header", 64, glass.bottom - glass.top)
+        assertDp("the list starts at the top of the screen", 0, list.top)
+        val agents = rule.onAllNodesWithTag(MessageTags.AGENT, useUnmergedTree = true)
+        val under = (0 until agents.fetchSemanticsNodes().size).any { agents[it].getUnclippedBoundsInRoot().top < glass.bottom }
+        assertTrue("a row lies under the bar", under)
     }
 
     /**

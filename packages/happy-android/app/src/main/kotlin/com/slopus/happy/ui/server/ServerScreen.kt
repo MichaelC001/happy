@@ -36,7 +36,6 @@ import com.slopus.happy.ui.components.RoundButtonDisplay
 import com.slopus.happy.ui.components.RoundButtonSize
 import com.slopus.happy.ui.components.Screen
 import com.slopus.happy.ui.components.StackHeader
-import com.slopus.happy.ui.components.TitleAlignment
 import com.slopus.happy.ui.theme.HappyTheme
 import com.slopus.happy.ui.theme.AppMono
 import com.slopus.happy.ui.theme.happyTextStyle
@@ -165,7 +164,7 @@ fun ServerScreen(
         )
     }
 
-    Screen(header = { StackHeader(stringResource(R.string.server_title), onBack, TitleAlignment.Center) }, avoidKeyboard = true) {
+    Screen(header = { StackHeader(stringResource(R.string.server_title), onBack) }, avoidKeyboard = true) {
         ItemList {
             ItemGroup(footer = stringResource(R.string.server_self_host_footer)) {
                 Column(

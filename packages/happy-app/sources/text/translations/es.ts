@@ -950,6 +950,7 @@ export const es: TranslationStructure = {
         sending: 'Sending…',
         sendFailed: ({ reason }: { reason: string }) => `No enviado: ${reason}`,
         unknownTime: 'tiempo desconocido',
+        mediaPosition: ({ index, total }: { index: number; total: number }) => `${index} de ${total}`,
     },
 
     codex: {
@@ -1107,6 +1108,17 @@ export const es: TranslationStructure = {
         friendRequestGeneric: 'Nueva solicitud de amistad',
         friendAccepted: ({ name }: { name: string }) => `Ahora eres amigo de ${name}`,
         friendAcceptedGeneric: 'Solicitud de amistad aceptada',
+    },
+
+    // What new work will be, in the middle of its empty chat (the native apps' compose).
+    newWork: {
+        task: 'Tarea',
+        bot: 'Bot',
+        name: 'Nombre (opcional)',
+        taskNote: 'Una tarea toma su nombre de su primer mensaje, salvo que le pongas uno.',
+        botNote: 'Un bot es una conversación duradera con su propia carpeta.',
+        taskFailed: ({ reason }: { reason: string }) => `No se pudo iniciar la tarea. ${reason} Tu texto y tus adjuntos siguen aquí.`,
+        botFailed: ({ reason }: { reason: string }) => `No se pudo iniciar el bot. ${reason} Tu texto y tus adjuntos siguen aquí.`,
     },
 
 } as const;

@@ -23,6 +23,10 @@ public final class GymFrameMeter: NSObject {
         guard ProcessInfo.processInfo.environment["HAPPY_GYM_METER"] == "1", shared == nil else { return }
         let meter = GymFrameMeter(window: window)
         shared = meter
+        // `-avatar-fps N` (`gym.py run --avatar-fps`): live avatars at N
+        // frames a second, to cost another rate.
+        let fps = UserDefaults.standard.float(forKey: "avatar-fps")
+        if fps > 0 { AvatarShaderRenderer.framesPerSecond = fps }
     }
 
     private(set) static var shared: GymFrameMeter?
@@ -207,6 +211,7 @@ public final class GymFrameMeter: NSObject {
         started = CACurrentMediaTime()
         peakFootprint = Self.footprint()
         scriptPoints = 0
+        AvatarShaderRenderer.shared?.resetCost()
     }
 
     /// `key=value` pairs, milliseconds unless named otherwise.
@@ -265,6 +270,17 @@ public final class GymFrameMeter: NSObject {
             ("peakMB", String(format: "%.1f", peakFootprint)),
         ]
         var extra: [(String, String)] = [("scripting", script == nil ? "0" : "1")]
+        // The live avatars (Animated Avatars): frames
+        // drawn, the GPU's time on each and the main thread's encoding it.
+        if let cost = AvatarShaderRenderer.shared?.cost {
+            extra += [
+                ("shaderFrames", "\(cost.ticks)"),
+                ("shaderGpuMean", String(format: "%.3f", cost.gpuMean * 1000)),
+                ("shaderGpuMax", String(format: "%.3f", cost.gpuMax * 1000)),
+                ("shaderCpuMean", String(format: "%.3f", cost.cpuMean * 1000)),
+                ("shaderCpuMax", String(format: "%.3f", cost.cpuMax * 1000)),
+            ]
+        }
         if let window = button.window, let transcript = Self.find("transcript", in: window) {
             let counted = Self.count(transcript)
             extra += [("views", "\(counted.views)"), ("layers", "\(counted.layers)")]

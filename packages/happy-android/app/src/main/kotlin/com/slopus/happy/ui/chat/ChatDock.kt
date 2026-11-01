@@ -17,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,12 +31,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import com.slopus.happy.chat.ChatSessionInfo
 import com.slopus.happy.chat.ChatState
 import com.slopus.happy.chat.ComposerModes
 import com.slopus.happy.model.SessionState
 import com.slopus.happy.sync.rigCanAbort
+import com.slopus.happy.attachments.AttachAccepts
 import com.slopus.happy.ui.attachments.ComposerAddImageButton
+import com.slopus.happy.ui.attachments.canUseAttachments
 import com.slopus.happy.ui.attachments.ComposerAttachmentStrip
 import com.slopus.happy.ui.attachments.hasComposerImages
 import com.slopus.happy.ui.autocomplete.ComposerSuggestions
@@ -94,6 +98,7 @@ internal fun ChatDock(
     onPanelPositioned: ((LayoutCoordinates) -> Unit)?,
     modifier: Modifier,
     composerModifier: Modifier,
+    autoFocus: Boolean = false,
 ) {
     Column(modifier.testTag(ChatScreenTags.DOCK).fillMaxWidth()) {
         if (inactiveHint != null) {
@@ -107,8 +112,9 @@ internal fun ChatDock(
                 AgentQuestionBanner(state.pendingCommunications, actions.onAnswerQuestion, actions.onCancelQuestion)
             }
         }
-        if (activityBar != null) AnimatedFade(showDetails) { activityBar() }
-        ChatComposerFor(state, session, draft, actions, now, modes, showDetails, onPanelPositioned, composerModifier)
+        // On the column with no inset of its own: the bar keeps its 16, on the messages' keyline.
+        if (activityBar != null) AnimatedFade(showDetails) { CenteredInputWidth(horizontalPadding = 0.dp) { activityBar() } }
+        ChatComposerFor(state, session, draft, actions, now, modes, showDetails, onPanelPositioned, composerModifier, autoFocus)
     }
 }
 
@@ -131,9 +137,12 @@ private fun ChatComposerFor(
     showDetails: Boolean,
     onPanelPositioned: ((LayoutCoordinates) -> Unit)?,
     modifier: Modifier,
+    autoFocus: Boolean,
 ) {
     val sessionState = state.sessionState
     val metadata = session.metadata
+    val latestDraft by rememberUpdatedState(draft)
+    val latestSend by rememberUpdatedState(actions.onSend)
     val showAbort = showsAbort(sessionState)
     var aborting by remember { mutableStateOf(false) }
     // A local acknowledgement: the status update can trail the abort RPC.
@@ -180,7 +189,9 @@ private fun ChatComposerFor(
     ChatComposer(
         text = draft,
         onTextChange = actions.onDraftChange,
-        status = rememberComposerStatus(sessionState, state.activeAt, now),
+        // A chat with no session yet (being started) has no status to tell.
+        status = if (state.session != null) rememberComposerStatus(sessionState, state.activeAt, now) else null,
+        autoFocus = autoFocus,
         primary = primary,
         aborting = aborting,
         onPrimary = {
@@ -205,7 +216,12 @@ private fun ChatComposerFor(
         middle = {
             // [+] [... model · effort]: permissions live in the header overflow.
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(ComposerSpec.actionRowGap)) {
-                ComposerAddImageButton()
+                ComposerAddImageButton(
+                    accepts = if (state.session == null) AttachAccepts.RelayPictures else AttachAccepts.relay(metadata, canUseAttachments(metadata)),
+                    caption = draft,
+                    onCaptionChange = actions.onDraftChange,
+                    onSend = { latestSend(latestDraft) },
+                )
                 ComposerModeChips(modes, metadata, actions.onModeChange, Modifier.weight(1f))
             }
         },

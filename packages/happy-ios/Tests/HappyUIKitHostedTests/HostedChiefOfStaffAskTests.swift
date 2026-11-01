@@ -69,7 +69,7 @@ final class HostedChiefOfStaffAskTests: XCTestCase {
         try await until { warm.chat.snapshot.loaded }
         let ask = ChatPrefill.agentName
         let expected = ask.applied(to: existing?.text ?? "").text
-        let chat = ChatViewController(session: session, agentId: Self.agentId, title: "Happy", spaceId: nil, seedling: nil, prefill: ask)
+        let chat = ChatViewController(session: session, agentId: Self.agentId, title: "Happy", spaceId: nil, intro: nil, prefill: ask)
         let navigation = UINavigationController(rootViewController: chat)
         let scene = try await hostedActiveScene()
         let window = hostedKeyWindow(in: scene, root: navigation)

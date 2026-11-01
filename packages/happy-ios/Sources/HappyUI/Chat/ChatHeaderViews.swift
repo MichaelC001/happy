@@ -20,7 +20,8 @@ import UIKit
 /// capsule keeps RN's 44 and cuts text taller than that, as
 /// `mobileTitlePillGlass`'s `overflow: 'hidden'` does.
 final class ChatHeaderTitleView: UIControl {
-    private let glass = HeaderGlassView()
+    /// The system's Liquid Glass, as the bar's own buttons beside it.
+    private let glass = GlassCapsuleView()
     /// The capsule's inside, cut to its shape.
     private let content = UIView()
     private let title = ChatTextView()
@@ -60,7 +61,7 @@ final class ChatHeaderTitleView: UIControl {
         addSubview(glass)
         content.isUserInteractionEnabled = false
         content.clipsToBounds = true
-        glass.addSubview(content)
+        glass.contentView.addSubview(content)
         for view in [title, subtitle] {
             view.isAccessibilityElement = false
             content.addSubview(view)
@@ -68,6 +69,7 @@ final class ChatHeaderTitleView: UIControl {
         content.addSubview(changes)
         isAccessibilityElement = true
         accessibilityTraits = [.button, .header]
+        accessibilityIdentifier = "chat-title"
         measure.onApply = { [weak self] in self?.planned() }
         registerForTraitChanges(UIView.textSizeTraits + [UITraitDisplayScale.self]) { (self: Self, _) in
             self.requestPlan()
@@ -188,8 +190,10 @@ final class ChatHeaderTitleView: UIControl {
         super.point(inside: point, with: event) || (!glass.isHidden && glass.frame.contains(point))
     }
 
+    /// The text dims, never the glass: a visual effect view's alpha
+    /// turns its material off.
     override var isHighlighted: Bool {
-        didSet { glass.alpha = isHighlighted ? 0.68 : 1 }
+        didSet { content.alpha = isHighlighted ? 0.68 : 1 }
     }
 }
 
@@ -568,7 +572,7 @@ final class ChatPlaceholderView: UIView {
     let pagingSpinner = UIActivityIndicatorView(style: .medium)
     private let icon = IconView(size: 72, tint: Palette.textSecondary)
     /// PendingChatPlaceholder's "Starting a new chat…".
-    private let shimmer = LegacyShimmerLabel(style: TextStyles.pendingChatTitle)
+    private let shimmer = ShimmerLabel(style: TextStyles.pendingChatTitle)
     /// The lines' views, reused from plan to plan.
     private var texts: [ChatTextView] = []
     private var model: ChatPlaceholderModel?
@@ -582,6 +586,8 @@ final class ChatPlaceholderView: UIView {
         icon.isHidden = true
         addSubview(icon)
         shimmer.isHidden = true
+        // A chat not there yet: dimmed letters under a full-strength band.
+        shimmer.sweep = .lift
         addSubview(shimmer)
         button.isHidden = true
         button.onTap = { [weak self] in self?.onAction?() }
@@ -630,7 +636,7 @@ final class ChatPlaceholderView: UIView {
             icon.setLayoutFrame(frame)
         }
         shimmer.isHidden = frames.title == nil
-        shimmer.isShimmering = frames.title != nil
+        shimmer.shimmering = frames.title != nil
         if let frame = frames.title, let title = model.title {
             if shimmer.string != title { shimmer.string = title }
             shimmer.setLayoutFrame(frame)

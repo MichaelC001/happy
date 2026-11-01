@@ -7,7 +7,7 @@ import CoreGraphics
 /// the navigation bar, scrolling, the profiles as a
 /// strip of circles, the chosen one's name and line, and grouped cards.
 ///
-/// The profiles as story circles: the chosen one centred, larger and
+/// The profiles as circles: the chosen one centred, larger and
 /// ringed, the others smaller either side; each grows as it nears the
 /// middle, so a drag scales them continuously and a stop snaps to one.
 public enum ProfileCarousel {
@@ -94,6 +94,17 @@ public struct SettingsLayout: Equatable, Sendable {
         /// Searching with nothing found: the line, under the bar.
         public static let emptyTop: CGFloat = 32
         public static let emptyHeight: CGFloat = 24
+        /// A card's footer: under it by this, inset from its sides by this.
+        public static let footerGap: CGFloat = 8
+        public static let footerInset: CGFloat = 16
+        /// A text row (a key, a long line): its text this far from the
+        /// row's top and bottom.
+        public static let textPadding: CGFloat = 14
+        /// A row with a quieter line under its title (a path, an ID):
+        /// taller, its title this far from its top, the line under it.
+        public static let subtitledRow: CGFloat = 62
+        public static let subtitledTitleTop: CGFloat = 10
+        public static let subtitleHeight: CGFloat = 18
     }
 
     public enum Accessory: Equatable, Sendable {
@@ -107,10 +118,17 @@ public struct SettingsLayout: Equatable, Sendable {
         /// The value's width before the chevron or at the end, if any.
         public var valueWidth: CGFloat?
         public var accessory: Accessory
-        public init(hasIcon: Bool, valueWidth: CGFloat? = nil, accessory: Accessory) {
+        /// A text row's measured text, at `SettingsLayout.textWidth`: the
+        /// row grows to hold it, its title the whole width.
+        public var textHeight: CGFloat?
+        /// A quieter line under the title.
+        public var subtitle: Bool
+        public init(hasIcon: Bool, valueWidth: CGFloat? = nil, accessory: Accessory, textHeight: CGFloat? = nil, subtitle: Bool = false) {
             self.hasIcon = hasIcon
             self.valueWidth = valueWidth
             self.accessory = accessory
+            self.textHeight = textHeight
+            self.subtitle = subtitle
         }
     }
 
@@ -124,16 +142,21 @@ public struct SettingsLayout: Equatable, Sendable {
         public var toggle: CGRect?
         /// Under the row, from the title's start; nil under a card's last row.
         public var separator: CGRect?
+        /// The quieter line under the title, for a row that has one.
+        public var subtitle: CGRect? = nil
     }
 
     public struct Card: Equatable, Sendable {
         public var frame: CGRect
         public var rows: [Row]
+        /// The line under the card that says what it is for, in the
+        /// page's space.
+        public var footer: CGRect?
     }
 
     public var strip: CGRect
-    /// The agent's own picture over its name, on a connection's page;
-    /// zero without one, or while searching.
+    /// The profile's picture over its name, on either kind of page; zero
+    /// without one, or while searching.
     public var picture: CGRect
     public var name: CGRect
     public var subtitle: CGRect
@@ -146,8 +169,9 @@ public struct SettingsLayout: Equatable, Sendable {
     /// into the strip's place. Without a strip (the accounts are a card
     /// among the others, not a row of circles) the name starts where the
     /// strip would have, and nothing else moves. A `picture` (its side)
-    /// is centred there instead, the name under it.
-    public init(width: CGFloat, nameHeight: CGFloat, subtitleHeight: CGFloat, cards specs: [[RowSpec]], searching: Bool = false, showsStrip: Bool = true, picture side: CGFloat? = nil) {
+    /// is centred there instead, the name under it. `footers` are the
+    /// measured heights of the cards' footers, at `footerWidth`, by card.
+    public init(width: CGFloat, nameHeight: CGFloat, subtitleHeight: CGFloat, cards specs: [[RowSpec]], footers: [CGFloat?] = [], searching: Bool = false, showsStrip: Bool = true, picture side: CGFloat? = nil) {
         typealias M = Metrics
         strip = showsStrip ? CGRect(x: 0, y: M.stripTop, width: width, height: ProfileCarousel.Metrics.height) : .zero
         picture = !showsStrip && !searching ? side.map { CGRect(x: ((width - $0) / 2).rounded(), y: M.stripTop, width: $0, height: $0) } ?? .zero : .zero
@@ -159,16 +183,25 @@ public struct SettingsLayout: Equatable, Sendable {
         var y = searching ? M.stripTop : subtitle.maxY + M.cardsTop
         empty = CGRect(x: 0, y: M.stripTop + M.emptyTop, width: width, height: M.emptyHeight)
         var cards: [Card] = []
-        for spec in specs where !spec.isEmpty {
+        var bottom = searching ? M.stripTop : subtitle.maxY
+        for (index, spec) in specs.enumerated() where !spec.isEmpty {
             var rows: [Row] = []
+            var rowY: CGFloat = 0
             for (index, row) in spec.enumerated() {
-                rows.append(Self.row(row, y: CGFloat(index) * M.row, width: cardWidth, last: index == spec.count - 1))
+                rows.append(Self.row(row, y: rowY, width: cardWidth, last: index == spec.count - 1))
+                rowY += rows[index].box.height
             }
-            cards.append(Card(frame: CGRect(x: M.side, y: y, width: cardWidth, height: CGFloat(spec.count) * M.row), rows: rows))
-            y += CGFloat(spec.count) * M.row + M.cardGap
+            let frame = CGRect(x: M.side, y: y, width: cardWidth, height: rowY)
+            var footer: CGRect?
+            if footers.indices.contains(index), let height = footers[index], height > 0 {
+                footer = CGRect(x: M.side + M.footerInset, y: frame.maxY + M.footerGap, width: Self.footerWidth(width), height: height)
+            }
+            cards.append(Card(frame: frame, rows: rows, footer: footer))
+            bottom = footer?.maxY ?? frame.maxY
+            y = bottom + M.cardGap
         }
         self.cards = cards
-        contentHeight = (cards.last.map { $0.frame.maxY } ?? (searching ? M.stripTop : subtitle.maxY)) + M.bottom
+        contentHeight = bottom + M.bottom
     }
 
     /// Where the page scrolls to show a row home's search found: its card's
@@ -184,18 +217,51 @@ public struct SettingsLayout: Equatable, Sendable {
         return min(bottom, max(top, (middle - insets.top - shown / 2).rounded()))
     }
 
+    /// Where the page rests after it changes under `offset` (another
+    /// profile's rows, dissolved in place): where it was, unless this page
+    /// ends sooner, then at its end; never above its top.
+    public func keptOffset(_ offset: CGFloat, viewport: CGFloat, insets: LayoutInsets) -> CGFloat {
+        let top = -insets.top
+        let bottom = max(top, contentHeight + insets.bottom - viewport)
+        return min(bottom, max(top, offset))
+    }
+
+    /// The width a card's footer is measured at.
+    public static func footerWidth(_ width: CGFloat) -> CGFloat {
+        max(0, width - 2 * Metrics.side - 2 * Metrics.footerInset)
+    }
+
+    /// The width a text row's text is measured at.
+    public static func textWidth(_ width: CGFloat) -> CGFloat {
+        max(0, width - 2 * Metrics.side - Metrics.plainTextX - Metrics.trailing)
+    }
+
     static func row(_ spec: RowSpec, y: CGFloat, width: CGFloat, last: Bool) -> Row {
         typealias M = Metrics
+        if let height = spec.textHeight {
+            // A block of text the card's width, plain, nothing beside it.
+            let box = max(M.row, height + 2 * M.textPadding)
+            return Row(
+                box: CGRect(x: 0, y: y, width: width, height: box),
+                icon: nil,
+                title: CGRect(x: M.plainTextX, y: y + (box - height) / 2, width: max(0, width - M.plainTextX - M.trailing), height: height),
+                value: nil,
+                chevron: nil,
+                toggle: nil,
+                separator: last ? nil : CGRect(x: M.plainTextX, y: y + box - M.separator, width: width - M.plainTextX, height: M.separator)
+            )
+        }
         let textX = spec.hasIcon ? M.textX : M.plainTextX
+        let height = spec.subtitle ? M.subtitledRow : M.row
         var right = width - M.trailing
         var chevron: CGRect?
         var toggle: CGRect?
         switch spec.accessory {
         case .chevron:
-            chevron = CGRect(x: right - M.chevron.width, y: y + (M.row - M.chevron.height) / 2, width: M.chevron.width, height: M.chevron.height)
+            chevron = CGRect(x: right - M.chevron.width, y: y + (height - M.chevron.height) / 2, width: M.chevron.width, height: M.chevron.height)
             right -= M.chevron.width + M.valueGap
         case .toggle:
-            toggle = CGRect(x: right - M.toggle.width, y: y + (M.row - M.toggle.height) / 2, width: M.toggle.width, height: M.toggle.height)
+            toggle = CGRect(x: right - M.toggle.width, y: y + (height - M.toggle.height) / 2, width: M.toggle.width, height: M.toggle.height)
             right -= M.toggle.width + M.valueGap
         case .none:
             break
@@ -203,17 +269,21 @@ public struct SettingsLayout: Equatable, Sendable {
         var value: CGRect?
         if let valueWidth = spec.valueWidth {
             let fitted = min(valueWidth.rounded(.up), max(0, (right - textX) / 2))
-            value = CGRect(x: right - fitted, y: y + (M.row - M.titleHeight) / 2, width: fitted, height: M.titleHeight)
+            value = CGRect(x: right - fitted, y: y + (height - M.titleHeight) / 2, width: fitted, height: M.titleHeight)
             right -= fitted + M.valueGap
         }
+        // A subtitled row's title sits over its line; a plain one's in the middle.
+        let titleY = spec.subtitle ? y + M.subtitledTitleTop : y + (height - M.titleHeight) / 2
+        let title = CGRect(x: textX, y: titleY, width: max(0, right - textX), height: M.titleHeight)
         return Row(
-            box: CGRect(x: 0, y: y, width: width, height: M.row),
-            icon: spec.hasIcon ? CGRect(x: (M.textX - M.tile) / 2, y: y + (M.row - M.tile) / 2, width: M.tile, height: M.tile) : nil,
-            title: CGRect(x: textX, y: y + (M.row - M.titleHeight) / 2, width: max(0, right - textX), height: M.titleHeight),
+            box: CGRect(x: 0, y: y, width: width, height: height),
+            icon: spec.hasIcon ? CGRect(x: (M.textX - M.tile) / 2, y: y + (height - M.tile) / 2, width: M.tile, height: M.tile) : nil,
+            title: title,
             value: value,
             chevron: chevron,
             toggle: toggle,
-            separator: last ? nil : CGRect(x: textX, y: y + M.row - M.separator, width: width - textX, height: M.separator)
+            separator: last ? nil : CGRect(x: textX, y: y + height - M.separator, width: width - textX, height: M.separator),
+            subtitle: spec.subtitle ? CGRect(x: textX, y: title.maxY, width: title.width, height: M.subtitleHeight) : nil
         )
     }
 }

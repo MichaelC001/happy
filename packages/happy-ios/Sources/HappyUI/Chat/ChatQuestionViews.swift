@@ -198,7 +198,11 @@ final class AgentQuestionSheetController: UIViewController, UITextViewDelegate {
     private let footerDivider = UIView()
     private let submitButton = UIControl()
     private let submitLabel = ChatLabel(MeasuredText(ChatTextStyles.sheetSubmit.string(Strings.AgentQuestion.submit, color: Palette.onAccent), maxLines: 1))
-    private let spinner = UIActivityIndicatorView(style: .medium)
+    /// While the answer goes, "Submit" stays and carries the shimmer, as
+    /// desktop's does (`HappyAgentUserInputPrompt`: lift, inherit): its
+    /// letters dimmed toward the button, a full-strength band through them.
+    private let submitCopy = ChatLabel(MeasuredText(ChatTextStyles.sheetSubmit.string(Strings.AgentQuestion.submit, color: Palette.onAccent), maxLines: 1))
+    private lazy var submitBand = ShimmerBand(copy: submitCopy.view)
     private let errorLabel = ChatLabel(MeasuredText(NSAttributedString()))
     private let keyboardTracker = UIView()
     private var blocks: [QuestionBlock] = []
@@ -339,13 +343,12 @@ final class AgentQuestionSheetController: UIViewController, UITextViewDelegate {
         submitButton.isAccessibilityElement = true
         submitButton.addTarget(self, action: #selector(submitTapped), for: .touchUpInside)
         submitLabel.view.isUserInteractionEnabled = false
-        spinner.color = UIColor(Palette.onAccent)
-        spinner.hidesWhenStopped = true
         view.addSubview(footer)
         footer.addSubview(footerDivider)
         footer.addSubview(submitButton)
         submitButton.addSubview(submitLabel.view)
-        submitButton.addSubview(spinner)
+        submitButton.addSubview(submitBand)
+        submitBand.onClockChange = { [weak self] in self?.applySubmitInk() }
 
         keyboardTracker.isHidden = true
         keyboardTracker.isUserInteractionEnabled = false
@@ -395,9 +398,10 @@ final class AgentQuestionSheetController: UIViewController, UITextViewDelegate {
         errorLabel.view.isHidden = errorText == nil
         let ready = AgentCommunications.canSubmit(questions, drafts: drafts)
         submitButton.isEnabled = ready && !submitting
-        submitButton.alpha = ready && !submitting ? 1 : 0.4
-        submitLabel.view.isHidden = submitting
-        if submitting { spinner.startAnimating() } else { spinner.stopAnimating() }
+        // Busy, the shimmer says so at full contrast.
+        submitButton.alpha = ready || submitting ? 1 : 0.4
+        submitBand.shimmering = submitting
+        applySubmitInk()
         cancelButton.isEnabled = !submitting
         view.setNeedsLayout()
     }
@@ -460,7 +464,18 @@ final class AgentQuestionSheetController: UIViewController, UITextViewDelegate {
         let submit = layout.submit.offsetBy(dx: 0, dy: -layout.footer.minY)
         submitButton.setLayoutFrame(submit)
         submitLabel.place(layout.submitLabel.offsetBy(dx: -layout.submit.minX, dy: -layout.submit.minY))
-        spinner.center = CGPoint(x: submit.width / 2, y: submit.height / 2)
+        let label = submitLabel.view.frame
+        submitBand.frame = label
+        submitBand.run = CGRect(origin: .zero, size: label.size)
+        submitCopy.place(CGRect(origin: .zero, size: label.size))
+    }
+
+    /// "Submit" at rest: dimmed while its band can run, else its own ink.
+    private func applySubmitInk() {
+        let dimmed = submitting && !ShimmerClock.shared.reducesMotion
+        let ink = dimmed ? Shimmer.rest(.lift, ink: Palette.onAccent, ground: Palette.textLink) : Palette.onAccent
+        submitLabel.update(MeasuredText(ChatTextStyles.sheetSubmit.string(Strings.AgentQuestion.submit, color: ink), maxLines: 1))
+        view.setNeedsLayout()
     }
 
     // MARK: Actions

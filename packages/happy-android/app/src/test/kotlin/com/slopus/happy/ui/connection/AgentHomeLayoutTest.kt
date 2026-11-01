@@ -1,17 +1,21 @@
 package com.slopus.happy.ui.connection
 
+import com.slopus.happy.ui.settings.SettingsTags
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -20,11 +24,16 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.slopus.happy.agent.AgentCatalog
 import com.slopus.happy.agent.AgentClient
 import com.slopus.happy.agent.AgentFeed
+import com.slopus.happy.agent.AgentFeedRow
 import com.slopus.happy.agent.AgentLinkStatus
+import com.slopus.happy.agent.AgentPictures
+import com.slopus.happy.ui.components.avatar.AvatarPlaceholder
+import com.slopus.happy.ui.components.avatar.PlaceholderIndexKey
 import com.slopus.happy.agent.Wire
 import com.slopus.happy.agent.WireDesktopBootstrap
 import com.slopus.happy.ui.PHONE
@@ -32,6 +41,7 @@ import com.slopus.happy.ui.assertBox
 import com.slopus.happy.ui.assertDp
 import com.slopus.happy.ui.bounds
 import androidx.compose.ui.unit.height
+import androidx.compose.ui.unit.width
 import com.slopus.happy.ui.home.AccountMenu
 import com.slopus.happy.ui.home.AccountMenuEntry
 import com.slopus.happy.ui.home.AccountMenuTags
@@ -58,13 +68,18 @@ class AgentHomeLayoutTest {
     private val opened = mutableListOf<String>()
     private var composed = 0
     private var settings = 0
+    private val settingsRows = mutableListOf<AgentSettingsRow>()
+    private var artifacts = 0
+    private val surfaces = mutableListOf<AgentFeedRow.Surface>()
     private val actions = AgentHomeActions(
         onOpenConversation = { opened += it },
         onCompose = { composed++ },
         onSettings = { settings++ },
-        onAppearance = {},
+        onSettingsRow = { settingsRows += it },
         onSwitchAccount = {},
         onAdd = {},
+        onOpenArtifacts = { artifacts++ },
+        onOpenSurface = { surfaces += it },
     )
     private val accounts = AccountMenu(listOf(AccountMenuEntry("agent-connection-1", "Studio", agent = true, active = true)))
 
@@ -74,8 +89,13 @@ class AgentHomeLayoutTest {
         fun catalog(bootstrap: JsonObject) =
             AgentCatalog().withBootstrap(AgentClient.json.decodeFromJsonElement(WireDesktopBootstrap.serializer(), bootstrap))
 
-        /** A fixture: a bot with a subtask, three tasks, and a project with a worktree. */
+        /** A fixture: two Surfaces, a bot with a subtask, three tasks, and a project with a worktree. */
         val sample = Wire.bootstrap(
+            surfaces = listOf(
+                Wire.surface("s2", "Groceries", "todo", mapOf(Wire.USER to "2")),
+                Wire.surface("s1", "Launch plan", "document", mapOf(Wire.USER to "1")),
+                Wire.surface("s3", "Someone else's", "todo", mapOf("u2" to "1")),
+            ),
             bots = listOf(
                 Wire.bot("b1", "Happy", Wire.agent("ab1", updatedAt = NOW - 20 * 60_000, subtasks = listOf(Wire.agent("as1", title = "Review the PR", subtask = true, parent = "ab1", updatedAt = NOW - 5 * 60_000)))),
                 Wire.bot("b2", "Research", Wire.agent("ab2", updatedAt = NOW - 3 * 3_600_000), orderKey = "2"),
@@ -99,23 +119,27 @@ class AgentHomeLayoutTest {
     private fun feed(bootstrap: JsonObject = sample) = AgentFeed.derive(catalog(bootstrap))
 
     private fun show(feed: AgentFeed, status: AgentLinkStatus = AgentLinkStatus.Connected, dark: Boolean = false) =
-        rule.setHappyContent(dark) { AgentHomeScreen("Studio", feed, status, accounts, actions, now = 1_755_400_000_000L) }
+        rule.setHappyContent(dark) { AgentHomeScreen("Studio", feed, status, accounts, actions) }
 
     @Test
-    fun rowsHaveTheirKindsHeightAndNoComposer() {
+    fun rowsHaveTheirHeightAndNoComposer() {
         show(feed())
-        val section = rule.node(AgentHomeTags.row("section-bots")).bounds
-        assertDp("section height", 46, section.height)
+        val top = rule.node(AgentHomeTags.row("section-places")).bounds
+        assertDp("room above the first card", 8, top.height)
+        assertBox("artifacts row", rule.node(AgentHomeTags.row("artifacts")).bounds, 0.dp, top.bottom, 411.dp, 48.dp)
+        val bots = rule.node(AgentHomeTags.row("section-bots")).bounds
+        assertDp("the bots' card 24 after", 24, bots.height)
         val bot = rule.node(AgentHomeTags.row("agent-ab1")).bounds
-        assertBox("bot row", bot, 0.dp, section.bottom, 411.dp, 60.dp)
+        assertBox("bot row", bot, 0.dp, bots.bottom, 411.dp, 48.dp)
         rule.node(AgentHomeTags.row("agent-at1")).assertExists()
-        assertDp("task row height", 60, rule.node(AgentHomeTags.row("agent-at1")).bounds.height)
+        assertDp("task row height", 48, rule.node(AgentHomeTags.row("agent-at1")).bounds.height)
+        assertDp("folder row height", 48, rule.node(AgentHomeTags.row("folder-p1")).bounds.height)
         // No text field anywhere on home.
         rule.onAllNodesWithTag(AgentSearchTags.FIELD, useUnmergedTree = true).assertCountEquals(0)
     }
 
     @Test
-    fun theTopBarHasTheMenuAndNameLeftAndSearchSettingsComposeRight() {
+    fun theTopBarHasTheMenuAndNameLeftAndSearchSettingsRightAndComposeFloatsBottomEnd() {
         show(feed())
         val bar = rule.node(AgentHomeTags.BAR).bounds
         val menu = rule.node(AccountMenuTags.BUTTON).bounds
@@ -123,17 +147,27 @@ class AgentHomeLayoutTest {
         rule.onNodeWithTag(AgentHomeTags.BAR, useUnmergedTree = true).assertExists()
         val search = rule.node(AgentHomeTags.SEARCH).bounds
         val settingsButton = rule.node(AgentHomeTags.SETTINGS).bounds
-        val compose = rule.node(AgentHomeTags.COMPOSE).bounds
-        assertTrue(search.right <= settingsButton.left + 0.5.dp && settingsButton.right <= compose.left + 0.5.dp)
+        assertTrue(search.right <= settingsButton.left + 0.5.dp)
+        // The bar's outer glyphs stand on the rows' content inside the cards, 32 in: the avatar's left, settings' 24 glyph's right.
+        assertDp("the account avatar 32 in, on the rows' marks", 32, (menu.left + menu.right) / 2 - 16.dp)
+        assertDp("the settings glyph ends 32 in, where the rows' content does", bar.right - 32.dp, (settingsButton.left + settingsButton.right) / 2 + 12.dp)
         // Every bar control takes a full 48 touch (Compose widens a smaller one's), and is drawn whole inside the bar.
-        val tags = mapOf("menu" to AccountMenuTags.BUTTON, "search" to AgentHomeTags.SEARCH, "settings" to AgentHomeTags.SETTINGS, "compose" to AgentHomeTags.COMPOSE)
-        for ((label, rect) in listOf("menu" to menu, "search" to search, "settings" to settingsButton, "compose" to compose)) {
+        val tags = mapOf("menu" to AccountMenuTags.BUTTON, "search" to AgentHomeTags.SEARCH, "settings" to AgentHomeTags.SETTINGS)
+        for ((label, rect) in listOf("menu" to menu, "search" to search, "settings" to settingsButton)) {
             val touch = rule.node(tags.getValue(label)).fetchSemanticsNode().touchBoundsInRoot
             val density = rule.density.density
             assertTrue("$label takes a 48 touch: $touch", touch.width / density >= 47.5f && touch.height / density >= 47.5f)
             assertTrue("$label is inside the bar", rect.left >= bar.left && rect.right <= bar.right && rect.top >= bar.top - 0.5.dp && rect.bottom <= bar.bottom + 0.5.dp)
         }
-        assertTrue("compose ends at the bar's end inset", bar.right - compose.right <= 16.dp)
+        // The title is the smaller bar title, not the 22sp headline.
+        assertDp("title line", with(rule.density) { AgentHomeSpec.barTitle.lineHeight.toDp() }, rule.node(AgentHomeTags.TITLE).bounds.height)
+        // Compose is a floating button, 16 in from the bottom end of the page.
+        val compose = rule.node(AgentHomeTags.COMPOSE).bounds
+        val list = rule.node(AgentHomeTags.LIST).bounds
+        assertTrue("compose under the bar", compose.top > bar.bottom)
+        assertDp("compose at the end", list.right - 16.dp, compose.right)
+        assertDp("compose at the bottom", list.bottom - 16.dp, compose.bottom)
+        assertDp("compose is a 56 FAB", 56, compose.width)
         rule.node(AgentHomeTags.COMPOSE).performClick()
         rule.node(AgentHomeTags.SETTINGS).performClick()
         assertEquals(1, composed)
@@ -141,14 +175,32 @@ class AgentHomeLayoutTest {
     }
 
     @Test
+    fun artifactsAndTheJoinedSurfacesOpenTheFirstCard() {
+        show(feed())
+        val rows = listOf("artifacts", "surface-s1", "surface-s2").map { rule.node(AgentHomeTags.row(it)).bounds }
+        rows.zipWithNext().forEach { (a, b) -> assertDp("rows touch", a.bottom, b.top) }
+        assertDp("the bots' card follows", rows.last().bottom, rule.node(AgentHomeTags.row("section-bots")).bounds.top)
+        // Only the Surfaces the person joined, in their own order.
+        rule.onAllNodesWithTag(AgentHomeTags.row("surface-s3"), useUnmergedTree = true).assertCountEquals(0)
+        rule.onNodeWithText("Artifacts", useUnmergedTree = true).assertExists()
+        rule.node(AgentHomeTags.row("artifacts")).performClick()
+        rule.node(AgentHomeTags.row("surface-s2")).performClick()
+        assertEquals(1, artifacts)
+        assertEquals(listOf(AgentFeedRow.Surface("s2", "Groceries", "todo")), surfaces)
+        assertTrue(opened.isEmpty())
+    }
+
+    @Test
     fun theBarAndPageAreTheChatsSurface() {
         var surface = 0
         rule.setHappyContent(dark = true) {
             surface = com.slopus.happy.ui.theme.HappyTheme.colors.surface.toArgb()
-            AgentHomeScreen("Studio", feed(), AgentLinkStatus.Connected, accounts, actions, now = 1L)
+            AgentHomeScreen("Studio", feed(), AgentLinkStatus.Connected, accounts, actions)
         }
         val bar = rule.node(AgentHomeTags.BAR).captureToImage().toPixelMap()
-        assertEquals(surface, bar[bar.width / 2, 4].toArgb())
+        // Glass over the page: its ground composites over the same colour and may round a step off it.
+        val ground = bar[bar.width / 2, 4].toArgb()
+        for (shift in listOf(16, 8, 0)) assertTrue((ground shr shift and 0xff) - (surface shr shift and 0xff) in -1..1)
         val list = rule.node(AgentHomeTags.LIST).captureToImage().toPixelMap()
         assertEquals(surface, list[list.width / 2, list.height - 4].toArgb())
     }
@@ -156,7 +208,7 @@ class AgentHomeLayoutTest {
     @Test
     fun idleUpdatesMoveNoRow() {
         var current by mutableStateOf(feed())
-        rule.setHappyContent { AgentHomeScreen("Studio", current, AgentLinkStatus.Connected, accounts, actions, now = 1L) }
+        rule.setHappyContent { AgentHomeScreen("Studio", current, AgentLinkStatus.Connected, accounts, actions) }
         val before = listOf("agent-ab2", "agent-at1", "agent-at2", "agent-ap1").associateWith { rule.node(AgentHomeTags.row(it)).bounds }
         // Work starts and stops, results come in, a question is asked, a title is generated.
         var catalog = catalog(sample)
@@ -169,30 +221,114 @@ class AgentHomeLayoutTest {
     }
 
     @Test
-    fun subtasksShowAndHideUnderTheirParent() {
+    fun everySubtaskShowsUnderItsParentAndNothingFolds() {
         show(feed())
-        rule.onAllNodesWithTag(AgentHomeTags.row("agent-as1"), useUnmergedTree = true).assertCountEquals(0)
-        val research = rule.node(AgentHomeTags.row("agent-ab2")).bounds
-        rule.node(AgentHomeTags.toggle("ab1")).performClick()
-        rule.waitForIdle()
-        val sub = rule.node(AgentHomeTags.row("agent-as1")).bounds
         val parent = rule.node(AgentHomeTags.row("agent-ab1")).bounds
+        val sub = rule.node(AgentHomeTags.row("agent-as1")).bounds
         assertDp("subtask under its parent", parent.bottom, sub.top)
-        assertDp("subtask row height", 60, sub.height)
-        val avatar = rule.onAllNodesWithTag(AgentHomeTags.ROW_AVATAR, useUnmergedTree = true)[1].bounds
-        assertBox("subtask avatar", avatar, 16.dp + 28.dp, sub.top + 14.dp, 32.dp, 32.dp)
-        assertDp("the next bot moves down a row", research.top + 60.dp, rule.node(AgentHomeTags.row("agent-ab2")).bounds.top)
-        // Rapid toggling settles where the last tap left it.
-        repeat(5) { rule.node(AgentHomeTags.toggle("ab1")).performClick() }
+        assertDp("subtask row height", 48, sub.height)
+        rule.onAllNodesWithText("1", useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun botsTasksAndProjectsWearAMarkAndSubtasksAndProjectConversationsNone() {
+        show(feed())
+        // Artifacts, the two Surfaces, the two bots, the three tasks and the project.
+        rule.onAllNodesWithTag(AgentHomeTags.ROW_MARK, useUnmergedTree = true).assertCountEquals(9)
+        val bot = rule.node(AgentHomeTags.row("agent-ab1")).bounds
+        val mark = rule.onAllNodesWithTag(AgentHomeTags.ROW_MARK, useUnmergedTree = true)[3].bounds
+        // The card 16 in from the window, the mark 16 in from the card.
+        assertBox("bot mark", mark, 32.dp, bot.top + 9.dp, 30.dp, 30.dp)
+        fun titleStart(title: String) = rule.onNodeWithText(title, useUnmergedTree = true).bounds.left
+        assertDp("a bot's title follows its mark", 32 + 30 + 12, titleStart("Happy"))
+        assertDp("a task's too", 32 + 30 + 12, titleStart("Fix login redirect"))
+        assertDp("a subtask's starts under its parent's title", 32 + 42, titleStart("Review the PR"))
+        assertDp("a project's title follows its mark", 32 + 30 + 12, titleStart("happy"))
+        assertDp("its conversation a level in", 32 + 42, titleStart("Android home feed"))
+        assertDp("a worktree a level in", 32 + 42, titleStart("fix-scroll"))
+        assertDp("and its conversation two", 32 + 84, titleStart("Scroll jumps"))
+        val task = rule.node(AgentHomeTags.row("agent-at1")).bounds
+        val dividers = rule.onAllNodesWithTag(AgentHomeTags.ROW_DIVIDER, useUnmergedTree = true).fetchSemanticsNodes().map {
+            with(rule.density) { it.boundsInRoot.left.toDp() to it.boundsInRoot.bottom.toDp() }
+        }
+        val under = dividers.single { (_, bottom) -> (bottom - task.bottom).value in -0.5f..0.5f }
+        assertDp("the task's hairline runs from its title", 32 + 30 + 12, under.first)
+    }
+
+    @Test
+    fun eachSectionIsOneUntitledCardOfSingleLineRows() {
+        show(feed())
+        val single = with(rule.density) { AgentHomeSpec.TITLE_LINE.sp.toDp() }
+        val titles = rule.onAllNodesWithTag(AgentHomeTags.ROW_TITLE, useUnmergedTree = true).fetchSemanticsNodes()
+        assertTrue(titles.isNotEmpty())
+        titles.forEach { assertDp("every title is one line", single, with(rule.density) { it.boundsInRoot.height.toDp() }) }
+        // No section titles, and nothing said under a row's title.
+        for (text in listOf("Bots", "Tasks", "Task", "Waiting for your answer")) rule.onAllNodesWithText(text, useUnmergedTree = true).assertCountEquals(0)
+        // The tasks' card: 24 after the bots', three rows back to back, a hairline between each and none under the last.
+        val gap = rule.node(AgentHomeTags.row("section-tasks")).bounds
+        assertDp("cards stand 24 apart", 24, gap.height)
+        assertDp("after the bots' last row", rule.node(AgentHomeTags.row("agent-ab2")).bounds.bottom, gap.top)
+        val rows = listOf("agent-at1", "agent-at2", "agent-at3").map { rule.node(AgentHomeTags.row(it)).bounds }
+        assertDp("the card starts after its gap", gap.bottom, rows[0].top)
+        rows.zipWithNext().forEach { (a, b) -> assertDp("rows touch", a.bottom, b.top) }
+        val dividers = rule.onAllNodesWithTag(AgentHomeTags.ROW_DIVIDER, useUnmergedTree = true).fetchSemanticsNodes()
+            .map { with(rule.density) { it.boundsInRoot.bottom.toDp() } }
+        rows.dropLast(1).forEach { row -> assertTrue(dividers.any { (it - row.bottom).value in -0.5f..0.5f }) }
+        assertTrue(dividers.none { (it - rows.last().bottom).value in -0.5f..0.5f })
+    }
+
+    @Test
+    fun aBotsPictureIsReadFromTheAgentOnce() {
+        val read = mutableListOf<String>()
+        val pictures = AgentPictures("agent-connection-1") { path -> read += path; ByteArray(0) }
+        val bootstrap = Wire.bootstrap(
+            bots = listOf(
+                Wire.bot("b1", "Happy", Wire.agent("ab1"), thumbhash = "nvgJPJpwd3eAh4d3d4eAcAj4eA=="),
+                Wire.bot("b2", "Research", Wire.agent("ab2"), orderKey = "2"),
+            ),
+        )
+        rule.setHappyContent {
+            CompositionLocalProvider(LocalAgentPictures provides pictures) {
+                AgentHomeScreen("Studio", feed(bootstrap), AgentLinkStatus.Connected, accounts, actions)
+            }
+        }
         rule.waitForIdle()
-        rule.onAllNodesWithTag(AgentHomeTags.row("agent-as1"), useUnmergedTree = true).assertCountEquals(0)
-        assertEquals(research, rule.node(AgentHomeTags.row("agent-ab2")).bounds)
+        assertEquals(listOf("/v0/bots/b1/avatar"), read)
+        // Artifacts' and the two bots'.
+        rule.onAllNodesWithTag(AgentHomeTags.ROW_MARK, useUnmergedTree = true).assertCountEquals(3)
+    }
+
+    /** A bot without a picture, a task and a project without one wear the placeholder their own ids pick, as on happy-ios. */
+    @Test
+    fun marksWithoutAPictureAreTheirIdsPlaceholders() {
+        show(feed())
+        fun wears(rowKey: String): Int = rule.onNode(
+            SemanticsMatcher.keyIsDefined(PlaceholderIndexKey) and hasAnyAncestor(hasTestTag(AgentHomeTags.row(rowKey))),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().config[PlaceholderIndexKey]
+        assertEquals(AvatarPlaceholder.index("b1"), wears("agent-ab1"))
+        assertEquals(AvatarPlaceholder.index("t2"), wears("agent-at2"))
+        assertEquals(AvatarPlaceholder.index("p1"), wears("folder-p1"))
+    }
+
+    @Test
+    fun aProjectsPictureIsReadToo() {
+        val read = mutableListOf<String>()
+        val pictures = AgentPictures("agent-connection-1") { path -> read += path; ByteArray(0) }
+        val bootstrap = Wire.bootstrap(projects = listOf(Wire.project("p1", "happy", emptyList(), avatar = "image", thumbhash = "3OcRJYB4d3h3iIeHeEh3eIhw+j2w")))
+        rule.setHappyContent {
+            CompositionLocalProvider(LocalAgentPictures provides pictures) {
+                AgentHomeScreen("Studio", feed(bootstrap), AgentLinkStatus.Connected, accounts, actions)
+            }
+        }
+        rule.waitForIdle()
+        assertEquals(listOf("/v0/projects/p1/avatar"), read)
     }
 
     @Test
     fun aRowAddedAboveKeepsTheReaderWhereTheyAre() {
         var current by mutableStateOf(feed(big(60)))
-        rule.setHappyContent { AgentHomeScreen("Studio", current, AgentLinkStatus.Connected, accounts, actions, now = 1L) }
+        rule.setHappyContent { AgentHomeScreen("Studio", current, AgentLinkStatus.Connected, accounts, actions) }
         rule.node(AgentHomeTags.LIST).performScrollToIndex(30)
         rule.waitForIdle()
         val anchor = rule.onAllNodesWithTag(AgentHomeTags.LIST, useUnmergedTree = true)[0]
@@ -254,60 +390,76 @@ class AgentHomeLayoutTest {
         rule.node(AgentHomeTags.SEARCH).performClick()
         rule.node(AgentSearchTags.FIELD).performTextInput("appear")
         rule.waitForIdle()
-        rule.node(AgentSearchTags.result("entry-appearance")).assertExists()
+        rule.node(AgentSearchTags.result("entry-${AgentSettingsTags.APPEARANCE}")).assertExists()
         rule.node(AgentSearchTags.FIELD).performTextReplacement("new")
         rule.node(AgentSearchTags.result("entry-new-chat")).performClick()
         assertEquals(1, composed)
         rule.node(AgentSearchTags.FIELD).performTextReplacement("Settings")
         rule.node(AgentSearchTags.result("entry-settings")).performClick()
         assertEquals(1, settings)
-        // "Remove connection" only opens settings, where removing asks first.
-        rule.node(AgentSearchTags.FIELD).performTextReplacement("remove")
-        rule.node(AgentSearchTags.result("entry-remove")).performClick()
-        assertEquals(2, settings)
+        // Nothing that takes the connection away: as iOS's SettingsIndex, Disconnect isn't offered.
+        rule.node(AgentSearchTags.FIELD).performTextReplacement("disconnect")
+        rule.waitForIdle()
+        rule.node(AgentSearchTags.NO_RESULTS).assertExists()
+    }
+
+    /**
+     * iOS's home search over `SettingsIndex.computer`: the settings it
+     * finds are the connection's settings rows, under Settings, and a tap
+     * hands that row (its id and page) to be opened there.
+     */
+    @Test
+    fun searchJumpsToASettingsRow() {
+        show(feed())
+        rule.node(AgentHomeTags.SEARCH).performClick()
+        rule.node(AgentSearchTags.FIELD).performTextInput("hide")
+        rule.waitForIdle()
+        rule.onNodeWithText("Settings").assertExists()
+        rule.node(AgentSearchTags.result("entry-${AgentPagesTags.HIDE_PROJECTS_ROW}")).performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(AgentPagesTags.HIDE_PROJECTS_ROW to AgentSettingsPlace.Appearance), settingsRows.map { it.id to it.place })
+
+        rule.node(AgentSearchTags.FIELD).performTextReplacement("privacy")
+        rule.node(AgentSearchTags.result("entry-${SettingsTags.PRIVACY}")).performClick()
+        rule.node(AgentSearchTags.FIELD).performTextReplacement("edit name")
+        rule.node(AgentSearchTags.result("entry-${AgentSettingsTags.ASK_NAME}")).performClick()
+        rule.waitForIdle()
+        assertEquals(
+            listOf(SettingsTags.PRIVACY to AgentSettingsPlace.Settings, AgentSettingsTags.ASK_NAME to AgentSettingsPlace.Ask),
+            settingsRows.drop(1).map { it.id to it.place },
+        )
+        assertEquals("Change your name to ", settingsRows.last().ask)
+        assertEquals(0, settings)
     }
 
     @Test
     fun theLinkDroppingAndComingBackMovesNothing() {
         val rows = feed()
         var status by mutableStateOf(AgentLinkStatus.Connected)
-        var syncing by mutableStateOf(false)
-        rule.setHappyContent { AgentHomeScreen("Studio", rows, status, accounts, actions, now = NOW, syncing = syncing) }
+        rule.setHappyContent { AgentHomeScreen("Studio", rows, status, accounts, actions) }
         val bar = rule.node(AgentHomeTags.BAR).bounds
         val title = rule.node(AgentHomeTags.TITLE).bounds
-        val first = rule.node(AgentHomeTags.row("section-bots")).bounds
+        val first = rule.node(AgentHomeTags.row("section-places")).bounds
         fun stillPut(at: String) {
             assertEquals("bar, $at", bar, rule.node(AgentHomeTags.BAR).bounds)
             assertEquals("title, $at", title, rule.node(AgentHomeTags.TITLE).bounds)
-            assertEquals("first row, $at", first, rule.node(AgentHomeTags.row("section-bots")).bounds)
+            assertEquals("first row, $at", first, rule.node(AgentHomeTags.row("section-places")).bounds)
         }
-        val flips = listOf(
-            AgentLinkStatus.Connecting to false, AgentLinkStatus.Connected to true,
-            AgentLinkStatus.Connected to false, AgentLinkStatus.Offline to false,
-            AgentLinkStatus.Connecting to false, AgentLinkStatus.Connected to true,
-            AgentLinkStatus.Connected to false, AgentLinkStatus.Connected to false,
-        )
-        for ((next, catchingUp) in flips) {
-            // Mid-fade, with the old line and the new one both drawn, and once it has settled.
-            rule.mainClock.autoAdvance = false
+        // Online says nothing: the name stands alone.
+        rule.onAllNodesWithTag(AgentHomeTags.STATUS, useUnmergedTree = true).assertCountEquals(0)
+        rule.onAllNodesWithText("online", useUnmergedTree = true).assertCountEquals(0)
+        val flips = listOf(AgentLinkStatus.Connecting, AgentLinkStatus.Connected, AgentLinkStatus.Offline, AgentLinkStatus.Connecting, AgentLinkStatus.Connected)
+        for (next in flips) {
             status = next
-            syncing = catchingUp
-            Snapshot.sendApplyNotifications()
-            rule.mainClock.advanceTimeByFrame()
-            rule.mainClock.advanceTimeBy(64)
-            assertTrue("the line is on its way, $next", rule.onAllNodesWithTag(AgentHomeTags.STATUS, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())
-            stillPut("fading to $next")
-            rule.mainClock.autoAdvance = true
             rule.waitForIdle()
-            stillPut("settled on $next")
-            rule.onAllNodesWithTag(AgentHomeTags.STATUS, useUnmergedTree = true)
-                .assertCountEquals(1)
+            stillPut("on $next")
             val label = when (next) {
-                AgentLinkStatus.Connected -> if (catchingUp) "syncing" else "online"
+                AgentLinkStatus.Connected -> null
                 AgentLinkStatus.Connecting -> "connecting"
                 else -> "offline"
             }
-            rule.onNodeWithText(label, useUnmergedTree = true).assertExists()
+            rule.onAllNodesWithTag(AgentHomeTags.STATUS, useUnmergedTree = true).assertCountEquals(if (label == null) 0 else 1)
+            label?.let { rule.onNodeWithText(it, useUnmergedTree = true).assertExists() }
         }
     }
 
@@ -333,23 +485,21 @@ class AgentHomeLayoutTest {
         current = feed(Wire.bootstrap())
         rule.waitForIdle()
         rule.node(AgentHomeTags.EMPTY).assertExists()
-        rule.onAllNodesWithTag(AgentHomeTags.STATUS, useUnmergedTree = true).assertCountEquals(1)
+        rule.onAllNodesWithTag(AgentHomeTags.STATUS, useUnmergedTree = true).assertCountEquals(0)
     }
 
     @Test
     fun rowsGrowWithTheFontButStayFixed() {
         var row = 0.dp
-        var section = 0.dp
         rule.setHappyContent {
             CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, 2f)) {
-                row = AgentHomeSpec.conversationHeight()
-                section = AgentHomeSpec.sectionHeight()
-                AgentHomeScreen("Studio", feed(), AgentLinkStatus.Connected, accounts, actions, now = 1L)
+                row = AgentHomeSpec.rowHeight()
+                AgentHomeScreen("Studio", feed(), AgentLinkStatus.Connected, accounts, actions)
             }
         }
-        // The lines scale as Android 14 scales them (non-linearly); the paddings don't.
-        assertTrue("taller than at 1.0", row > 70.dp)
+        // The line scales as Android 14 scales it (non-linearly); the paddings don't.
+        assertTrue("taller than at 1.0", row > 56.dp)
         assertDp("conversation row", row, rule.node(AgentHomeTags.row("agent-ab1")).bounds.height)
-        assertDp("section row", section, rule.node(AgentHomeTags.row("section-bots")).bounds.height)
+        assertDp("folder row", row, rule.node(AgentHomeTags.row("folder-p1")).bounds.height)
     }
 }

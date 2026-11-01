@@ -2,10 +2,10 @@ package com.slopus.happy.ui.conversation
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon as MaterialIcon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -18,7 +18,9 @@ import androidx.compose.ui.unit.dp
 import com.slopus.happy.R
 import com.slopus.happy.conversation.ConversationState
 import com.slopus.happy.ui.components.Icon as GlyphIcon
+import com.slopus.happy.ui.components.HappyMenuItem
 import com.slopus.happy.ui.components.Ionicon
+import com.slopus.happy.ui.components.MenuSpec
 import com.slopus.happy.ui.components.MaterialSymbols
 import com.slopus.happy.ui.theme.HappyTheme
 
@@ -36,7 +38,7 @@ internal fun ConversationHeaderActions(state: ConversationState, actions: Conver
     val current = state.mode ?: state.catalog?.defaults
     var menu by rememberSaveable { mutableStateOf<HeaderMenu?>(null) }
     IconButton(onClick = actions.onCompose, modifier = Modifier.testTag(ConversationScreenTags.COMPOSE)) {
-        GlyphIcon(Ionicon.CreateOutline, 24.dp, colors.text, Modifier.testTag(ConversationScreenTags.COMPOSE_ICON), stringResource(R.string.conversation_compose))
+        GlyphIcon(Ionicon.CreateOutline, 24.dp, colors.text, Modifier.testTag(ConversationScreenTags.COMPOSE_ICON), stringResource(R.string.session_new_chat))
     }
     Box {
         IconButton(
@@ -46,48 +48,47 @@ internal fun ConversationHeaderActions(state: ConversationState, actions: Conver
         ) {
             GlyphIcon(Ionicon.EllipsisVertical, 24.dp, colors.text, contentDescription = stringResource(R.string.conversation_composer_more))
         }
-        when (menu) {
-            HeaderMenu.Actions -> ConversationPopup(
-                title = stringResource(R.string.conversation_composer_more),
-                onDismiss = { menu = null },
-                alignEnd = true,
-                width = 280.dp,
-                belowAnchor = true,
-                modifier = Modifier.testTag(ConversationScreenTags.MENU),
-            ) {
-                LazyColumn {
-                    if (current != null) {
-                        item {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.conversation_mode_permission_item, permissionName(current.permissionMode))) },
-                                leadingIcon = { MaterialIcon(MaterialSymbols.Lock, null) },
-                                onClick = { menu = HeaderMenu.Permissions },
-                                modifier = Modifier.testTag(ConversationModeTags.PERMISSION),
-                            )
-                        }
+        // Both stay composed so each can play its exit; only the open one shows.
+        ConversationPopup(
+            expanded = menu == HeaderMenu.Actions,
+            title = stringResource(R.string.conversation_composer_more),
+            onDismiss = { menu = null },
+            alignEnd = true,
+            width = 280.dp,
+            belowAnchor = true,
+            modifier = Modifier.testTag(ConversationScreenTags.MENU),
+        ) {
+            LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                if (current != null) {
+                    item {
+                        HappyMenuItem(
+                            label = stringResource(R.string.conversation_mode_permission_item, permissionName(current.permissionMode)),
+                            leading = { MaterialIcon(MaterialSymbols.Lock, null, Modifier.size(MenuSpec.icon)) },
+                            onClick = { menu = HeaderMenu.Permissions },
+                            modifier = Modifier.testTag(ConversationModeTags.PERMISSION),
+                        )
                     }
-                    if (state.created) {
-                        item {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.conversation_details)) },
-                                leadingIcon = { MaterialIcon(MaterialSymbols.Info, null) },
-                                onClick = { menu = null; actions.onDetails() },
-                                modifier = Modifier.testTag(ConversationScreenTags.DETAILS),
-                            )
-                        }
+                }
+                if (state.created) {
+                    item {
+                        HappyMenuItem(
+                            label = stringResource(R.string.conversation_details),
+                            leading = { MaterialIcon(MaterialSymbols.Info, null, Modifier.size(MenuSpec.icon)) },
+                            onClick = { menu = null; actions.onDetails() },
+                            modifier = Modifier.testTag(ConversationScreenTags.DETAILS),
+                        )
                     }
                 }
             }
-            HeaderMenu.Permissions -> ConversationModePicker(
-                open = ModePicker.Permission,
-                onClose = { menu = null },
-                catalog = state.catalog,
-                mode = state.mode,
-                onModeChange = actions.onModeChange,
-                anchorCenterY = 0,
-                belowAnchor = true,
-            )
-            null -> Unit
         }
+        ConversationModePicker(
+            open = if (menu == HeaderMenu.Permissions) ModePicker.Permission else null,
+            onClose = { menu = null },
+            catalog = state.catalog,
+            mode = state.mode,
+            onModeChange = actions.onModeChange,
+            anchorCenterY = 0,
+            belowAnchor = true,
+        )
     }
 }

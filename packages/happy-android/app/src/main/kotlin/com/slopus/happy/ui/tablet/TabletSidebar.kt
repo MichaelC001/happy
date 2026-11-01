@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.tablet
 
+import com.slopus.happy.ui.rememberHomeAccountSwitch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -158,7 +159,7 @@ fun TabletSidebar(
             },
             onNewInCheckout = { first ->
                 services.newSession(context.applicationContext).prepareCheckout(first?.machineId, first?.path, first?.homeDir)
-                navigation.onNewSession()
+                navigation.onCompose()
             },
         )
     }
@@ -170,7 +171,7 @@ fun TabletSidebar(
         } else {
             null
         }
-        TabletSidebarContent(host, machines, selectedSessionId, headerHeight, modifier, groupedRows, grouped, stopping, rememberAccountMenu(graph), { graph.open(it) })
+        TabletSidebarContent(host, machines, selectedSessionId, headerHeight, modifier, groupedRows, grouped, stopping, rememberAccountMenu(graph), rememberHomeAccountSwitch(graph))
     }
     alert?.let { HappyAlert(it, onDismiss = { alert = null }) }
 }
@@ -229,8 +230,8 @@ fun TabletSidebarContent(
         ) {
             // The shell hides the phone's home bar, so the account switcher lives here instead,
             // beside New session and in reach whatever the detail pane shows.
-            AccountMenuButton(accounts, onSwitchAccount)
-            NewSessionButton(host.navigation.onNewSession, Modifier.weight(1f))
+            AccountMenuButton(accounts, onSwitchAccount, inset = 0.dp)
+            NewSessionButton(host.navigation.onCompose, Modifier.weight(1f))
             if (state?.hasArchivedSessions == true) {
                 ArchiveButton(hidden = state.archiveHidden, onClick = { host.callbacks.onSetArchiveHidden(!state.archiveHidden) })
             }
@@ -245,7 +246,7 @@ fun TabletSidebarContent(
                 )
                 state.rows.isEmpty() -> EmptySessionsTablet(
                     machines = machines,
-                    onNewSession = host.navigation.onNewSession,
+                    onNewSession = host.navigation.onCompose,
                     onTroubleshoot = host.navigation.onTroubleshoot,
                     onLinkComputer = host.actions.onLinkComputer,
                 )

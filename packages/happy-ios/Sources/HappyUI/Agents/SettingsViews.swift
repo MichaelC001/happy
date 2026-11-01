@@ -27,7 +27,7 @@ final class GlassView: UIView {
     }
 }
 
-/// Every paired computer and signed-in account as a strip of story
+/// Every paired computer and signed-in account as a strip of
 /// circles: the chosen one in the middle, larger and ringed. A drag scales
 /// them as they pass the middle, a stop snaps to one (a selection tick on
 /// each), a tap brings one to the middle; the "+" at the end only taps.
@@ -264,16 +264,51 @@ struct SettingsRow {
     var id: String
     var title: String
     var icon: (glyph: String, tile: Tile)?
-    /// An account's or connection's own picture, drawn round in the icon's
-    /// place; the icon is the fallback for one that hasn't come yet.
+    /// An account's or connection's row: `image` round in the icon's
+    /// place, an empty circle until it comes, never a glyph.
+    var avatar = false
+    /// Its picture, drawn round in the icon's place; the icon is the
+    /// fallback for one that hasn't come yet.
     var image: UIImage?
+    /// An avatar row's placeholder seed, when `image` is its placeholder:
+    /// it moves with Animated Avatars on (`ProfilePictures.liveSeed`).
+    var liveSeed: String?
     var value: String?
     var accessory: SettingsLayout.Accessory = .chevron
+    /// A quieter line under the title (a path, an ID): the row is taller.
+    var subtitle: String?
+    /// Drawn where the value goes, instead of it, at its own size: line
+    /// counts, a copy glyph, a spinner.
+    var valueView: UIView?
+    /// The menu a tap opens, asked for each time it opens (the chat's
+    /// permission modes), from a button over the row (`profile-<id>`).
+    var pullDown: (() -> UIMenu?)?
     var destructive = false
     /// A switch's state, for `.toggle`.
     var isOn = false
     var action: (() -> Void)?
     var toggled: ((Bool) -> Void)?
+    /// The line under this row's card, said by the card's last row.
+    var footer: String?
+    /// A block of text the card's width (a secret key), in monospace.
+    var isCode = false
+    /// Quieter, for a row that can't be used here.
+    var dimmed = false
+    /// What VoiceOver adds about it: why a dimmed row does nothing.
+    var hint: String?
+    /// What a hold on it offers (signing an account out), and VoiceOver's
+    /// actions on it.
+    var menu: [MenuItem] = []
+
+    struct MenuItem {
+        var title: String
+        var glyph: String
+        var destructive = false
+        var run: () -> Void
+    }
+
+    /// Whether it takes the icon's lane.
+    var hasIcon: Bool { icon != nil || avatar }
 }
 
 /// A grouped card of rows, Telegram's inset style: a coloured square with a
@@ -309,17 +344,55 @@ final class SettingsCardView: UIView {
         text.map { ($0 as NSString).size(withAttributes: [.font: RowView.valueFont]).width }
     }
 
-    final class RowView: UIView {
+    /// The cards' rows as the layout takes them, a code row measured at
+    /// the page's `width`.
+    static func specs(_ cards: [[SettingsRow]], width: CGFloat) -> [[SettingsLayout.RowSpec]] {
+        cards.map { card in
+            card.map { row in
+                guard row.isCode else { return spec(row) }
+                let text = height(row.title, font: RowView.codeFont, width: SettingsLayout.textWidth(width))
+                return SettingsLayout.RowSpec(hasIcon: false, accessory: .none, textHeight: text)
+            }
+        }
+    }
+
+    /// A row as the layout takes it: its value (or the view in its
+    /// place) measured as the row draws it.
+    static func spec(_ row: SettingsRow) -> SettingsLayout.RowSpec {
+        let value = row.valueView.map { $0.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)).width } ?? valueWidth(row.value)
+        return SettingsLayout.RowSpec(hasIcon: row.hasIcon, valueWidth: value, accessory: row.accessory, subtitle: row.subtitle != nil)
+    }
+
+    /// Each card's footer, its last row's, measured at the page's `width`.
+    static func footers(_ cards: [[SettingsRow]], width: CGFloat) -> [CGFloat?] {
+        cards.map { card in card.last?.footer.map { height($0, font: SettingsFooters.font, width: SettingsLayout.footerWidth(width)) } }
+    }
+
+    private static func height(_ text: String, font: UIFont, width: CGFloat) -> CGFloat {
+        ceil((text as NSString).boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font], context: nil).height)
+    }
+
+    final class RowView: UIView, UIContextMenuInteractionDelegate {
         static let titleFont = Fonts.ui(.regular, size: 17)
         static let valueFont = Fonts.ui(.regular, size: 17)
+        static let codeFont = Fonts.mono(bold: false, size: 15)
         private let tile = UIView()
         private let glyph = UIImageView()
+        /// An account's placeholder, moving (`SettingsRow.liveSeed`).
+        private let live = AvatarPlaceholderSlot()
         private let title = UILabel()
         private let value = UILabel()
         private let chevron = UIImageView(image: Glyphs.image("chevron-right", size: 14))
         private let toggle = UISwitch()
         private let separator = UIView()
+        /// Made for the first row that has one.
+        private var subtitle: UILabel?
+        private var valueView: UIView?
+        /// Over the row while it has a pull-down (`SettingsRow.pullDown`).
+        private var pullDownButton: MenuRowButton?
         private var row: SettingsRow?
+        private lazy var menuInteraction = UIContextMenuInteraction(delegate: self)
+        static let subtitleFont = Fonts.ui(.regular, size: 13)
         /// A fold's chevron, turned down while what it folds is open.
         var chevronTurned = false {
             didSet { chevron.image = Glyphs.image(chevronTurned ? "chevron-down" : "chevron-right", size: 14) }
@@ -333,6 +406,7 @@ final class SettingsCardView: UIView {
             glyph.tintColor = UIColor(Palette.settingsGlyph)
             glyph.contentMode = .center
             tile.addSubview(glyph)
+            live.liveHost = glyph
             title.font = Self.titleFont
             value.font = Self.valueFont
             value.textColor = UIColor(Palette.settingsSecondary)
@@ -353,6 +427,7 @@ final class SettingsCardView: UIView {
         @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
         func show(_ row: SettingsRow, frames: SettingsLayout.Row) {
+            let previous = self.row
             self.row = row
             frame = frames.box
             let origin = frames.box.origin
@@ -360,12 +435,13 @@ final class SettingsCardView: UIView {
             tile.isHidden = frames.icon == nil
             if let frame = frames.icon {
                 tile.frame = local(frame)
-                if let picture = row.image {
+                if row.image != nil || row.avatar {
                     // Its own picture, round, filling the square an icon
                     // would have had: the rows read as the accounts they are.
-                    tile.backgroundColor = .clear
+                    tile.backgroundColor = row.image == nil ? UIColor(Palette.settingsAddFill) : .clear
                     tile.layer.cornerRadius = frame.height / 2
-                    glyph.image = picture
+                    // The picture over the thumbhash it had: dissolved in.
+                    ImageFade.show(row.image, in: glyph, fade: previous?.id == row.id && previous?.image != nil)
                     glyph.contentMode = .scaleAspectFill
                     glyph.clipsToBounds = true
                     glyph.frame = tile.bounds
@@ -379,12 +455,54 @@ final class SettingsCardView: UIView {
                     glyph.frame = tile.bounds
                 }
             }
+            live.animate(seed: frames.icon != nil && row.avatar ? row.liveSeed : nil)
             title.text = row.title
-            title.textColor = UIColor(row.destructive ? Palette.settingsDestructive : row.icon?.tile == .action ? Palette.textLink : Palette.settingsText)
+            title.font = row.isCode ? Self.codeFont : Self.titleFont
+            title.numberOfLines = row.isCode ? 0 : 1
+            title.textColor = UIColor(row.destructive ? Palette.settingsDestructive : row.dimmed ? Palette.settingsSecondary : row.icon?.tile == .action ? Palette.textLink : Palette.settingsText)
             title.frame = local(frames.title)
-            value.isHidden = frames.value == nil
+            if let frame = frames.subtitle {
+                let label = subtitle ?? makeSubtitle()
+                label.isHidden = false
+                label.text = row.subtitle
+                label.frame = local(frame)
+            } else {
+                subtitle?.isHidden = true
+            }
+            if valueView !== row.valueView {
+                valueView?.removeFromSuperview()
+                valueView = row.valueView
+                if let view = valueView { addSubview(view) }
+            }
+            value.isHidden = frames.value == nil || valueView != nil
             value.text = row.value
-            if let frame = frames.value { value.frame = local(frame) }
+            if let frame = frames.value {
+                value.frame = local(frame)
+                if let view = valueView {
+                    // At its own size, at the value's end, in the row's middle.
+                    let size = view.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
+                    let box = local(frames.box)
+                    view.frame = CGRect(x: value.frame.maxX - size.width, y: ((box.height - size.height) / 2).rounded(), width: size.width, height: size.height)
+                }
+            }
+            if let menu = row.pullDown {
+                let button = pullDownButton ?? {
+                    let button = MenuRowButton(frame: bounds)
+                    addSubview(button)
+                    return button
+                }()
+                pullDownButton = button
+                button.isHidden = false
+                button.frame = bounds
+                button.menuFor = menu
+                button.accessibilityIdentifier = "profile-\(row.id)"
+                button.accessibilityLabel = row.title
+                button.accessibilityValue = row.value
+                bringSubviewToFront(button)
+            } else if let button = pullDownButton {
+                button.isHidden = true
+                button.menuFor = nil
+            }
             chevron.isHidden = frames.chevron == nil
             if let frame = frames.chevron { chevron.frame = local(frame) }
             toggle.isHidden = frames.toggle == nil
@@ -399,9 +517,39 @@ final class SettingsCardView: UIView {
             // A switch row is the switch itself to VoiceOver and to tests.
             toggle.accessibilityIdentifier = "settings-toggle:\(row.id)"
             toggle.accessibilityLabel = row.title
-            isAccessibilityElement = row.accessory != .toggle
-            accessibilityLabel = [row.title, row.value].compactMap { $0 }.joined(separator: ", ")
-            accessibilityTraits = row.accessory == .toggle ? [] : .button
+            // A pull-down's row is its button to VoiceOver.
+            isAccessibilityElement = row.accessory != .toggle && row.pullDown == nil
+            let shownValue = row.valueView == nil ? row.value : row.valueView?.accessibilityLabel
+            accessibilityLabel = [row.title, row.subtitle, shownValue].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+            accessibilityHint = row.hint
+            accessibilityTraits = row.accessory == .toggle ? [] : row.action != nil ? .button : row.dimmed ? .notEnabled : .staticText
+            if row.menu.isEmpty {
+                removeInteraction(menuInteraction)
+            } else if !interactions.contains(where: { $0 === menuInteraction }) {
+                addInteraction(menuInteraction)
+            }
+            accessibilityCustomActions = row.menu.map { item in
+                UIAccessibilityCustomAction(name: item.title) { _ in item.run(); return true }
+            }
+        }
+
+        private func makeSubtitle() -> UILabel {
+            let label = UILabel()
+            label.font = Self.subtitleFont
+            label.textColor = UIColor(Palette.settingsSecondary)
+            label.lineBreakMode = .byTruncatingMiddle
+            addSubview(label)
+            subtitle = label
+            return label
+        }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+            guard let items = row?.menu, !items.isEmpty else { return nil }
+            return UIContextMenuConfiguration(actionProvider: { _ in
+                UIMenu(children: items.map { item in
+                    UIAction(title: item.title, image: Glyphs.image(item.glyph, size: 17), attributes: item.destructive ? .destructive : []) { _ in item.run() }
+                })
+            })
         }
 
         static func color(_ tile: SettingsRow.Tile) -> ColorToken {
@@ -442,28 +590,99 @@ final class SettingsCardView: UIView {
     }
 }
 
+/// The lines under settings' cards, each where the layout put it.
+final class SettingsFooters {
+    static let font = Fonts.ui(.regular, size: 13)
+    private weak var container: UIView?
+    private var labels: [UILabel] = []
+
+    init(in container: UIView) { self.container = container }
+
+    /// `texts` by card, at `layout`'s footer frames.
+    func show(_ texts: [String?], layout: [SettingsLayout.Card]) {
+        let shown = zip(texts, layout).compactMap { text, card in text.flatMap { text in card.footer.map { (text, $0) } } }
+        while labels.count < shown.count {
+            let label = UILabel()
+            label.font = Self.font
+            label.textColor = UIColor(Palette.settingsSecondary)
+            label.numberOfLines = 0
+            container?.addSubview(label)
+            labels.append(label)
+        }
+        while labels.count > shown.count { labels.removeLast().removeFromSuperview() }
+        for (label, (text, frame)) in zip(labels, shown) {
+            label.text = text
+            label.frame = frame
+        }
+    }
+
+    /// What they say, top to bottom: for the tests.
+    var texts: [String] { labels.compactMap { $0.text } }
+}
+
 /// A profile's picture: a computer's own bytes, an account's from its
-/// server, else the placeholder its thumbhash makes; decoded off main.
+/// server, else the placeholder its thumbhash makes, else the one its ID
+/// picks (`AvatarPlaceholder`); decoded off main.
 @MainActor
 enum ProfilePictures {
+    /// The largest an account's placeholder is drawn: Settings' agent
+    /// picture.
+    static let placeholderSide = AgentEditButtonLayout.Metrics.avatar
+
+    /// What the account's placeholder is picked by: an agent connection's
+    /// computer, else the account's own ID (derived from its secret), so
+    /// it is the same on every phone.
+    static func placeholderSeed(_ account: AccountSummary, context: AppContext) -> String {
+        context.account.agentConnections.placeholderSeed(for: account.id) ?? account.id
+    }
+
     static func key(_ account: AccountSummary, context: AppContext) -> String {
         let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
         return direct.map { "\($0.avatarETag ?? ""):\($0.avatar?.count ?? 0):\($0.thumbhash ?? "")" } ?? account.avatarURL?.absoluteString ?? account.avatarThumbhash ?? ""
     }
 
+    /// What shows until `load` answers: the thumbhash, decoded now, so the
+    /// first frame has it.
+    static func placeholder(_ account: AccountSummary, context: AppContext) -> UIImage? {
+        let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
+        return ThumbHashImages.image(direct.map { $0.thumbhash } ?? account.avatarThumbhash)
+    }
+
+    /// What can show at once: the thumbhash, or, for an account with no
+    /// picture of its own, its placeholder if that is decoded already.
+    static func immediate(_ account: AccountSummary, context: AppContext) -> UIImage? {
+        if let thumbhash = placeholder(account, context: context) { return thumbhash }
+        let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
+        guard direct.map({ $0.avatar == nil }) ?? (account.avatarURL == nil) else { return nil }
+        return AvatarPlaceholderImages.cached(seed: placeholderSeed(account, context: context), side: placeholderSide)
+    }
+
+    /// What its placeholder moves as with Animated Avatars on: its seed,
+    /// only when it has no picture of its own (nor a thumbhash of one), so
+    /// a real picture is never covered.
+    static func liveSeed(_ account: AccountSummary, context: AppContext) -> String? {
+        let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
+        let hasPicture = direct.map { $0.avatar != nil || $0.thumbhash != nil } ?? (account.avatarURL != nil || account.avatarThumbhash != nil)
+        return hasPicture ? nil : placeholderSeed(account, context: context)
+    }
+
+    /// Nil only when the placeholder isn't bundled.
     static func load(_ account: AccountSummary, context: AppContext) async -> UIImage? {
+        if let picture = await picture(account, context: context) { return picture }
+        return await AvatarPlaceholderImages.image(seed: placeholderSeed(account, context: context), side: placeholderSide)
+    }
+
+    /// The account's own picture or its thumbhash, or nil.
+    private static func picture(_ account: AccountSummary, context: AppContext) async -> UIImage? {
         let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
         let bytes = direct?.avatar
-        let connectionHash = direct?.thumbhash
         var image = await Task.detached { () -> UIImage? in
-            if let bytes, let image = AccountPictureImages.decode(bytes)?.picture as? UIImage { return image }
-            return connectionHash.flatMap { AccountPictureImages.placeholder($0)?.picture as? UIImage }
+            bytes.flatMap { AccountPictureImages.decode($0)?.picture as? UIImage }
         }.value
-        guard image == nil, direct == nil else { return image }
-        let pictures = context.account.pictures(for: account.id)
-        if let url = account.avatarURL { image = await pictures?.image(url) }
-        if image == nil, let hash = account.avatarThumbhash { image = await pictures?.placeholderImage(hash) }
-        return image
+        if image == nil, direct == nil, let url = account.avatarURL {
+            image = await context.account.pictures(for: account.id)?.image(url)
+        }
+        return image ?? placeholder(account, context: context)
     }
 }
 #endif

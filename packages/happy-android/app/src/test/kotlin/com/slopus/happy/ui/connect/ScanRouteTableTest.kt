@@ -54,7 +54,7 @@ class ScanRouteTableTest {
 
     private val notHappyHere = "This QR code isn't a Happy code."
     private val terminalElsewhere = "This code connects a terminal. Scan it from Settings › Scan QR code to authenticate."
-    private val accountElsewhere = "This code links a new device. Scan it from Settings › Account › Link New Device."
+    private val accountElsewhere = "This code links a new device. Scan it from Settings › Backup & Restore › Link New Device."
     private val accountNeedsPhone = "This code adds a phone to an account. Scan it with a phone that's signed in."
     private val invalidUrl = "Invalid authentication URL"
 

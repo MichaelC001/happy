@@ -4,13 +4,41 @@ import UIKit
 @MainActor
 enum HeaderStatusTransition {
     static func apply(to view: UIView, change: @escaping () -> Void) {
-        guard view.window != nil, UIView.areAnimationsEnabled, !UIAccessibility.isReduceMotionEnabled else {
+        guard animates(view) else {
             change()
             return
         }
-        UIView.transition(with: view, duration: 0.2,
+        UIView.transition(with: view, duration: duration,
                           options: [.transitionCrossDissolve, .beginFromCurrentState, .allowUserInteraction],
                           animations: change)
+    }
+
+    /// What holds the status is laid out again for its new width, in the
+    /// crossfade's time.
+    static func relayout(_ view: UIView) {
+        view.setNeedsLayout()
+        guard animates(view) else { return }
+        UIView.animate(withDuration: duration, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseInOut]) {
+            view.layoutIfNeeded()
+        }
+    }
+
+    /// `view` fades to `alpha` in the crossfade's time; `done` once it has.
+    static func fade(_ view: UIView, to alpha: CGFloat, done: @escaping () -> Void) {
+        guard animates(view) else {
+            view.alpha = alpha
+            done()
+            return
+        }
+        UIView.animate(withDuration: duration, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseInOut]) {
+            view.alpha = alpha
+        } completion: { _ in done() }
+    }
+
+    private static let duration = 0.2
+
+    private static func animates(_ view: UIView) -> Bool {
+        view.window != nil && UIView.areAnimationsEnabled && !UIAccessibility.isReduceMotionEnabled
     }
 }
 #endif

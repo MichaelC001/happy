@@ -38,7 +38,6 @@ class StateAnimationTest {
     @Test
     fun theFilesAreDesktopsExactBytes() {
         val expected = mapOf(
-            StateArt.Waiting to "6a9c7b648681ae9d",
             StateArt.Make to "8de70508fe1ebdeb",
             StateArt.Ready to "eeabc392ba20328c",
             StateArt.Done to "b14e504ce3467a6b",
@@ -53,7 +52,7 @@ class StateAnimationTest {
 
     @Test
     fun theBoxIsFixedWhileItLoadsAndPlays() {
-        rule.setHappyContent { StateAnimation(StateArt.Waiting, size = 96.dp) }
+        rule.setHappyContent { StateAnimation(StateArt.Make, size = 96.dp) }
         val box = rule.node(StateAnimationTags.ANIMATION).bounds
         assertDp("width", 96, box.right - box.left)
         assertDp("height", 96, box.bottom - box.top)

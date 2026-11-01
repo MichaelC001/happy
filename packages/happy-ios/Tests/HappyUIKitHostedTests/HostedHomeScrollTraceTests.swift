@@ -46,10 +46,14 @@ private struct Unreachable: AgentTransport {
 ///     unlike its neighbours'. That difference is the jump.
 ///
 /// This is the measurement for "it jumps a little when I am scrolling".
-/// It is not a finger: `setContentOffset(animated:)` drives the scroll, so
+/// It is not a finger: a glide the list is sent on drives the scroll, so
 /// what it catches is everything home does to its own list while the list
 /// moves. The fixture is a fresh account with an unreachable computer and
 /// rows applied by hand, so nothing arrives but what each case sends.
+///
+/// Home's list is `SidebarList`; the folds at the end are `SidebarView`'s,
+/// which the session's tree and proposals still draw, so they run on one
+/// of their own.
 @MainActor
 final class HostedHomeScrollTraceTests: XCTestCase {
     override func setUp() {
@@ -101,7 +105,7 @@ final class HostedHomeScrollTraceTests: XCTestCase {
         return rows
     }
 
-    private func home() async throws -> (AccountController, UIWindow, SidebarView) {
+    private func home() async throws -> (AccountController, UIWindow, SidebarList) {
         let controller = AccountController(
             serverConfig: ServerConfig(storage: InMemoryKeyValueStore()),
             clientID: "ios/test",
@@ -132,8 +136,27 @@ final class HostedHomeScrollTraceTests: XCTestCase {
             hostWindow?.makeKey()
         }
         window.layoutIfNeeded()
-        let sidebar = try XCTUnwrap(Self.subview(SidebarView.self, in: home.view))
+        let sidebar = try XCTUnwrap(Self.subview(SidebarList.self, in: home.view))
         return (controller, window, sidebar)
+    }
+
+    /// A `SidebarView` of its own in a window, under a bar's room, grouped
+    /// as home's was: what folds.
+    private func foldingSidebar() async throws -> (UIWindow, UIWindow, SidebarView) {
+        let scene = try await hostedActiveScene()
+        let hostWindow = scene.keyWindow
+        let root = UIViewController()
+        let window = hostedKeyWindow(in: scene, root: root)
+        addTeardownBlock { @MainActor in
+            window.isHidden = true
+            hostWindow?.makeKey()
+        }
+        let sidebar = SidebarView(frame: root.view.bounds)
+        sidebar.style = .grouped
+        sidebar.contentInset = UIEdgeInsets(top: 120, left: 0, bottom: 80, right: 0)
+        root.view.addSubview(sidebar)
+        window.layoutIfNeeded()
+        return (window, window, sidebar)
     }
 
     private static func subview<T: UIView>(_ type: T.Type, in view: UIView) -> T? {
@@ -145,6 +168,16 @@ final class HostedHomeScrollTraceTests: XCTestCase {
     }
 
     /// A list scrolled to `offset`, showing `rows`, settled.
+    private func list(_ rows: [Row], at offset: CGFloat, _ sidebar: SidebarList) async {
+        sidebar.apply(rows)
+        await sidebar.settle()
+        // The rows are measured and drawn off the main thread before they show.
+        try? await Task.sleep(for: .milliseconds(150))
+        sidebar.setContentOffsetY(offset)
+        try? await Task.sleep(for: .milliseconds(150))
+        sidebar.layoutIfNeeded()
+    }
+
     private func list(_ rows: [Row], at offset: CGFloat, _ sidebar: SidebarView) {
         sidebar.apply(rows)
         sidebar.layoutIfNeeded()
@@ -152,7 +185,18 @@ final class HostedHomeScrollTraceTests: XCTestCase {
         sidebar.layoutIfNeeded()
     }
 
-    /// Where `id` sits in the window now.
+    /// Where `id`'s box sits in the window now.
+    private func windowY(_ id: String, _ sidebar: SidebarList, _ window: UIWindow) -> CGFloat? {
+        sidebar.view(for: id).map { $0.convert($0.box.origin, to: window).y }
+    }
+
+    /// Where `id`'s box is drawn in the window this frame, mid-glide too.
+    private func shownY(_ id: String, _ sidebar: SidebarList, _ window: UIWindow) -> CGFloat? {
+        guard let view = sidebar.view(for: id), let layer = view.layer.presentation(),
+              let windowLayer = window.layer.presentation() else { return windowY(id, sidebar, window) }
+        return layer.convert(view.box.origin, to: windowLayer).y
+    }
+
     private func windowY(_ id: String, _ sidebar: SidebarView, _ window: UIWindow) -> CGFloat? {
         sidebar.view(for: id).map { sidebar.convert($0.frame.origin, to: window).y }
     }
@@ -162,23 +206,25 @@ final class HostedHomeScrollTraceTests: XCTestCase {
     private func jumpAtRest(
         _ name: String,
         anchor: String,
-        _ sidebar: SidebarView,
+        _ sidebar: SidebarList,
         _ window: UIWindow,
         update: () -> Void
-    ) throws -> CGFloat {
+    ) async throws -> CGFloat {
         let before = try XCTUnwrap(windowY(anchor, sidebar, window), "\(name): no anchor before")
-        let offsetBefore = sidebar.contentOffset.y
+        let offsetBefore = sidebar.contentOffsetY
         update()
+        await sidebar.settle()
+        try? await Task.sleep(for: .milliseconds(150))
         sidebar.layoutIfNeeded()
         let after = try XCTUnwrap(windowY(anchor, sidebar, window), "\(name): no anchor after")
-        print("JUMP \(name): the row moved \(after - before)pt on screen; the list moved \(sidebar.contentOffset.y - offsetBefore)pt")
+        print("JUMP \(name): the row moved \(after - before)pt on screen; the list moved \(sidebar.contentOffsetY - offsetBefore)pt")
         return after - before
     }
 
     /// Records every display frame for `seconds`, running `during` at the
     /// times it names (seconds from the start).
     private func trace(
-        _ sidebar: SidebarView,
+        _ sidebar: SidebarList,
         window: UIWindow,
         anchor: String,
         seconds: Double,
@@ -195,14 +241,14 @@ final class HostedHomeScrollTraceTests: XCTestCase {
                     next.run()
                     sidebar.layoutIfNeeded()
                 }
-                guard let row = sidebar.view(for: anchor) else { return }
+                guard let row = sidebar.view(for: anchor), let shown = self.shownY(anchor, sidebar, window) else { return }
                 samples.append(Sample(
                     time: now,
-                    offset: sidebar.contentOffset.y,
-                    insetTop: sidebar.contentInset.top,
-                    contentHeight: sidebar.contentSize.height,
+                    offset: sidebar.contentOffsetY,
+                    insetTop: sidebar.contentInsets.top,
+                    contentHeight: sidebar.edge.contentSize.height,
                     anchorContentY: row.frame.minY,
-                    anchorWindowY: sidebar.convert(row.frame.origin, to: window).y
+                    anchorWindowY: shown
                 ))
             }
         }
@@ -250,39 +296,39 @@ final class HostedHomeScrollTraceTests: XCTestCase {
         let base = Self.rows(count: 60)
 
         // A conversation starts and stops working, above what is on screen.
-        list(base, at: 1000, sidebar)
-        var jump = try jumpAtRest("a row starts working above", anchor: anchor, sidebar, window) {
+        await list(base, at: 1000, sidebar)
+        var jump = try await jumpAtRest("a row starts working above", anchor: anchor, sidebar, window) {
             sidebar.apply(Self.rows(count: 60, working: [3, 4]))
         }
         XCTAssertEqual(jump, 0, accuracy: 0.01, "a status above moved the rows on screen")
 
         // A rename above and below.
-        list(base, at: 1000, sidebar)
-        jump = try jumpAtRest("a rename above", anchor: anchor, sidebar, window) {
+        await list(base, at: 1000, sidebar)
+        jump = try await jumpAtRest("a rename above", anchor: anchor, sidebar, window) {
             sidebar.apply(Self.rows(count: 60, labels: [2: "Renamed while reading", 50: "Also renamed"]))
         }
         XCTAssertEqual(jump, 0, accuracy: 0.01, "a rename moved the rows on screen")
 
         // Conversations arrive at the end, below what is on screen.
-        list(base, at: 1000, sidebar)
-        jump = try jumpAtRest("rows added below", anchor: anchor, sidebar, window) {
+        await list(base, at: 1000, sidebar)
+        jump = try await jumpAtRest("rows added below", anchor: anchor, sidebar, window) {
             sidebar.apply(Self.rows(count: 72))
         }
         XCTAssertEqual(jump, 0, accuracy: 0.01, "rows added below moved the rows on screen")
 
         // One arrives above what is on screen: the reader's place is kept,
         // so the list moves by the row's height and the screen does not.
-        list(base, at: 1000, sidebar)
-        let offsetBefore = sidebar.contentOffset.y
-        jump = try jumpAtRest("a row arriving above", anchor: anchor, sidebar, window) {
+        await list(base, at: 1000, sidebar)
+        let offsetBefore = sidebar.contentOffsetY
+        jump = try await jumpAtRest("a row arriving above", anchor: anchor, sidebar, window) {
             sidebar.apply(Self.rows(count: 60, extraAtTop: true))
         }
         XCTAssertEqual(jump, 0, accuracy: 0.01, "a row arriving above moved the rows on screen")
-        XCTAssertGreaterThan(sidebar.contentOffset.y - offsetBefore, 1, "the list must move by what arrived above it")
+        XCTAssertGreaterThan(sidebar.contentOffsetY - offsetBefore, 1, "the list must move by what arrived above it")
 
         // One goes away above what is on screen: likewise, the other way.
-        list(Self.rows(count: 60, extraAtTop: true), at: 1000, sidebar)
-        jump = try jumpAtRest("a row leaving above", anchor: anchor, sidebar, window) {
+        await list(Self.rows(count: 60, extraAtTop: true), at: 1000, sidebar)
+        jump = try await jumpAtRest("a row leaving above", anchor: anchor, sidebar, window) {
             sidebar.apply(base)
         }
         XCTAssertEqual(jump, 0, accuracy: 0.01, "a row leaving above moved the rows on screen")
@@ -293,13 +339,13 @@ final class HostedHomeScrollTraceTests: XCTestCase {
     /// and the list stays at its top rather than being pushed down.
     func testAtTheTopARowArrivingShows() async throws {
         let (controller, window, sidebar) = try await home()
-        list(Self.rows(count: 60), at: -sidebar.contentInset.top, sidebar)
-        let top = sidebar.contentOffset.y
+        await list(Self.rows(count: 60), at: -sidebar.contentInsets.top, sidebar)
+        let top = sidebar.contentOffsetY
         let below = try XCTUnwrap(windowY("space:0", sidebar, window))
-        let heading = try jumpAtRest("a row arriving at the top", anchor: "section:bots", sidebar, window) {
+        let heading = try await jumpAtRest("a row arriving at the top", anchor: "section:bots", sidebar, window) {
             sidebar.apply(Self.rows(count: 60, extraAtTop: true))
         }
-        XCTAssertEqual(sidebar.contentOffset.y, top, accuracy: 0.01, "the list left its top")
+        XCTAssertEqual(sidebar.contentOffsetY, top, accuracy: 0.01, "the list left its top")
         XCTAssertEqual(heading, 0, accuracy: 0.01, "the heading above it stays")
         XCTAssertNotNil(windowY("space:arrived", sidebar, window), "the row that arrived isn't there")
         let moved = try XCTUnwrap(windowY("space:0", sidebar, window)) - below
@@ -322,9 +368,9 @@ final class HostedHomeScrollTraceTests: XCTestCase {
     func testUpdatesWhileScrollingAreNoWorseThanTheScrollAlone() async throws {
         let (controller, window, sidebar) = try await home()
         func scroll(_ updates: [(at: Double, run: () -> Void)]) async throws -> [Sample] {
-            list(Self.rows(count: 60), at: 400, sidebar)
+            await list(Self.rows(count: 60), at: 400, sidebar)
             return try await trace(sidebar, window: window, anchor: "space:30", seconds: 1.4, during: [
-                (at: 0.1, run: { sidebar.setContentOffset(CGPoint(x: 0, y: 1200), animated: true) }),
+                (at: 0.1, run: { sidebar.setContentOffsetY(1200, animated: true) }),
             ] + updates)
         }
         let alone = try await scroll([])
@@ -391,7 +437,7 @@ final class HostedHomeScrollTraceTests: XCTestCase {
     /// on the fold, whole on the opening, nothing animating.
     func testAFoldTheFingerMakesFadesItsRowsOrIsInstantUnderReduceMotion() async throws {
         let still = reduceMotion()
-        let (controller, _, sidebar) = try await home()
+        let (controller, _, sidebar) = try await foldingSidebar()
         sidebar.onFold = { _ in }
         list(Self.tasks(open: true), at: -sidebar.contentInset.top, sidebar)
         let child = "space:22"
@@ -438,7 +484,7 @@ final class HostedHomeScrollTraceTests: XCTestCase {
     /// whole, and taking touches.
     func testAFoldUndoneAtOnceLeavesOneWholeRow() async throws {
         let still = reduceMotion()
-        let (controller, _, sidebar) = try await home()
+        let (controller, _, sidebar) = try await foldingSidebar()
         sidebar.onFold = { _ in }
         list(Self.tasks(open: true), at: -sidebar.contentInset.top, sidebar)
         let child = "space:22"
@@ -468,7 +514,7 @@ final class HostedHomeScrollTraceTests: XCTestCase {
     /// Its subtasks fade out and in under it with motion, at once without.
     func testAConversationsChevronFoldsItsSubtasksTheSameWay() async throws {
         let still = reduceMotion()
-        let (controller, _, sidebar) = try await home()
+        let (controller, _, sidebar) = try await foldingSidebar()
         var folded: [String] = []
         sidebar.onFold = { folded.append($0.id) }
         func rows(open: Bool) -> [Row] {
@@ -523,7 +569,7 @@ final class HostedHomeScrollTraceTests: XCTestCase {
     /// Only the reader's own fold glides. The same rows going because of
     /// something elsewhere are shown at once, as every other update is.
     func testAFoldFromElsewhereIsShownAtOnce() async throws {
-        let (controller, _, sidebar) = try await home()
+        let (controller, _, sidebar) = try await foldingSidebar()
         sidebar.onFold = { _ in }
         list(Self.tasks(open: true), at: -sidebar.contentInset.top, sidebar)
         let before = try XCTUnwrap(sidebar.view(for: "space:22"))
@@ -537,7 +583,7 @@ final class HostedHomeScrollTraceTests: XCTestCase {
     /// The rows above a fold don't move on screen, while it glides or
     /// after: the reader's place is kept as it is for every other update.
     func testAFoldMovesNothingAboveIt() async throws {
-        let (controller, window, sidebar) = try await home()
+        let (controller, window, sidebar) = try await foldingSidebar()
         sidebar.onFold = { _ in }
         list(Self.tasks(open: true), at: -sidebar.contentInset.top, sidebar)
         // The heading on screen with rows above it: a finger can reach it.

@@ -113,14 +113,13 @@ class ConnectFlowTest {
     @Test
     fun theTerminalScannerSaysWhatEveryOtherCodeIs() {
         setTerminal()
-        assertScanSays(ScanResult.Scanned(accountUrl), "This code links a new device. Scan it from Settings › Account › Link New Device.")
+        assertScanSays(ScanResult.Scanned(accountUrl), "This code links a new device. Scan it from Settings › Backup & Restore › Link New Device.")
         assertScanSays(ScanResult.Scanned("https://example.com"), "This QR code isn't a Happy code.")
         assertScanSays(ScanResult.Scanned("happy://something?else"), "This QR code isn't a Happy code.")
         assertScanSays(ScanResult.Scanned("happy://direct?abc"), "This code connects an agent. Use Add in the account menu on Home.")
-        assertScanSays(
-            ScanResult.Failed("Google Play services are not available"),
-            "The QR scanner isn't available on this device. Paste the link instead.",
-        )
+        assertScanSays(ScanResult.Failed(ScanFailure.Unavailable), "The QR scanner isn't available on this device. Paste the link instead.")
+        assertScanSays(ScanResult.Failed(ScanFailure.NoCamera), "This device has no camera. Paste the link instead.")
+        assertScanSays(ScanResult.Failed(ScanFailure.CameraFailed), "The camera couldn't start. Try again, or paste the link instead.")
         assertEquals(0, successes)
     }
 
@@ -148,7 +147,7 @@ class ConnectFlowTest {
         setTerminal()
         // A Happy code of another kind names the screen it belongs to, as the
         // camera does; only a link of no known kind is simply invalid.
-        val elsewhere = "This code links a new device. Scan it from Settings › Account › Link New Device."
+        val elsewhere = "This code links a new device. Scan it from Settings › Backup & Restore › Link New Device."
         rule.runOnIdle { flow.connectWithUrl(accountUrl) }
         rule.onNodeWithText(elsewhere).assertExists()
         rule.onNodeWithText("OK").performClick()

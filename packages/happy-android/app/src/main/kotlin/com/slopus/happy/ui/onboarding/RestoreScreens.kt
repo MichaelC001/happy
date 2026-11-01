@@ -41,7 +41,6 @@ import com.slopus.happy.ui.components.RoundButtonDisplay
 import com.slopus.happy.ui.components.RoundButtonSize
 import com.slopus.happy.ui.components.Screen
 import com.slopus.happy.ui.components.StackHeader
-import com.slopus.happy.ui.components.TitleAlignment
 import com.slopus.happy.ui.theme.HappyTheme
 import com.slopus.happy.ui.theme.AppMono
 import com.slopus.happy.ui.theme.happyTextStyle
@@ -116,7 +115,7 @@ object RestoreSpec {
 @Composable
 fun RestoreScreen(code: RestoreCode, onBack: () -> Unit, onRetry: () -> Unit, onUseSecretKey: () -> Unit) {
     val colors = HappyTheme.colors
-    Screen(header = { StackHeader(stringResource(R.string.onboarding_restore_title), onBack, TitleAlignment.Center) }) {
+    Screen(header = { StackHeader(stringResource(R.string.onboarding_restore_title), onBack) }) {
         BoxWithConstraints {
             val viewport = maxHeight
             Column(
@@ -229,7 +228,7 @@ fun RestoreManualScreen(
     val focusRequester = remember { FocusRequester() }
     if (autoFocus) LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
-    Screen(header = { StackHeader(stringResource(R.string.onboarding_secret_key_title), onBack, TitleAlignment.Center) }, avoidKeyboard = true) {
+    Screen(header = { StackHeader(stringResource(R.string.onboarding_secret_key_title), onBack) }, avoidKeyboard = true) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()

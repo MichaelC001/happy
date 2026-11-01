@@ -55,17 +55,17 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
     #if DEBUG || HAPPY_FIXTURES
     private var homeRenderer: HomeRendererHarness?
     private var agent: AgentHarness?
-    private var storyRows: StoryRowsHarness?
     private var agentList: AgentListScrollHarness?
     private var composerKeyboardProbe: ComposerKeyboardProbe?
     private var realArchive: RealArchiveHarness?
     private var qaProbe: ChatUltraQAProbe?
     private var motionScript: ChatMotionScript?
     private var qaReal: ChatUltraQAReal?
-    private var stories: StoriesHarness?
     private var homeControllerScroll: HomeControllerScrollHarness?
     private var homeScrollDiagnostic: HomeScrollDiagnosticHarness?
     private var groupedHome: GroupedHomeHarness?
+    private var chatHeader: ChatHeaderHarness?
+    private var avatarSpeeds: AvatarSpeedHarness?
     #endif
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
@@ -92,10 +92,7 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
             qaReal = ChatUltraQAReal(window: window)
             return
         }
-        if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "stories" {
-            stories = StoriesHarness(window: window)
-            return
-        }
+
         if arguments.contains("-real-archive") {
             realArchive = RealArchiveHarness(window: window)
             return
@@ -118,10 +115,15 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
             groupedHome = GroupedHomeHarness(window: window, arguments: arguments)
             return
         }
-        if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "storyRows" {
-            storyRows = StoryRowsHarness(window: window)
+        if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "avatarSpeeds" {
+            avatarSpeeds = AvatarSpeedHarness(window: window, arguments: arguments)
             return
         }
+        if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "chatHeader" {
+            chatHeader = ChatHeaderHarness(window: window, arguments: arguments)
+            return
+        }
+
         #endif
         if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "whatsnew" {
             whatsNew = WhatsNewProbe(window: window, arguments: arguments)
@@ -154,7 +156,6 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         guard let account = controller.session else { fatalError("harness has no session") }
         self.controller = controller
-        controller.localSettings.chatListRenderer = ProcessInfo.processInfo.arguments.contains("-chatUltraList") ? .ultraList : .collectionView
         let context = AppContext(account: controller, variant: .development, version: "harness")
         let chat = LegacyChatViewController(context: context, session: account, sessionId: FixtureScenarios.prefix + fixture)
         let home = UIViewController()
@@ -374,8 +375,7 @@ final class ChatScrollProbe: NSObject {
     }
 
     /// Who moves the keyboard: UltraView's controller, the list's system
-    /// interactive dismissal on UltraList, or the layout guide on
-    /// UICollectionView.
+    /// interactive dismissal, or the layout guide while docked.
     private func keyboardDriver(_ chat: UIViewController) -> String {
         guard let keyboard = (chat as? LegacyChatViewController)?.ultraKeyboard else { return "guide" }
         return keyboard.isAvailable ? "controller" : "system"
@@ -493,7 +493,7 @@ final class ChatScrollProbe: NSObject {
         value["maxDistance"] = list.maximumVisibleMinY
         value["contentHeight"] = list.contentHeight
         value["rows"] = list.isDisplayReady ? list.plans.count : 0
-        value["renderer"] = list.renderer.rawValue
+        value["renderer"] = "UltraList"
         value["newestInset"] = inset.top
         value["oldestInset"] = inset.bottom
         let safe = chat.view.safeAreaInsets

@@ -46,6 +46,8 @@ import com.slopus.happy.conversation.ConversationApiException
 import com.slopus.happy.conversation.Question
 import com.slopus.happy.conversation.SecretSummary
 import com.slopus.happy.ui.components.HappyTextField
+import com.slopus.happy.ui.components.ShimmerSpec
+import com.slopus.happy.ui.components.ShimmerText
 import com.slopus.happy.ui.theme.HappyTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -242,7 +244,7 @@ internal fun SecretRequestForm(
                     // Only while nothing is in flight: a half-sent create whose id we
                     // threw away would leave a secret behind that nothing points at.
                     FormButton(
-                        label = stringResource(R.string.conversation_secret_cancel),
+                        label = stringResource(R.string.common_cancel),
                         tag = SecretRequestTags.CANCEL,
                         enabled = !sending,
                         background = colors.surfaceHigh,
@@ -258,6 +260,7 @@ internal fun SecretRequestForm(
                     tag = SecretRequestTags.SUBMIT,
                     enabled = ready,
                     background = colors.surfaceHighest,
+                    busy = sending,
                 ) {
                     sending = true
                     problem = null
@@ -391,17 +394,27 @@ private fun FormButton(
     tag: String,
     enabled: Boolean,
     background: androidx.compose.ui.graphics.Color,
+    busy: Boolean = false,
     onClick: () -> Unit,
 ) {
+    val colors = HappyTheme.colors
     Box(
         modifier = Modifier
             .testTag(tag)
-            .alpha(if (enabled) 1f else 0.5f)
+            // Busy, it keeps full strength: the shimmer says it's working (desktop's Submit).
+            .alpha(if (enabled || busy) 1f else 0.5f)
             .clip(RoundedCornerShape(8.dp))
             .background(background)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),
     ) {
-        Text(label, style = ConversationQuestionSpec.field, color = HappyTheme.colors.text)
+        ShimmerText(
+            label,
+            style = ConversationQuestionSpec.field,
+            baseColor = ShimmerSpec.rest(colors.text, background),
+            highlightColor = colors.text,
+            shimmering = busy,
+            stillColor = colors.text,
+        )
     }
 }

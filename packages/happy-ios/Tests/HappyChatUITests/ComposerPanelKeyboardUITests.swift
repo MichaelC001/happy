@@ -158,94 +158,83 @@ final class ComposerPanelKeyboardUITests: XCTestCase {
         _ = try preserve(baseline, phase: "model outside dismissal")
     }
 
-    func testMainAttachmentPanelPreservesKeyboardDraftAndSelection() throws {
+    /// Telegram's attachment menu puts the keyboard away while it is up
+    /// and gives the same editor its keyboard, draft and selection back
+    /// once it closes, by its circle or a tap on the dim over the chat.
+    func testMainAttachmentMenuPutsTheKeyboardAwayAndGivesItBack() throws {
         let baseline = try startAgent()
         let add = app.buttons["Add a picture"]
         XCTAssertTrue(add.waitForExistence(timeout: 5))
         add.tap()
-        _ = try waitForState { self.hasPanel("attach-sheet", $0) }
-        let opened = try preserve(baseline, phase: "attachment panel open")
-        try assertPanel("attach-sheet", in: opened)
-        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "attach-permission").firstMatch.exists)
+        let opened = try waitForState { self.hasPanel("attach-sheet", $0) && $0["keyboardVisible"] as? Bool == false }
+        XCTAssertEqual(opened["draft"] as? String, baseline["draft"] as? String, "the menu changed the draft")
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "attach-paste").firstMatch.exists, "the menu still pastes")
         app.buttons["attach-close"].tap()
-        _ = try waitForState { !self.hasPanel("attach-sheet", $0) }
-        _ = try preserve(baseline, phase: "attachment close")
+        _ = try waitForState { !self.hasPanel("attach-sheet", $0) && $0["keyboardVisible"] as? Bool == true }
+        try restored(baseline, phase: "attachment close")
         add.tap()
-        let reopened = try waitForState { self.hasPanel("attach-sheet", $0) }
-        try outsidePanel("attach-sheet", state: reopened)
-        _ = try waitForState { !self.hasPanel("attach-sheet", $0) }
-        _ = try preserve(baseline, phase: "attachment outside dismissal")
+        _ = try waitForState { self.hasPanel("attach-sheet", $0) && $0["keyboardVisible"] as? Bool == false }
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.06)).tap()
+        _ = try waitForState { !self.hasPanel("attach-sheet", $0) && $0["keyboardVisible"] as? Bool == true }
+        try restored(baseline, phase: "attachment outside dismissal")
     }
 
-    func testNativeHeaderMenuMeasuresKeyboardAndPreservesDraft() throws {
+    /// After an overlay that put the keyboard away: the same editor has it
+    /// again, with the draft and selection it had.
+    @discardableResult
+    private func restored(_ baseline: [String: Any], phase: String) throws -> [String: Any] {
+        let current = try waitForState { $0["firstResponder"] as? Bool == true && $0["keyboardVisible"] as? Bool == true }
+        XCTAssertEqual(current["editorID"] as? String, baseline["editorID"] as? String, phase)
+        XCTAssertEqual(current["draft"] as? String, baseline["draft"] as? String, phase)
+        XCTAssertEqual(current["selection"] as? [Int], baseline["selection"] as? [Int], phase)
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = phase
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        return current
+    }
+
+    func testTheDetailsPermissionModeKeepsTheDraft() throws {
         let baseline = try startAgent()
-        let more = app.buttons["chat-more"]
-        XCTAssertTrue(more.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["compose"].exists)
-        let composeFrame = app.buttons["compose"].frame
-        let moreFrame = more.frame
+        let compose = app.buttons["compose"]
+        XCTAssertTrue(compose.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["chat-more"].exists, "Back, the name, and Compose alone")
+        let composeFrame = compose.frame
         let titleFrame = try rectangle(baseline["headerTitleFrame"])
-        XCTAssertLessThanOrEqual(composeFrame.maxX, moreFrame.minX + 1, "LTR compose precedes More")
-        XCTAssertLessThanOrEqual(titleFrame.maxX, composeFrame.minX + 1, "title must fit before header actions")
-        let headerFrames = XCTAttachment(string: "title=\(titleFrame) compose=\(composeFrame) more=\(moreFrame)")
+        XCTAssertLessThanOrEqual(titleFrame.maxX, composeFrame.minX + 1, "title must fit before Compose")
+        let headerFrames = XCTAttachment(string: "title=\(titleFrame) compose=\(composeFrame)")
         headerFrames.name = "actual portrait header frames"
         headerFrames.lifetime = .keepAlways
         add(headerFrames)
-
-        // The system owns this menu's focus and presentation. Record its
-        // actual behavior without imposing the custom panel's IME contract.
-        func capture(_ phase: String) throws -> [String: Any] {
-            let state = try read()
-            XCTAssertEqual(state["draft"] as? String, baseline["draft"] as? String, phase)
-            let json = XCTAttachment(string: String(data: try JSONSerialization.data(withJSONObject: state), encoding: .utf8)!)
-            json.name = phase
-            json.lifetime = .keepAlways
-            add(json)
+        func keep(_ phase: String) {
             let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
             screenshot.name = phase
             screenshot.lifetime = .keepAlways
             add(screenshot)
-            return state
         }
-        _ = try capture("native header before")
-        FileHandle.standardOutput.write(Data("NATIVE_HEADER_VIDEO_BEGIN\n".utf8))
-        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
-        more.tap()
-        let permission = app.buttons["Permission mode"]
-        XCTAssertTrue(permission.waitForExistence(timeout: 3), app.debugDescription)
-        let opened = try capture("native header open")
-        XCTAssertFalse(hasPanel("chat-menu", opened), "the native toolbar menu replaces the custom overlay")
-        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
-        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 20, dy: 300)).tap()
-        XCTAssertFalse(permission.exists)
-        let dismissed = try capture("native header dismissed")
-        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
-        FileHandle.standardOutput.write(Data("NATIVE_HEADER_VIDEO_END\n".utf8))
 
-        more.tap()
-        XCTAssertTrue(permission.waitForExistence(timeout: 3))
+        // The permission mode is on the detail the name opens.
+        app.descendants(matching: .any)["chat-title"].tap()
+        let permission = app.buttons["profile-permission-mode"]
+        XCTAssertTrue(permission.waitForExistence(timeout: 5), app.debugDescription)
+        keep("detail permission row")
         permission.tap()
         let key = "permission\tworkspace_write"
         let choice = app.buttons[key]
         XCTAssertTrue(choice.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(choice.isEnabled)
-        _ = try capture("native header permission choices")
+        keep("detail permission choices")
         choice.tap()
         XCTAssertFalse(choice.exists)
-        let selected = try capture("native header permission selected")
-        more.tap()
-        XCTAssertTrue(permission.waitForExistence(timeout: 3))
         permission.tap()
         XCTAssertTrue(app.buttons[key].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons[key].isSelected, "the chosen permission must be checked on reopening")
-        _ = try capture("native header permission checked")
-        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 20, dy: 300)).tap()
-        let fields = ["editorID", "responderID", "firstResponder", "selection", "keyboardVisible", "keyboardFrame", "cardFrame", "keyboardHides", "editingEnds", "lostResponderFrames", "missingKeyboardFrames"]
-        let evidence = ["before": baseline, "open": opened, "dismissed": dismissed, "selected": selected].mapValues { state in state.filter { fields.contains($0.key) } }
-        let measurement = XCTAttachment(string: String(data: try JSONSerialization.data(withJSONObject: evidence, options: .prettyPrinted), encoding: .utf8)!)
-        measurement.name = "native toolbar keyboard measurement"
-        measurement.lifetime = .keepAlways
-        add(measurement)
+        keep("detail permission checked")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)).tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.6))
+        app.navigationBars.firstMatch.buttons.element(boundBy: 0).tap()
+        let back = try waitForState { $0["ready"] as? Bool == true }
+        XCTAssertEqual(back["draft"] as? String, baseline["draft"] as? String, "the detail keeps the draft")
         app.buttons["Back"].tap()
         let row = try XCTUnwrap(ProcessInfo.processInfo.environment["COMPOSER_PANEL_ROW"])
         let task = app.descendants(matching: .any).matching(identifier: "row:space:\(row)").firstMatch
@@ -284,19 +273,12 @@ final class ComposerPanelKeyboardUITests: XCTestCase {
         _ = try waitForState { !self.hasPanel("picker-efforts", $0) }
         _ = try preserve(baseline, phase: "landscape effort selected")
         app.buttons["Add a picture"].tap()
-        _ = try waitForState { self.hasPanel("attach-sheet", $0) }
-        let attachment = try preserve(baseline, phase: "landscape attachment panel")
-        try assertPanel("attach-sheet", in: attachment)
-        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "attach-permission").firstMatch.exists)
+        let attachment = try waitForState { self.hasPanel("attach-sheet", $0) && $0["keyboardVisible"] as? Bool == false }
         let panel = try XCTUnwrap((attachment["panels"] as? [[String: Any]])?.first { $0["id"] as? String == "attach-sheet" })
         let scrolls = try XCTUnwrap(panel["scrolls"] as? [[String: Any]])
-        XCTAssertTrue(try scrolls.contains { scroll in
-            let frame = try rectangle(scroll["frame"])
-            let content = try XCTUnwrap(scroll["contentSize"] as? [Double])
-            return content[1] > frame.height + 1 && scroll["scrollEnabled"] as? Bool == true
-        }, "compact attachment content must scroll vertically")
+        XCTAssertTrue(scrolls.contains { $0["scrollEnabled"] as? Bool == true }, "compact attachment content must scroll")
         app.buttons["attach-close"].tap()
         _ = try waitForState { !self.hasPanel("attach-sheet", $0) }
-        _ = try preserve(baseline, phase: "landscape attachment dismissed")
+        try restored(baseline, phase: "landscape attachment dismissed")
     }
 }

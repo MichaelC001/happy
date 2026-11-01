@@ -1,6 +1,7 @@
 package com.slopus.happy.ui.chat
 
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -11,7 +12,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.compose.composable
 import androidx.navigation.NavHostController
-import androidx.navigation.NavDestination.Companion.hasRoute
+import androidx.navigation.toRoute
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.Text
 import androidx.test.core.app.ApplicationProvider
@@ -102,8 +103,9 @@ class ChatRouteTest {
         rule.onNodeWithText("Port the chat").assertExists()
     }
 
+    /** Compose in a chat: an empty chat over the new-session draft takes that chat's place, so Back is home. */
     @Test
-    fun composeOpensExistingCreationFlowWithoutResettingDraftsAndBackReturnsHome() {
+    fun composeTakesTheChatsPlaceWithTheNewSessionDraftAndBackReturnsHome() {
         val creation = HomeServices.of(graph).newSession(ApplicationProvider.getApplicationContext())
         creation.setInput("unfinished new session")
         val writes = mutableListOf<String>()
@@ -124,15 +126,32 @@ class ChatRouteTest {
         rule.node(ComposerTags.INPUT).performTextInput("unfinished current chat")
         rule.waitUntil(5_000) { writes.lastOrNull() == "unfinished current chat" }
         rule.node(ChatScreenTags.COMPOSE).performClick()
-        rule.waitUntilAtLeastOneExists(hasText("Creation fixture"), 5_000)
-        assertEquals("unfinished new session", creation.draft.value.input)
+        rule.waitUntil(5_000) { nav.currentBackStackEntry?.toRoute<SessionRoute>()?.id?.let(::isComposeChatId) == true }
+        rule.node(ComposerTags.INPUT).assertTextEquals("unfinished new session")
+        rule.onNodeWithText("Ported, with tests.").assertDoesNotExist()
         assertEquals(listOf("unfinished current chat"), writes)
         rule.runOnIdle {
-            assertEquals(true, nav.currentDestination?.hasRoute<NewSessionRoute>())
             assertEquals("fixture-home", nav.previousBackStackEntry?.destination?.route)
             nav.popBackStack()
         }
         rule.waitUntilAtLeastOneExists(hasText("Home fixture"), 5_000)
+        // The draft outlives the screen, for the next compose.
+        assertEquals("unfinished new session", creation.draft.value.input)
+    }
+
+    /** The empty chat's composer writes the new-session draft; a start that is refused says why and keeps the text. */
+    @Test
+    fun aRefusedStartSaysWhyAndKeepsTheText() {
+        val creation = HomeServices.of(graph).newSession(ApplicationProvider.getApplicationContext())
+        creation.setInput("")
+        open(newComposeChatId())
+        rule.waitUntilAtLeastOneExists(hasTestTag(ComposerTags.INPUT), 5_000)
+        rule.node(ComposerTags.INPUT).performTextInput("start something")
+        rule.waitUntil(5_000) { creation.draft.value.input == "start something" }
+        rule.node(ComposerTags.PRIMARY).performClick()
+        rule.waitUntilAtLeastOneExists(hasText("Please select a machine"), 5_000)
+        rule.node(ComposerTags.INPUT).assertTextEquals("start something")
+        assertEquals("start something", creation.draft.value.input)
     }
 
     @Test

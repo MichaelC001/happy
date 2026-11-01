@@ -65,8 +65,9 @@ public struct Shared: Equatable, Sendable {
     static func of(item: ChatItem) -> Shared {
         var shared = Shared()
         switch item.role {
-        case .collaborator, .failure: return shared
-        case .user, .agent: break
+        case .collaborator, .failure, .turnEnd, .question, .trace: return shared
+        // A tool call's pieces are what it showed.
+        case .user, .agent, .tool: break
         }
         var media: [Media] = []
         var texts: [String] = []
@@ -76,7 +77,8 @@ public struct Shared: Equatable, Sendable {
             case .gallery(let shown, _), .tree(let shown, _): media += shown.map(Media.tool)
             case .file(let one): media.append(.tool(one))
             case .text(let text): texts.append(text)
-            case .artifact, .story, .sidebarProposal: break
+            // Not the computer's yet: it is shared once it is there.
+            case .artifact, .sidebarProposal, .sentFile: break
             }
         }
         shared.add(media: media, texts: texts)
@@ -121,7 +123,7 @@ public struct Shared: Equatable, Sendable {
                 case .image(let mimeType, let data):
                     if let bytes = Data(base64Encoded: data) { media.append(.picture(id: pictureId(message.id, pictures), mimeType: mimeType, data: bytes)) }
                     pictures += 1
-                case .toolCall(let id, _, _, let presentation):
+                case .toolCall(let id, _, _, let presentation, _, _):
                     guard let presentation, presentation.type == "media" else { continue }
                     media += (presentation.items ?? []).enumerated().map { .tool(HappyCore.Media(toolCallId: id, index: $0.offset, item: $0.element)) }
                 case .reasoning, .unknown:

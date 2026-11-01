@@ -132,6 +132,7 @@ class ChatJourneyTest {
         rule.assertActionsLabelled()
         back()
         rule.waitFor(ChatScreenTags.SCREEN)
+        rule.waitFor(ToolTags.FILE_HEADER)
 
         // The patch opened on one of its files.
         rule.onAllNodesWithTag(ToolTags.FILE_HEADER, useUnmergedTree = true).onFirst().performClick()

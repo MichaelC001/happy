@@ -25,12 +25,10 @@ import com.slopus.happy.model.displayName
 import com.slopus.happy.model.resumeCommand
 import com.slopus.happy.sync.ComposerMirror
 import com.slopus.happy.sync.OpResult
-import com.slopus.happy.ui.components.Header
-import com.slopus.happy.ui.components.HeaderBackButton
+import com.slopus.happy.ui.components.StackHeader
 import com.slopus.happy.ui.components.Icon
 import com.slopus.happy.ui.components.Ionicon
 import com.slopus.happy.ui.components.Screen
-import com.slopus.happy.ui.components.TitleAlignment
 import com.slopus.happy.ui.components.confirm
 import com.slopus.happy.ui.home.ArchiveResult
 import com.slopus.happy.ui.theme.HappyTheme
@@ -132,7 +130,7 @@ class SessionInfoActions(
 )
 
 /**
- * session/[id]/info.tsx. The header names the session, centred. While the
+ * session/[id]/info.tsx. The Material bar names the session, on glass. While the
  * first sync is out, an hourglass and "Loading"; a session that's gone says
  * so. Otherwise: quick actions (changes with Happy Agent's counts, the
  * machine, resume, fork, duplicate, the parent, archive and delete), the
@@ -175,7 +173,7 @@ fun SessionInfoScreen(
     }
     Screen(
         modifier = modifier,
-        header = { Header(title = title, alignment = TitleAlignment.Center, left = { HeaderBackButton(onClick = actions.onBack) }) },
+        header = { StackHeader(title, actions.onBack) },
     ) {
         when {
             !ready -> Placeholder(Ionicon.HourglassOutline, Modifier.testTag(SessionInfoTags.LOADING)) {

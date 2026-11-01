@@ -10,7 +10,11 @@ public struct HomeSnapshot: Equatable, Sendable {
     public var rows: [Row] = []
     public var allRows: [Row] = []
     public var settings: [String: JSONValue] = [:]
+    /// The person signed in as a team user; nil outside a team.
+    public var userId: String?
     public var error: String?
+    /// An action the computer refused, said for a moment while it rolls back.
+    public var notice: String?
     public init() {}
 }
 
@@ -22,6 +26,23 @@ public actor SyncEngine {
     public nonisolated let spaces: Store
     public nonisolated let offline: OfflineFile?
     public nonisolated let attachmentDirectory: URL
+    /// The person's actions on their way: chats read, tasks archived, names
+    /// given (docs/offline-first.md). Shown at once over what the computer
+    /// last said, kept in `direct.sqlite`, sent once the account is live.
+    public nonisolated let intents: IntentOutbox
+    private var overlay = IntentOverlay()
+    /// What waits in `intents`, as last published.
+    private var waiting: [Intent] = []
+    /// Taken by the computer but laid over what it last said until a read
+    /// of it that began after it took them, so nothing flickers back in
+    /// between: each with the number of the read last begun then.
+    private var settling: [(intent: Intent, read: Int)] = []
+    /// Refused before the list said they were gone: not settling.
+    private var refusedIds: Set<String> = []
+    /// Reads of the computer begun (`reconcile`).
+    private var reads = 0
+    private var intentsFollowing: Task<Void, Never>?
+    private var noticeClearing: Task<Void, Never>?
     private let url: URL?
     private var storage: SyncStorage?
     private var desktop: DesktopSnapshot?
@@ -36,12 +57,24 @@ public actor SyncEngine {
     private var verified = false
     private var settingsDeliveryDirty = false
     private var messageDeliveryDirty = false
+    /// The queued message being delivered now, and those being changed,
+    /// which delivery leaves until they are written again.
+    private var deliveringMessage: String?
+    private var holding: Set<String> = []
     private var generation = 0
     private var stopped = false
     private var cursor: String?
     private var dirty = false
     private var revision = 0
     private var sidebarSyncing = false
+    /// The team members the listed tasks belong to, as last read, kept
+    /// beside the bootstrap (`TeamUser`); those asked for and not named,
+    /// left until the stream comes back; and those to read again.
+    private var users: [String: TeamUser] = [:]
+    private var usersMissing: Set<String> = []
+    private var usersAgain: Set<String> = []
+    private var usersDirty = false
+    private var usersRead: Task<Void, Never>?
 
     public init(client: AgentClient, directory: URL?) {
         self.client = client
@@ -49,7 +82,11 @@ public actor SyncEngine {
         offline = directory.map(OfflineFile.init(directory:))
         attachmentDirectory = (directory ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
             .appendingPathComponent("outbox-files", isDirectory: true)
-        spaces = Store(client: client, offline: offline)
+        let forward = EngineIntentStorage()
+        let intents = IntentOutbox(storage: forward, deliver: { try await SyncEngine.deliver($0, client: client) })
+        self.intents = intents
+        spaces = Store(client: client, offline: offline, intents: intents)
+        forward.engine = self
     }
 
     public func snapshots() -> AsyncStream<HomeSnapshot> {
@@ -97,10 +134,11 @@ public actor SyncEngine {
         generation += 1
         verified = false
         let pausedGeneration = generation
-        let tasks = [runner, refresh, delivery, messageDelivery].compactMap { $0 }
-        runner = nil; refresh = nil; delivery = nil; messageDelivery = nil
+        let tasks = [runner, refresh, delivery, messageDelivery, usersRead].compactMap { $0 }
+        runner = nil; refresh = nil; delivery = nil; messageDelivery = nil; usersRead = nil
         tasks.forEach { $0.cancel() }
         for task in tasks { await task.value }
+        await intents.setOnline(false)
         guard generation == pausedGeneration else { return }
         await spaces.pause()
         guard generation == pausedGeneration else { return }
@@ -108,10 +146,24 @@ public actor SyncEngine {
         publish()
     }
 
+    /// The phone has a way out again: try now, not when the backoff says.
+    /// Does nothing while the engine is paused or already live.
+    public func reconnect() async {
+        guard !stopped, runner != nil, !snapshot.live else { return }
+        // What failed while there was no network says nothing of the
+        // computer: the header says "connecting…" until this try answers.
+        // Cleared in the same turn as the pause, which publishes it.
+        snapshot.error = nil
+        await pause()
+        start()
+    }
+
     public func stop() async {
         stopped = true
         await pause()
         await spaces.stop()
+        intentsFollowing?.cancel()
+        await intents.close()
         try? await storage?.close()
         for listener in listeners.values { listener.finish() }
         listeners.removeAll()
@@ -135,7 +187,16 @@ public actor SyncEngine {
                 desktop = try JSONDecoder().decode(DesktopSnapshot.self, from: JSONEncoder().encode(cached.value))
                 cursor = cached.cursor
             }
+            if users.isEmpty, let kept = try await database.checkpoint("users"),
+               let list = try? JSONDecoder().decode([Lossy<TeamUser>].self, from: JSONEncoder().encode(kept.value)) {
+                users = Dictionary(list.compactMap(\.value).map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+            }
             snapshot.settings = try await database.settings()
+            // What the person did last time, over what was kept, from the
+            // first frame: nothing flickers back while it waits.
+            waiting = await intents.pending()
+            overlay = IntentOverlay(settling.map(\.intent) + waiting)
+            followIntents()
             guard current(generation) else { return }
             derive()
             await spaces.startExternal()
@@ -153,6 +214,7 @@ public actor SyncEngine {
                 try await reconcile(generation)
                 beginDelivery(generation)
                 beginMessageDelivery(generation)
+                await intents.setOnline(deliveryAllowed)
                 let stream = try await client.events(after: cursor)
                 for try await frame in stream {
                     guard current(generation) else { return }
@@ -166,13 +228,19 @@ public actor SyncEngine {
                         let hello = try JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8))
                         if hello["gap"] == .bool(true) { scheduleReconcile(generation) }
                         profileChanged()
+                        // Faces may have changed while away.
+                        usersMissing = []
+                        readAuthors(generation, again: Set(users.keys))
                         try await resyncSidebar(generation)
                         continue
                     }
                     guard let event = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8)) else { continue }
                     await spaces.externalEvent(event)
                     guard current(generation) else { return }
-                    if event["type"] == .string("profile.updated") { profileChanged() }
+                    if event["type"] == .string("profile.updated") {
+                        profileChanged()
+                        authorChanged(event["payload"]?["userId"]?.stringValue, generation)
+                    }
                     if event["type"] == .string("user_settings.updated"), let value = event["payload"]?["setting"],
                        let setting = try? JSONDecoder().decode(UserSetting.self, from: JSONEncoder().encode(value)) {
                         try await database().receiveSetting(setting.key, value: setting.value, version: setting.version)
@@ -246,6 +314,8 @@ public actor SyncEngine {
 
     private func reconcile(_ generation: Int) async throws {
         let revision = revision
+        reads += 1
+        let read = reads
         let database = try database()
         let settingRevision = await database.confirmedSettingsRevision()
         let value = try await client.decode(JSONValue.self, "GET", "/v0/bootstrap/desktop")
@@ -276,7 +346,69 @@ public actor SyncEngine {
         verified = true
         cursor = desktop.cursor
         snapshot.settings = try await database.settings()
+        // This read began after these were taken, so it has them.
+        if settling.contains(where: { $0.read < read }) {
+            settling.removeAll { $0.read < read }
+            await layIntents()
+        }
         derive()
+        readAuthors(generation)
+    }
+
+    // MARK: Authors
+
+    /// A member's name or picture changed (`profile.updated` names them in
+    /// a team): theirs is read again. The signed-in person's own comes with
+    /// the bootstrap.
+    private func authorChanged(_ id: String?, _ generation: Int) {
+        guard let id, let desktop, let me = desktop.profile?.userId else { return }
+        if id == me { return scheduleReconcile(generation) }
+        guard SidebarRows.authors(desktop).contains(id) else { return }
+        usersMissing.remove(id)
+        readAuthors(generation, again: [id])
+    }
+
+    /// Reads the members the listed tasks belong to that this phone doesn't
+    /// know yet, and `again` those that changed: one read at a time, an ask
+    /// made meanwhile read when it lands. None outside a team.
+    private func readAuthors(_ generation: Int, again: Set<String> = []) {
+        usersAgain.formUnion(again)
+        usersDirty = true
+        guard usersRead == nil else { return }
+        usersRead = Task {
+            while usersDirty && current(generation) {
+                usersDirty = false
+                guard let desktop else { break }
+                let authors = SidebarRows.authors(desktop)
+                let wanted = authors.filter { (users[$0] == nil && !usersMissing.contains($0)) || usersAgain.contains($0) }.sorted()
+                usersAgain.subtract(wanted)
+                guard !wanted.isEmpty else { continue }
+                var read: [TeamUser] = []
+                do {
+                    for start in stride(from: 0, to: wanted.count, by: 100) {
+                        read += try await client.teamUsers(Array(wanted[start..<min(start + 100, wanted.count)]))
+                    }
+                } catch {
+                    // Asked again when the stream comes back; meanwhile
+                    // they wear their placeholders.
+                    usersMissing.formUnion(wanted)
+                    continue
+                }
+                guard current(generation) else { break }
+                usersMissing.formUnion(Set(wanted).subtracting(read.map(\.id)))
+                // Members no listed task belongs to any more are let go.
+                var next = users.filter { authors.contains($0.key) }
+                for user in read { next[user.id] = user }
+                // A read that changed nothing redraws and writes nothing.
+                guard next != users else { continue }
+                users = next
+                let kept = try? JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(next.values.sorted { $0.id < $1.id }))
+                if let kept { try? await database().commit(.init(value: kept, cursor: nil), named: "users") }
+                guard current(generation) else { break }
+                derive()
+            }
+            if self.generation == generation { usersRead = nil }
+        }
     }
 
     public func setProjectsHidden(_ hidden: Bool) async throws {
@@ -354,13 +486,170 @@ public actor SyncEngine {
     private func derive() {
         snapshot.loaded = desktop != nil
         if let desktop {
-            snapshot.allRows = SidebarRows.make(desktop, settings: snapshot.settings)
+            snapshot.allRows = overlay.apply(SidebarRows.make(desktop, settings: snapshot.settings, users: users))
             snapshot.rows = Rows.visible(snapshot.allRows)
+            snapshot.userId = desktop.profile?.userId
         }
         publish()
     }
 
     private func publish() { for listener in listeners.values { listener.yield(snapshot) } }
+
+    // MARK: Intents
+
+    /// Opening a chat reads it: its dot goes at once, here and through any
+    /// read of the computer that still calls it unread, until the computer
+    /// has heard.
+    public func markRead(_ agentId: String) async {
+        guard !stopped, !waiting.contains(where: { $0.kind == .read && $0.target == agentId }) else { return }
+        _ = try? await intents.enqueue(.read, target: agentId)
+    }
+
+    /// Archives a task, bot (`kind`) or subtask (`agent`): its row goes at
+    /// once, with what nests under it, and comes back only if the computer
+    /// refuses. Nil when it could not be kept.
+    @discardableResult
+    public func archive(kind: String, id: String) async -> Intent? {
+        guard !stopped else { return nil }
+        return try? await intents.enqueue(.archive, target: id, value: .object(["kind": .string(kind)]))
+    }
+
+    /// Leaves a task or Surface (`kind`): out of this person's list at once.
+    @discardableResult
+    public func leave(kind: String, id: String) async -> Intent? {
+        guard !stopped else { return nil }
+        return try? await intents.enqueue(.leave, target: id, value: .object(["kind": .string(kind)]))
+    }
+
+    /// Names a task or bot (`kind`): the row wears it at once.
+    @discardableResult
+    public func rename(kind: String, id: String, title: String) async -> Intent? {
+        guard !stopped else { return nil }
+        return try? await intents.enqueue(.rename, target: id, value: .object(["kind": .string(kind), "title": .string(title)]))
+    }
+
+    /// An answer to `questionId`, asked by `agentId`, kept and sent as one;
+    /// whether the computer took it.
+    public func answer(_ questionId: String, agentId: String, answers: [String: [String]]) async -> Intent? {
+        guard !stopped else { return nil }
+        let value: JSONValue = .object(["agentId": .string(agentId), "answers": .object(answers.mapValues { .array($0.map(JSONValue.string)) })])
+        return try? await intents.enqueue(.answer, target: questionId, value: value)
+    }
+
+    /// The answer this phone has on its way to `questionId`, if any.
+    public func pendingAnswer(_ questionId: String) -> [String: [String]]? {
+        overlay.answers[questionId].flatMap(Self.answers)
+    }
+
+    nonisolated static func answers(_ value: JSONValue) -> [String: [String]]? {
+        value["answers"]?.objectValue?.mapValues { $0.arrayValue?.compactMap(\.stringValue) ?? [] }
+    }
+
+    private func followIntents() {
+        guard intentsFollowing == nil else { return }
+        let intents = intents
+        intentsFollowing = Task { [weak self] in
+            let rejections = await intents.rejections()
+            Task { [weak self] in
+                for await rejection in rejections { await self?.refused(rejection) }
+            }
+            for await list in await intents.changes() {
+                guard let self else { return }
+                await self.intentsChanged(list)
+            }
+        }
+    }
+
+    private func intentsChanged(_ list: [Intent]) async {
+        let ids = Set(list.map(\.id)), slots = Set(list.map(\.slot))
+        var taken = false
+        for intent in waiting where !ids.contains(intent.id) && !slots.contains(intent.slot) {
+            if refusedIds.remove(intent.id) != nil { continue }
+            settling.append((intent, reads))
+            taken = true
+        }
+        settling.removeAll { slots.contains($0.intent.slot) }
+        waiting = list
+        // Read the computer again soon, so what it took stops leaning on
+        // the overlay.
+        if taken, deliveryAllowed { scheduleReconcile(generation) }
+        await layIntents()
+    }
+
+    private func layIntents() async {
+        let next = IntentOverlay(settling.map(\.intent) + waiting)
+        guard next != overlay else { return }
+        overlay = next
+        await spaces.setOverlay(next)
+        derive()
+    }
+
+    /// The computer said no: off the overlay, so what it holds shows
+    /// again; the list says why for a moment.
+    private func refused(_ rejection: IntentOutbox.Rejection) async {
+        let id = rejection.intent.id
+        if settling.contains(where: { $0.intent.id == id }) {
+            settling.removeAll { $0.intent.id == id }
+            await layIntents()
+        } else if waiting.contains(where: { $0.id == id }) {
+            refusedIds.insert(id)
+        }
+        // A refused read is nothing to tell.
+        guard rejection.intent.kind != .read else { return }
+        snapshot.notice = rejection.reason
+        publish()
+        noticeClearing?.cancel()
+        noticeClearing = Task {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            self.clearNotice()
+        }
+    }
+
+    private func clearNotice() {
+        guard snapshot.notice != nil else { return }
+        snapshot.notice = nil
+        publish()
+    }
+
+    /// One intent, to the route that does it. Gone already counts as done;
+    /// any other 4xx but 408 and 429 is a refusal.
+    static func deliver(_ intent: Intent, client: AgentClient) async throws {
+        let kind = intent.value["kind"]?.stringValue
+        do {
+            switch intent.kind {
+            case .read:
+                try await client.markRead(intent.target)
+            case .rename:
+                guard let title = intent.value["title"]?.stringValue else { return }
+                switch kind {
+                case "task": try await client.renameTask(intent.target, name: title, mutationId: intent.id)
+                case "bot": try await client.renameBot(intent.target, name: title, mutationId: intent.id)
+                default: return
+                }
+            case .archive:
+                switch kind {
+                case "bot": try await client.archiveBot(intent.target)
+                case "agent": try await client.archiveAgent(intent.target, mutationId: intent.id)
+                default: try await client.archiveTask(intent.target)
+                }
+            case .leave:
+                if kind == "surface" { try await client.leaveSurface(intent.target, mutationId: intent.id) } else { try await client.leaveTask(intent.target, mutationId: intent.id) }
+            case .answer:
+                guard let agentId = intent.value["agentId"]?.stringValue, let answers = answers(intent.value) else { return }
+                _ = try await client.answerQuestion(agentId, questionId: intent.target, answers: answers, mutationId: intent.id)
+            case .unarchive, .delete:
+                throw IntentRefusal("")
+            }
+        } catch AgentClientError.status(let status, _, _) where status == 404 || (status == 409 && intent.kind == .answer) {
+            // Gone, or answered or abandoned already: nothing left to do.
+        } catch let error as AgentClientError {
+            if let status = error.status, (400..<500).contains(status), status != 408, status != 429 {
+                throw IntentRefusal(Store.describe(error))
+            }
+            throw error
+        }
+    }
 
     public func deliveryEvents(for agentID: String) -> AsyncStream<DeliveryEvent> {
         let id = UUID()
@@ -383,6 +672,38 @@ public actor SyncEngine {
         message.failure = nil
         try await database().updateMessage(message)
         beginMessageDelivery(generation)
+    }
+
+    /// Takes one picture or file out of a queued message the computer
+    /// hasn't taken, stopping its delivery first so nothing writes the old
+    /// one back; one left with nothing goes whole. The message as it is
+    /// now (nil: gone), or nil, false when it was already sent.
+    public func removeAttachment(_ id: String, _ piece: UploadProgressBoard.Piece) async throws -> (message: QueuedMessage?, removed: Bool) {
+        holding.insert(id)
+        defer {
+            holding.remove(id)
+            beginMessageDelivery(generation)
+        }
+        if deliveringMessage == id, let task = messageDelivery {
+            task.cancel()
+            await task.value
+        }
+        let database = try database()
+        guard var message = try await database.queuedMessages().first(where: { $0.id == id }) else { return (nil, false) }
+        switch piece {
+        case .picture(let index):
+            guard message.pictures.indices.contains(index) else { return (message, false) }
+            message.pictures.remove(at: index)
+        case .file(let index):
+            guard let files = message.files, files.indices.contains(index) else { return (message, false) }
+            message.files?.remove(at: index)
+        }
+        if message.text.isEmpty, message.pictures.isEmpty, (message.files ?? []).isEmpty {
+            try await database.acknowledgeMessage(id)
+            return (nil, true)
+        }
+        try await database.updateMessage(message)
+        return (message, true)
     }
 
     public func queuedMessages(for agentID: String) async throws -> [QueuedMessage] {
@@ -409,10 +730,13 @@ public actor SyncEngine {
             var blocked = Set<String>()
             var candidate: QueuedMessage?
             for message in queued {
-                if message.failure != nil { blocked.insert(message.agentID) }
+                // One being changed holds its conversation's later ones, in order.
+                if message.failure != nil || holding.contains(message.id) { blocked.insert(message.agentID) }
                 else if !blocked.contains(message.agentID) { candidate = message; break }
             }
             guard var message = candidate else { return }
+            deliveringMessage = message.id
+            defer { deliveringMessage = nil }
             do {
                 let migrated = try AttachmentRules.migratePictures(message, directory: attachmentDirectory)
                 if migrated != message {
@@ -448,5 +772,28 @@ public actor SyncEngine {
                 attempt += 1
             }
         }
+    }
+}
+
+/// The engine's database as the intent outbox's storage: the outbox is
+/// made with the engine, before its database opens off the main thread.
+final class EngineIntentStorage: IntentStorage, @unchecked Sendable {
+    /// Set once, as the engine finishes its init.
+    weak var engine: SyncEngine?
+
+    private func storage() async throws -> SyncStorage {
+        guard let engine else { throw CancellationError() }
+        return try await engine.intentStorage()
+    }
+
+    func intents() async throws -> [Intent] { try await storage().intents() }
+    func saveIntent(_ intent: Intent) async throws { try await storage().saveIntent(intent) }
+    func updateIntent(_ intent: Intent) async throws { try await storage().updateIntent(intent) }
+    func removeIntent(id: String) async throws { try await storage().removeIntent(id: id) }
+}
+
+extension SyncEngine {
+    func intentStorage() throws -> SyncStorage {
+        try database()
     }
 }

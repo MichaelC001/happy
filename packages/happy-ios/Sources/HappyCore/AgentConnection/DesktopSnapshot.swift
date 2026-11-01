@@ -19,13 +19,26 @@ public struct DesktopSnapshot: Codable, Equatable, Sendable {
         public var status: String
         public var orderKey: String
         public var agents: [AgentWire.Agent]
-        /// The repository's picture, which the daemon has only for a repo it
-        /// cloned (desktop's `HappyAgentProjectAvatar`); one it can't read is none.
+        /// The project's picture: one the person chose or the daemon made
+        /// (`{ kind: "image", source, thumbhash }`, read at
+        /// `/v0/projects/<id>/avatar`), the home project's house
+        /// (`{ kind: "home" }`), or nil while it has none yet. One it can't
+        /// read is none.
         public var avatar: Avatar?
 
         public struct Avatar: Codable, Equatable, Sendable {
-            /// Daemon-relative, read with the same bearer token.
-            public var url: String
+            /// "image" or "home"; nil from a daemon that sent `url` instead.
+            public var kind: String?
+            public var thumbhash: String?
+            /// Daemon-relative, read with the same bearer token: an older
+            /// daemon's only way of saying where the picture is.
+            public var url: String?
+
+            public init(kind: String? = nil, thumbhash: String? = nil, url: String? = nil) {
+                self.kind = kind
+                self.thumbhash = thumbhash
+                self.url = url
+            }
         }
 
         enum CodingKeys: String, CodingKey { case id, name, status, orderKey, agents, avatar }
@@ -58,11 +71,33 @@ public struct DesktopSnapshot: Codable, Equatable, Sendable {
         public var agent: AgentWire.Agent?
         public var avatar: AgentWire.Avatar?
         public var canArchive: Bool?
+        /// A task's: the team member it belongs to, who made it; nil on a
+        /// standalone computer, for a bot, or when nobody was identified.
+        public var ownerUserId: String?
     }
     public struct Membership: Codable, Equatable, Sendable {
         public var taskId: String
     }
-    public struct Profile: Codable, Equatable, Sendable { public var userId: String? }
+    /// The person signed in: their team user (nil outside a team) and
+    /// their picture's ThumbHash.
+    public struct Profile: Codable, Equatable, Sendable {
+        public var userId: String?
+        public var photo: AgentWire.Profile.Photo?
+
+        public init(userId: String? = nil, photo: AgentWire.Profile.Photo? = nil) {
+            self.userId = userId
+            self.photo = photo
+        }
+
+        enum CodingKeys: String, CodingKey { case userId, photo }
+
+        /// A picture it can't read is none, never a lost bootstrap.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            userId = try container.decodeIfPresent(String.self, forKey: .userId)
+            photo = try? container.decodeIfPresent(AgentWire.Profile.Photo.self, forKey: .photo)
+        }
+    }
     public struct Surface: Codable, Equatable, Sendable {
         public struct Member: Codable, Equatable, Sendable {
             public var userId: String?

@@ -40,10 +40,12 @@ public struct ChatScreenLayout: Equatable, Sendable {
         public static let paddingBottom: CGFloat = 8
         /// Room between the newest row and the card.
         public static let listGap: CGFloat = 8
-        public static let headerOverhang: CGFloat = 8
     }
 
     public var card: CGRect
+    /// The context meter's row under the card, its bar under send
+    /// (`ContextMeterLayout`); nil without one.
+    public var meter: CGRect?
     public var headerScrim: CGRect
     /// The transcript's insets inside the whole screen.
     public var listTop: CGFloat
@@ -51,14 +53,27 @@ public struct ChatScreenLayout: Equatable, Sendable {
     /// The height between those insets, which short content rests at the foot of.
     public var viewport: CGFloat
 
-    /// `keyboardTop` is the keyboard guide's top in the screen.
-    public init(size: CGSize, safeArea: LayoutInsets, keyboardTop: CGFloat, cardHeight: (CGFloat) -> CGFloat) {
+    /// `keyboardTop` is the keyboard guide's top in the screen. The
+    /// header's scrim is the header's own edge (`HeaderScrim`): from the
+    /// top of the screen, easing out through the bar's foot and gone
+    /// `HeaderScrim.barOverhang` under it.
+    ///
+    /// With a `meter`, its row takes the 8 under the card and 12 more, so
+    /// the card stands 20 above the keyboard and the bar 8 under the card.
+    public init(size: CGSize, safeArea: LayoutInsets, keyboardTop: CGFloat, meter: Bool = false, cardHeight: (CGFloat) -> CGFloat) {
         typealias M = Metrics
         let width = max(0, size.width - 2 * M.paddingH)
         let height = cardHeight(width)
         let foot = min(keyboardTop, size.height - safeArea.bottom)
-        card = CGRect(x: M.paddingH, y: foot - M.paddingBottom - height, width: width, height: height)
-        headerScrim = CGRect(x: 0, y: 0, width: size.width, height: max(0, safeArea.top) + M.headerOverhang)
+        let below = meter ? ContextMeterLayout.Metrics.height : M.paddingBottom
+        card = CGRect(x: M.paddingH, y: foot - below - height, width: width, height: height)
+        self.meter = meter ? CGRect(
+            x: card.maxX - ContextMeterLayout.Metrics.trailingInset - ContextMeterLayout.Metrics.width,
+            y: card.maxY,
+            width: ContextMeterLayout.Metrics.width,
+            height: ContextMeterLayout.Metrics.height
+        ) : nil
+        headerScrim = HeaderScrim.frame(width: size.width, barFoot: safeArea.top)
         listTop = safeArea.top
         listBottom = max(0, size.height - card.minY + M.listGap)
         viewport = max(0, size.height - listTop - listBottom)
@@ -73,8 +88,14 @@ public struct ChatScreenLayout: Equatable, Sendable {
     /// Whether the card goes compact, decided from `restingCardHeight`: the
     /// full card's height with one line of text at a width. Never from the
     /// card as it is, so going compact (or typing) can't undo itself.
-    public static func compacts(size: CGSize, safeArea: LayoutInsets, keyboardTop: CGFloat, restingCardHeight: (CGFloat) -> CGFloat) -> Bool {
-        ChatScreenLayout(size: size, safeArea: safeArea, keyboardTop: keyboardTop, cardHeight: restingCardHeight).viewport < compactBelow
+    public static func compacts(size: CGSize, safeArea: LayoutInsets, keyboardTop: CGFloat, meter: Bool = false, restingCardHeight: (CGFloat) -> CGFloat) -> Bool {
+        ChatScreenLayout(size: size, safeArea: safeArea, keyboardTop: keyboardTop, meter: meter, cardHeight: restingCardHeight).viewport < compactBelow
+    }
+
+    /// Whether the meter's row shows: whenever there is a meter, except
+    /// under the compact card, where the transcript needs every point.
+    public static func showsMeter(hasGauge: Bool, compact: Bool) -> Bool {
+        hasGauge && !compact
     }
 
     /// Whether the chat hides its navigation bar: only a phone held
@@ -86,41 +107,10 @@ public struct ChatScreenLayout: Equatable, Sendable {
     }
 }
 
-/// The conversation's rows stacked in a scroll view: newest last, resting
-/// on the composer while they are shorter than the screen, as a chat does.
-/// A conversation that opens on its intro (desktop's leading header) keeps
-/// it pinned under the bar instead, and its rows fill in under it.
-///
-/// A send is a row like any other: it is stacked at the end, and no room
-/// is held above or under it for the reply (`SendFollow`). Short content
-/// resting on the composer slides up by the new row's height, as it does
-/// for any row; content past the viewport keeps the frames it had.
-public struct ChatStackLayout: Equatable, Sendable {
-    public var frames: [CGRect]
-    public var contentHeight: CGFloat
-
-    /// `heights` top to bottom; `viewport` is the height between the top
-    /// inset and the composer, which short content rests at the foot of.
-    /// `pinsFirst`: the first row is the intro, at the top whatever follows.
-    public init(heights: [CGFloat], width: CGFloat, viewport: CGFloat, pinsFirst: Bool = false) {
-        let total = heights.reduce(0, +)
-        var starts: [CGFloat] = []
-        starts.reserveCapacity(heights.count)
-        var end: CGFloat = 0
-        for height in heights {
-            starts.append(end)
-            end += height
-        }
-        let lead = pinsFirst ? 0 : max(0, viewport - total)
-        frames = zip(starts, heights).map { CGRect(x: 0, y: lead + $0, width: width, height: $1) }
-        contentHeight = max(viewport, lead + total)
-    }
-}
-
-/// The transcript's rows that are views, as desktop's virtualised list
-/// keeps only what is near the screen (Message.tsx's overscan): every
-/// row's frame is planned, but a long conversation has views only for the
-/// rows within a screen of the one shown. A row comes in a screen away
+/// The parts of a row that are views, as desktop's virtualised list keeps
+/// only what is near the screen (Message.tsx's overscan): every part's
+/// frame is planned, but a long row has views only for the parts within a
+/// screen of the one shown. A row comes in a screen away
 /// (`mount`) and goes only two screens away (`keep`), so one near the edge
 /// doesn't come and go as the scroll wavers.
 public struct ChatMountedRows: Equatable, Sendable {
@@ -242,83 +232,6 @@ public struct SendFollow: Equatable, Sendable {
     }
 }
 
-/// The transcript's scroll while a finger drives it, or it bounces past an
-/// end on its own: nothing the screen lays out moves it then. A new content
-/// height that would take the scroll past an end, or bring it back inside
-/// one, waits; following the newest row waits too. Both are given once the
-/// finger lets go, the bounce is back inside, or the scroll is at rest. A
-/// height or an offset written mid-pull moves the content under the finger,
-/// and a reply streaming in lays the screen out many times a second.
-public struct ChatScrollHold: Equatable, Sendable {
-    /// The scroll view as it stands, in its own coordinates.
-    public struct Scroll: Equatable, Sendable {
-        public var offset: CGFloat
-        public var insetTop: CGFloat
-        public var insetBottom: CGFloat
-        public var contentHeight: CGFloat
-        public var viewport: CGFloat
-        /// A finger is on it.
-        public var tracking: Bool
-        /// It moves on its own: momentum, or a bounce back from an end.
-        public var decelerating: Bool
-
-        public init(offset: CGFloat, insetTop: CGFloat, insetBottom: CGFloat, contentHeight: CGFloat, viewport: CGFloat, tracking: Bool, decelerating: Bool) {
-            self.offset = offset
-            self.insetTop = insetTop
-            self.insetBottom = insetBottom
-            self.contentHeight = contentHeight
-            self.viewport = viewport
-            self.tracking = tracking
-            self.decelerating = decelerating
-        }
-
-        /// The offset that shows the end, at `contentHeight` or its own.
-        public func end(contentHeight: CGFloat? = nil) -> CGFloat {
-            max(-insetTop, (contentHeight ?? self.contentHeight) + insetBottom - viewport)
-        }
-
-        /// Past either end, at `contentHeight` or its own.
-        public func stretched(contentHeight: CGFloat? = nil) -> Bool {
-            offset < -insetTop - 0.5 || offset > end(contentHeight: contentHeight) + 0.5
-        }
-
-        /// Driven by a finger or by its own motion.
-        public var moving: Bool { tracking || decelerating }
-    }
-
-    /// A height laid out and not yet given.
-    public private(set) var held: CGFloat?
-
-    public init() {}
-
-    /// Laid out at `height`: the height to give the scroll view now, or nil
-    /// to keep what it has (holding `height` when it would move the content).
-    public mutating func laidOut(_ height: CGFloat, scroll: Scroll) -> CGFloat? {
-        if height == scroll.contentHeight {
-            held = nil
-            return nil
-        }
-        if scroll.moving, scroll.stretched() || scroll.stretched(contentHeight: height) {
-            held = height
-            return nil
-        }
-        held = nil
-        return height
-    }
-
-    /// The held height, once nothing holds it: the finger is off and the
-    /// scroll isn't bouncing past an end with it.
-    public mutating func release(scroll: Scroll) -> CGFloat? {
-        guard let height = held, !scroll.tracking else { return nil }
-        if scroll.decelerating, scroll.stretched() || scroll.stretched(contentHeight: height) { return nil }
-        held = nil
-        return height == scroll.contentHeight ? nil : height
-    }
-
-    /// Following the newest row moves the offset only while nothing else does.
-    public static func follows(_ scroll: Scroll) -> Bool { !scroll.moving }
-}
-
 /// One message of a V2 conversation, as desktop's `Message` sets
 /// it on a phone's width: 16 in from the sides and 8 above and below
 /// (desktop's 20 and 16, scaled), the agent's markdown with its blocks 8
@@ -355,8 +268,7 @@ public struct MessageLayout: Equatable, Sendable {
         case tree([MediaTreeLayout.Box])
         /// A document, file or artifact: one card across the column.
         case card
-        /// A story drawn inline (`StoryCardLayout`).
-        case story
+
         /// An HTML artifact shown inline, across the column at the height its page measured.
         case page(height: CGFloat)
         /// A sidebar Prioritizing proposed, at the column's left.
@@ -369,7 +281,6 @@ public struct MessageLayout: Equatable, Sendable {
         case media([CGRect])
         case tree(MediaTreeLayout, origin: CGPoint)
         case card(CGRect)
-        case story(CGRect)
         case page(CGRect)
         /// The card's frame; its insides are `layout`'s, from the frame's origin.
         case proposal(SidebarProposalLayout, frame: CGRect)
@@ -403,13 +314,14 @@ public struct MessageLayout: Equatable, Sendable {
         agent(width: width, maxContentWidth: maxContentWidth, parts: [.markdown(blocks)])
     }
 
-    /// The runs one under another, 8 apart, in the reading column.
-    public static func agent(width: CGFloat, maxContentWidth: CGFloat = .greatestFiniteMagnitude, parts: [Part]) -> MessageLayout {
+    /// The runs one under another, 8 apart, in the reading column, from
+    /// `top` down, `bottom` left under the last.
+    public static func agent(width: CGFloat, maxContentWidth: CGFloat = .greatestFiniteMagnitude, parts: [Part], top: CGFloat = Metrics.marginV, bottom: CGFloat = Metrics.marginV) -> MessageLayout {
         typealias M = Metrics
         let column = ChatColumn(rowWidth: width, maxContentWidth: maxContentWidth)
         let inner = max(0, column.width - 2 * M.marginH)
         let left = column.x + M.marginH
-        var y = M.marginV
+        var y = top
         var placed: [Placed] = []
         for part in parts {
             if !placed.isEmpty { y += M.blockGap }
@@ -429,10 +341,7 @@ public struct MessageLayout: Equatable, Sendable {
             case .card:
                 placed.append(.card(CGRect(x: left, y: y, width: inner, height: ResultCardLayout.height)))
                 y += ResultCardLayout.height
-            case .story:
-                let size = StoryCardLayout.size(width: inner)
-                placed.append(.story(CGRect(origin: CGPoint(x: left, y: y), size: size)))
-                y += size.height
+
             case .page(let height):
                 placed.append(.page(CGRect(x: left, y: y, width: inner, height: height)))
                 y += height
@@ -442,7 +351,7 @@ public struct MessageLayout: Equatable, Sendable {
                 y += proposal.size.height
             }
         }
-        return MessageLayout(size: CGSize(width: max(0, width), height: y + M.marginV), parts: placed, bubble: nil, text: nil, pictures: [], status: nil)
+        return MessageLayout(size: CGSize(width: max(0, width), height: y + bottom), parts: placed, bubble: nil, text: nil, pictures: [], status: nil)
     }
 
     /// A person's message that may be longer than `previewLines`.

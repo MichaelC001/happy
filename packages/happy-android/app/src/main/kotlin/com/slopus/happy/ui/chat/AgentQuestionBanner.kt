@@ -1,5 +1,7 @@
 package com.slopus.happy.ui.chat
 
+import com.slopus.happy.ui.components.DialogWindowMotion
+import com.slopus.happy.ui.components.WindowMotion
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -197,6 +199,7 @@ fun AgentQuestionModal(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
+        DialogWindowMotion(WindowMotion.Sheet)
         AgentQuestionForm(form, onSubmit, onDismiss, onClose)
     }
 }

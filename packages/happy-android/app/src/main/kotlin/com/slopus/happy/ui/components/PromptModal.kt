@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Surface
@@ -36,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.slopus.happy.R
+import com.slopus.happy.ui.layout.ContentTokens
 
 object PromptTags {
     const val CONTAINER = "prompt.container"
@@ -87,11 +89,12 @@ fun PromptModal(prompt: Prompt, onDismiss: () -> Unit) {
     // Laid out as Material 3's AlertDialog (28 corners, 24 padding, headline, body, actions
     // bottom right) on a plain Dialog: AlertDialog with a text field never settles under test.
     Dialog(onDismissRequest = cancel, properties = DialogProperties(dismissOnClickOutside = false, usePlatformDefaultWidth = false)) {
+        DialogWindowMotion()
         Surface(
             shape = MaterialTheme.shapes.extraLarge,
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             tonalElevation = 6.dp,
-            modifier = Modifier.padding(horizontal = 24.dp).widthIn(min = 280.dp, max = 560.dp).testTag(PromptTags.CONTAINER),
+            modifier = Modifier.padding(horizontal = 24.dp).widthIn(min = 280.dp, max = ContentTokens.dialogMaxWidth).testTag(PromptTags.CONTAINER),
         ) {
             Column(Modifier.padding(24.dp)) {
                 Text(
@@ -112,6 +115,8 @@ fun PromptModal(prompt: Prompt, onDismiss: () -> Unit) {
                     value = value,
                     onValueChange = { value = it },
                     singleLine = true,
+                    // Rounded as the dialog's other controls; the theme's extra-small is a menu's 16.
+                    shape = RoundedCornerShape(12.dp),
                     placeholder = prompt.placeholder?.let { { Text(it, maxLines = 1) } },
                     visualTransformation = if (prompt.inputType == PromptInputType.SecureText) PasswordVisualTransformation() else VisualTransformation.None,
                     keyboardOptions = KeyboardOptions(

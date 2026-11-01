@@ -8,8 +8,11 @@ import UIKit
 // account's new-session draft (the text the home dock used to keep), and
 // its first send starts the session on the draft's machine, folder and
 // harness, the last ones picked, with that text as the first message. The
-// screen then becomes the session's chat in place (`becomeChat`): the same
-// screen and the same composer, retargeted.
+// machine and folder are picked in the middle of the empty chat, as Happy
+// Agent's new work picks Task or Bot (`NewWorkPanel`'s `.session`); the
+// machine only on an account with more than one. The screen then becomes
+// the session's chat in place (`becomeChat`): the same screen and the same
+// composer, retargeted.
 //
 // A start that fails or is refused says why, and the text stays in the
 // composer and the draft for another send. Leaving before it has answered
@@ -56,7 +59,11 @@ final class LegacyComposeStart: NSObject {
         super.init()
         starter.presenter = self
         starter.onPhaseChange = { [weak self] _ in self?.onChange?() }
-        composer.onChange = { [weak self] in self?.onChange?() }
+        composer.onChange = { [weak self] in
+            guard let self else { return }
+            if followMachine() { return }
+            onChange?()
+        }
         let snapshots = account.homeFeed.snapshots()
         feed = Task { [weak self] in
             for await snapshot in snapshots {
@@ -78,13 +85,26 @@ final class LegacyComposeStart: NSObject {
         return NewSessionProgress.label(phase: starter.phase, agentName: choices.currentAgent.name, picksWorkspaces: choices.picksWorkspaces)
     }
 
-    /// Where the first send goes: the machine and the folder, as the
-    /// pickers name them.
-    var target: String {
+    /// The machine is asked only when there is more than one to choose.
+    var asksMachine: Bool { composer.choices.machineOptions.count > 1 }
+
+    /// The machine the first send goes to, as its picker names it.
+    var machineName: String { composer.choices.currentMachine?.name ?? Strings.Home.selectMachine }
+
+    /// The folder on it, as its picker names it.
+    var folderName: String { composer.choices.currentProject?.name ?? Strings.Home.noProject }
+
+    /// A machine with no folder picked yet (another one was just chosen,
+    /// or nothing was ever picked) starts in its most recent folder, or
+    /// home: the folders follow the machine. True when it moved the draft,
+    /// whose change comes back here.
+    private func followMachine() -> Bool {
         let choices = composer.choices
-        let machine = choices.currentMachine?.name ?? Strings.Home.selectMachine
-        let project = choices.currentProject?.name ?? Strings.Home.noProject
-        return "\(machine) · \(project)"
+        let draft = composer.drafts.draft
+        guard choices.currentMachine != nil, draft.selectedPath == nil, draft.selectedProjectId == nil, sessionId == nil else { return false }
+        let recent = choices.sessionPlaces.first { $0.projectId == nil && $0.path != nil }
+        composer.drafts.setPath(recent?.key ?? "~")
+        return true
     }
 
     /// The first message: the session started with it, its id once the
@@ -131,39 +151,57 @@ final class LegacyComposeStart: NSObject {
 
     // MARK: Target
 
-    /// The machine, folder and harness the first send goes to, each a
-    /// section, built as it opens.
-    func targetMenu() -> UIMenu {
+    /// The machines, built as it opens. Another one starts in its own most
+    /// recent folder (`followMachine`).
+    func machineMenu() -> UIMenu {
         UIMenu(children: [
             UIDeferredMenuElement.uncached { [weak self] completion in
-                completion(self?.targetMenuElements() ?? [])
+                completion(self?.machineMenuElements() ?? [])
             },
         ])
     }
 
-    private func targetMenuElements() -> [UIMenuElement] {
+    /// The chosen machine's folders, most recent first, a custom path, and
+    /// the harness when there is a choice of one; built as it opens, so it
+    /// lists the machine chosen now.
+    func folderMenu() -> UIMenu {
+        UIMenu(children: [
+            UIDeferredMenuElement.uncached { [weak self] completion in
+                completion(self?.folderMenuElements() ?? [])
+            },
+        ])
+    }
+
+    func machineMenuElements() -> [UIMenuElement] {
+        let composer = composer
+        return [Self.section(Strings.Home.machineTitle, composer.choices.machineOptions, selected: composer.choices.currentMachine?.key) {
+            composer.selectMachine($0)
+        }]
+    }
+
+    func folderMenuElements() -> [UIMenuElement] {
         let composer = composer
         let choices = composer.choices
-        let draft = composer.drafts.draft
-        func section(_ title: String?, _ options: [NewSessionChoices.Option], selected: String?, select: @escaping (String) -> Void) -> UIMenu {
-            UIMenu(title: title ?? "", options: .displayInline, children: options.map { option in
-                UIAction(
-                    title: option.name,
-                    attributes: option.isDisabled ? .disabled : [],
-                    state: !option.isAction && option.key == selected ? .on : .off
-                ) { _ in select(option.key) }
-            })
-        }
         let custom = NewSessionChoices.Option(key: NewSessionChoices.customPathKey, name: Strings.Home.enterCustomPath, isAction: true)
         var elements: [UIMenuElement] = [
-            section(Strings.Home.machineTitle, choices.machineOptions, selected: draft.selectedMachineId) { composer.selectMachine($0) },
-            section(Strings.Home.projectsSection, choices.projectOptions, selected: choices.currentProject?.key) { composer.selectProject($0) },
-            section(nil, [custom], selected: nil) { [weak self] _ in self?.askForCustomPath() },
+            Self.section(Strings.Home.projectsSection, choices.projectOptions, selected: choices.currentProject?.key) { composer.selectProject($0) },
+            Self.section(nil, [custom], selected: nil) { [weak self] _ in self?.askForCustomPath() },
         ]
         if choices.agentOptions.count > 1 {
-            elements.append(section(Strings.Home.harnessTitle, choices.agentOptions, selected: draft.agentType.rawValue) { composer.selectAgent($0) })
+            elements.append(Self.section(Strings.Home.harnessTitle, choices.agentOptions, selected: composer.drafts.draft.agentType.rawValue) { composer.selectAgent($0) })
         }
         return elements
+    }
+
+    private static func section(_ title: String?, _ options: [NewSessionChoices.Option], selected: String?, select: @escaping (String) -> Void) -> UIMenu {
+        UIMenu(title: title ?? "", options: .displayInline, children: options.map { option in
+            UIAction(
+                title: option.name,
+                subtitle: option.description,
+                attributes: option.isDisabled ? .disabled : [],
+                state: !option.isAction && option.key == selected ? .on : .off
+            ) { _ in select(option.key) }
+        })
     }
 
     private func askForCustomPath() {

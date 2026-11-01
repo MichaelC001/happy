@@ -17,7 +17,7 @@ sealed interface Delivery {
     data object Sending : Delivery
     /** Taken, waiting for a run to accept it. */
     data object Pending : Delivery
-    data class Failed(val reason: String) : Delivery
+    data class Failed(val reason: Problem) : Delivery
 }
 
 /** One item of a tool's `media` presentation, addressed for `…/tool-calls/:id/media/:index`. */
@@ -45,10 +45,20 @@ sealed interface ConversationRow {
         val delivery: Delivery,
     ) : ConversationRow
 
-    data class Text(override val key: String, val text: String, val blocks: List<MarkdownBlock>) : ConversationRow
+    /**
+     * An answer's text. While it streams, [live] carries its words as they
+     * grow and [text] and [blocks] are what it read when the row was built:
+     * a delta changes [live] only, so the list and everything around it stay
+     * as they are and only this row redraws. Read [current] for the words now.
+     */
+    data class Text(override val key: String, val text: String, val blocks: List<MarkdownBlock>, val live: LiveText? = null) : ConversationRow {
+        val current: String get() = live?.content?.value?.text ?: text
+    }
 
-    /** The model's thinking summary: folded under one line until opened. */
-    data class Reasoning(override val key: String, val text: String, val streaming: Boolean) : ConversationRow
+    /** The model's thinking summary: folded under one line until opened; [live] as [Text]'s. */
+    data class Reasoning(override val key: String, val text: String, val streaming: Boolean, val live: LiveText? = null) : ConversationRow {
+        val current: String get() = live?.content?.value?.text ?: text
+    }
 
     /**
      * A tool call as the chat's tool row shows it: [input] is what its
@@ -60,17 +70,26 @@ sealed interface ConversationRow {
     /** A picture inline in a message. */
     data class Picture(override val key: String, val image: Block.Image) : ConversationRow
 
-    /** Pictures, videos and files a tool presented, read on demand. */
-    data class Media(override val key: String, val items: List<MediaRef>) : ConversationRow
+    /** Pictures, videos and files a tool presented, read on demand; [columns] as the tool asked (0: justified rows). */
+    data class Media(override val key: String, val items: List<MediaRef>, val columns: Int = 0) : ConversationRow
 
-    /** An artifact a tool made or changed. */
-    data class Artifact(override val key: String, val artifactId: String, val title: String, val type: String?) : ConversationRow
+    /** An artifact a tool made or changed; `shows: "latest"` follows it, else it opens [version]. */
+    data class Artifact(
+        override val key: String,
+        val artifactId: String,
+        val title: String,
+        val type: String?,
+        val version: Int? = null,
+        val shows: String? = null,
+    ) : ConversationRow {
+        val ref: com.slopus.happy.artifacts.ArtifactRef get() = com.slopus.happy.artifacts.ArtifactRef.presented(artifactId, version, type, title, shows)
+    }
 
     /** Another agent writing to this one: a collaborator or subtask reporting. */
     data class Collaborator(override val key: String, val senderAgentId: String, val text: String, val blocks: List<MarkdownBlock>) : ConversationRow
 
     /** A turn that failed, with Retry while it can help and nobody acted on it yet. */
-    data class Failure(override val key: String, val messageId: String, val reason: String, val retryable: Boolean, val resolved: Boolean) : ConversationRow
+    data class Failure(override val key: String, val messageId: String, val reason: FailureReason, val retryable: Boolean, val resolved: Boolean) : ConversationRow
 
     /** One line of housekeeping worth showing (a compaction). */
     data class Notice(override val key: String, val kind: NoticeKind) : ConversationRow
@@ -86,22 +105,70 @@ enum class Activity { AwaitingAnswer, WaitingForModel, Thinking, PreparingTools,
  * unchanged so Markdown is parsed once per change. Not thread-safe; the
  * conversation calls it from its one lane.
  */
-class ConversationRowBuilder {
-    private val cache = HashMap<String, Pair<Message, List<ConversationRow>>>()
+class ConversationRowBuilder(private val now: () -> Long = System::currentTimeMillis) {
+    private class Built(val message: Message, val streaming: Boolean, val rows: List<ConversationRow>)
+
+    private val cache = HashMap<String, Built>()
+
+    /** The streaming blocks' live words, by row key; a block keeps its holder for as long as it streams. */
+    private val lives = HashMap<String, LiveText>()
 
     fun rows(message: Message, agentId: String, parentAgentId: String?, streaming: Boolean): List<ConversationRow> {
-        cache[message.id]?.let { (built, rows) -> if (built == message && !streaming) return rows }
-        val rows = build(message, agentId, parentAgentId, streaming)
-        cache[message.id] = message to rows
+        cache[message.id]?.let { if (!streaming && !it.streaming && it.message == message) return it.rows }
+        val rows = build(message, agentId, parentAgentId, streaming, if (streaming) ::live else null)
+        // The pictures are read here, on the lane, so the rows find them read on the main thread.
+        for (row in rows) when (row) {
+            is ConversationRow.User -> row.pictures.forEach(InlinePicture::of)
+            is ConversationRow.Picture -> InlinePicture.of(row.image)
+            else -> Unit
+        }
+        if (!streaming) lives.keys.removeAll { it.startsWith(message.id + ":") }
+        cache[message.id] = Built(message, streaming, rows)
         return rows
+    }
+
+    private fun live(key: String, text: String, markdown: Boolean): LiveText {
+        val live = lives.getOrPut(key) { LiveText(text, if (markdown) parseMarkdown(text) else emptyList(), now) }
+        live.update(text, markdown)
+        return live
+    }
+
+    /**
+     * [message] grew in its block [index], which streams in a row of its own:
+     * the row's [LiveText] takes the words, and the rows as built stand. False
+     * when that can't be, because the block has no live row yet (its first
+     * words make one) or no longer streams, so the rows must be built again.
+     */
+    fun grow(message: Message, index: Int): Boolean {
+        val built = cache[message.id] ?: return false
+        if (!built.streaming) return false
+        val live = lives["${message.id}:$index"] ?: return false
+        if (built.rows.none { (it as? ConversationRow.Text)?.live === live || (it as? ConversationRow.Reasoning)?.live === live }) return false
+        val text = when (val block = message.content.getOrNull(index)) {
+            is Block.Text -> block.text.trim()
+            is Block.Reasoning -> block.text.trim()
+            else -> return false
+        }
+        if (text.isEmpty()) return false
+        live.update(text, message.content[index] is Block.Text)
+        cache[message.id] = Built(message, true, built.rows)
+        return true
     }
 
     fun forget(keep: Set<String>) {
         cache.keys.retainAll(keep)
+        lives.keys.retainAll { key -> key.substringBeforeLast(':') in keep }
     }
 
     companion object {
-        fun build(message: Message, agentId: String, parentAgentId: String?, streaming: Boolean): List<ConversationRow> {
+        /** [live] gives a streaming block's holder ([LiveText]); without one, rows carry their words only. */
+        fun build(
+            message: Message,
+            agentId: String,
+            parentAgentId: String?,
+            streaming: Boolean,
+            live: ((key: String, text: String, markdown: Boolean) -> LiveText)? = null,
+        ): List<ConversationRow> {
             val id = message.id
             if (message.role == "service") {
                 failureOf(message)?.let { return listOf(it) }
@@ -132,10 +199,15 @@ class ConversationRowBuilder {
             val rows = ArrayList<ConversationRow>()
             message.content.forEachIndexed { index, block ->
                 val key = "$id:$index"
+                // Only the block being written streams; one a later block followed is done.
+                val growing = live?.takeIf { streaming && index == message.content.lastIndex }
                 when (block) {
-                    is Block.Text -> block.text.trim().takeIf { it.isNotEmpty() }?.let { rows += ConversationRow.Text(key, it, parseMarkdown(it)) }
+                    is Block.Text -> block.text.trim().takeIf { it.isNotEmpty() }?.let { text ->
+                        val holder = growing?.invoke(key, text, true)
+                        rows += ConversationRow.Text(key, text, holder?.content?.value?.blocks ?: parseMarkdown(text), holder)
+                    }
                     is Block.Reasoning -> block.text.trim().takeIf { it.isNotEmpty() }?.let {
-                        rows += ConversationRow.Reasoning(key, it, streaming && index == message.content.lastIndex)
+                        rows += ConversationRow.Reasoning(key, it, streaming && index == message.content.lastIndex, growing?.invoke(key, it, false))
                     }
                     is Block.Image -> rows += ConversationRow.Picture(key, block)
                     is Block.ToolCall -> rows += toolRows(key, block, message.createdAt)
@@ -152,9 +224,9 @@ class ConversationRowBuilder {
                 is Presentation.Media -> if (call.id == null || p.items.isEmpty()) {
                     tool(null, null)
                 } else {
-                    listOf(ConversationRow.Media(key, p.items.mapIndexed { index, item -> MediaRef(call.id, index, item) }))
+                    listOf(ConversationRow.Media(key, p.items.mapIndexed { index, item -> MediaRef(call.id, index, item) }, p.columns))
                 }
-                is Presentation.Artifact -> listOf(ConversationRow.Artifact(key, p.artifactId, p.title.orEmpty(), p.artifactType))
+                is Presentation.Artifact -> listOf(ConversationRow.Artifact(key, p.artifactId, p.title.orEmpty(), p.artifactType, p.version, p.shows))
                 is Presentation.Command -> tool(p.command, buildJsonObject { put("command", p.command); put("cmd", p.command) })
                 is Presentation.Exploration -> p.operations.joinToString(", ").ifEmpty { null }.let { detail ->
                     tool(detail, detail?.let { buildJsonObject { put("file_path", it); put("path", it); put("pattern", it) } })
@@ -176,7 +248,10 @@ class ConversationRowBuilder {
             val failure = message.failure
             val written = failure?.let(::reason)
             val text = message.text.trim()
-            val reason = written ?: text.ifEmpty { failure?.get("message").str ?: "Something went wrong." }
+            val reason = written
+                ?: text.ifEmpty { null }?.let(FailureReason::Said)
+                ?: failure?.get("message").str?.let(FailureReason::Said)
+                ?: FailureReason.Unknown
             return ConversationRow.Failure(
                 key = "${message.id}:failure",
                 messageId = message.id,
@@ -186,8 +261,8 @@ class ConversationRowBuilder {
             )
         }
 
-        /** Desktop's `conversationFailureMessage`, without clock times; null where the daemon's words stand. */
-        private fun reason(failure: JsonObject): String? {
+        /** Desktop's `conversationFailureMessage` as a case; null where the daemon's words stand. */
+        private fun reason(failure: JsonObject): FailureReason? {
             val provider = failure["provider"].obj
             val vendor = provider?.get("vendorName").str
             val label = provider?.get("label").str
@@ -195,18 +270,18 @@ class ConversationRowBuilder {
                 "signin_missing" -> label?.let {
                     val command = failure["command"].str
                     val product = failure["product"].str
-                    if (command != null && product != null) "$product isn't signed in. Run `$command`, then retry."
-                    else "$it couldn't authenticate. Check its sign-in settings, then retry."
+                    if (command != null && product != null) FailureReason.SignInMissing(product, command)
+                    else FailureReason.CannotAuthenticate(it)
                 }
-                "usage_limit" -> vendor?.let { "$it usage limit reached." }
-                "no_account_available" -> failure["poolName"].str?.let { "Every account in “$it” is out of usage." }
-                "rate_limited" -> vendor?.let { "$it is rate-limited. Try again in a minute." }
-                "provider_unavailable" -> vendor?.let { "$it is overloaded right now. Try again in a moment." }
-                "network" -> vendor?.let { "Couldn't reach $it. Check your connection, then retry." }
-                "context_too_long" -> failure["modelId"].str?.let { "This conversation is too long for $it, even after a reset." }
-                "provider_disabled" -> label?.let { "$it is turned off. Turn it on in Settings, then retry." }
-                "internal" -> failure["detail"].str?.let { "Something went wrong: $it" }
-                else -> failure["message"].str
+                "usage_limit" -> vendor?.let(FailureReason::UsageLimit)
+                "no_account_available" -> failure["poolName"].str?.let(FailureReason::NoAccountAvailable)
+                "rate_limited" -> vendor?.let(FailureReason::RateLimited)
+                "provider_unavailable" -> vendor?.let(FailureReason::ProviderUnavailable)
+                "network" -> vendor?.let(FailureReason::Network)
+                "context_too_long" -> failure["modelId"].str?.let(FailureReason::ContextTooLong)
+                "provider_disabled" -> label?.let(FailureReason::ProviderDisabled)
+                "internal" -> failure["detail"].str?.let(FailureReason::Internal)
+                else -> failure["message"].str?.let(FailureReason::Said)
             }
         }
     }

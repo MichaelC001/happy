@@ -67,7 +67,7 @@ class AppFlowTest {
     @After
     fun tearDown() = server.close()
 
-    // A new account has no computer: home keeps its header and shows the link state; Settings › Account logs out.
+    // A new account has no computer: home keeps its header and shows the link state; Settings' last row logs out.
     @Test
     fun createAccountThenLogout() {
         // The first screen makes no empty account; make one directly, as a terminal code would.
@@ -76,8 +76,7 @@ class AppFlowTest {
         assertTrue(graph.auth.state.value is AuthState.SignedIn)
 
         rule.onNodeWithContentDescription("Settings").performClick()
-        rule.onNodeWithText("Account").performScrollTo().performClick()
-        rule.onNodeWithText("Sign out and clear local data").performScrollTo().performClick()
+        rule.onNodeWithTag(com.slopus.happy.ui.settings.SettingsPageTags.REMOVE).performScrollTo().performClick()
         rule.onNode(hasText("Logout") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
 
         rule.waitUntilAtLeastOneExists(hasText("Start"), 5_000)

@@ -33,7 +33,13 @@ class AgentHomeShots {
     @get:Rule val rule = createComposeRule()
     private val dir = System.getenv("HAPPY_SHOTS_DIR")?.let(::File)
     private val actions = AgentHomeActions({}, {}, {}, {}, {}, {})
-    private val settingsActions = AgentSettingsActions({}, {}, {}, {}, {}, {})
+    private val settingsActions = AgentSettingsActions()
+    private val settingsScreen: @androidx.compose.runtime.Composable () -> Unit = {
+        AgentConnectionSettingsScreen(
+            com.slopus.happy.ui.settings.SettingsProfile("agent-connection-1", "Studio", "Connected"), accounts, settingsActions,
+            com.slopus.happy.ui.settings.AboutInfo("1.8.0 (412)"), person = AgentPerson("Steve"),
+        )
+    }
     private val accounts = AccountMenu(listOf(
         AccountMenuEntry("0123456789abcdef", "Steve"),
         AccountMenuEntry("agent-connection-1", "Studio", agent = true, active = true),
@@ -51,12 +57,11 @@ class AgentHomeShots {
     private fun show(feed: AgentFeed, status: AgentLinkStatus = AgentLinkStatus.Connected, dark: Boolean = false) {
         assumeTrue(dir != null)
         dir!!.mkdirs()
-        rule.setHappyContent(dark) { AgentHomeScreen("Studio", feed, status, accounts, actions, now = 1_755_400_000_000L) }
+        rule.setHappyContent(dark) { AgentHomeScreen("Studio", feed, status, accounts, actions) }
     }
 
     @Test fun listLight() { show(feed); save("home-list-light") }
     @Test fun listDark() { show(feed, dark = true); save("home-list-dark") }
-    @Test fun subtasksOpen() { show(feed); rule.node(AgentHomeTags.toggle("ab1")).performClick(); save("home-subtasks-open") }
     @Test fun accountMenu() { show(feed); rule.node(AccountMenuTags.BUTTON).performClick(); save("home-account-menu") }
     @Test fun searchEmptyQuery() { show(feed); rule.node(AgentHomeTags.SEARCH).performClick(); save("search-open-empty") }
     @Test fun searchResults() { show(feed); rule.node(AgentHomeTags.SEARCH).performClick(); rule.node(AgentSearchTags.FIELD).performTextInput("re"); save("search-results") }
@@ -71,14 +76,14 @@ class AgentHomeShots {
     @Test fun settings() {
         assumeTrue(dir != null)
         dir!!.mkdirs()
-        rule.setHappyContent { AgentConnectionSettingsScreen("Studio", "agent-connection-1", null, AgentLinkStatus.Connected, accounts, settingsActions) }
+        rule.setHappyContent { settingsScreen() }
         save("settings")
     }
 
     @Test fun settingsDark() {
         assumeTrue(dir != null)
         dir!!.mkdirs()
-        rule.setHappyContent(dark = true) { AgentConnectionSettingsScreen("Studio", "agent-connection-1", null, AgentLinkStatus.Connected, accounts, settingsActions) }
+        rule.setHappyContent(dark = true) { settingsScreen() }
         save("settings-dark")
     }
 }

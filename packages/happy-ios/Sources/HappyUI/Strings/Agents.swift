@@ -38,7 +38,6 @@ extension Strings {
     public static func filesNotSent(_ names: [String]) -> String {
         names.count == 1 ? "\(names[0]) wasn't attached" : "\(names.count) files weren't attached"
     }
-    public static let filesNotSentDetail = "A message to an agent carries text and pictures only for now."
     public static let closeNewWork = "Close new work"
     public static let leaveTask = "Leave task"
     /// A Surface's, as desktop's menu says it.
@@ -82,11 +81,23 @@ extension Strings {
     public static let connecting = "Connecting…"
     public static let offline = "Offline — showing what this phone last saw."
     public static let unanswered = "The computer did not answer."
-    public static func newWorkFailed(_ reason: String) -> String { "New work could not be made. \(reason)" }
+    /// An action the computer refused, undone here.
+    public static let refused = "The computer refused that, so it was undone."
+    /// New work's first message couldn't make it; nothing was sent.
+    public static func newWorkFailed(_ kind: NewTask.Kind, _ reason: String) -> String {
+        "The \(kind == .bot ? "bot" : "task") could not be started.\(reason.isEmpty ? "" : " \(reason)") Your text and attachments are still here."
+    }
 
     // New work (MakeStuffView.tsx).
     public static let introLine = "Say what it is — it’ll find its place."
-    public static let composerPlaceholder = "Describe it…"
+
+    // What new work will be (`NewWorkPanel`); desktop's create-bot page
+    // asks the name as "Name, generated if left blank".
+    public static let newWorkTask = "Task"
+    public static let newWorkBot = "Bot"
+    public static let newWorkName = "Name (optional)"
+    public static let newWorkTaskNote = "A task names itself from its first message unless you name it."
+    public static let newWorkBotNote = "A bot is one lasting conversation with a folder of its own."
 
     // The working line (AgentWorkingStatus.tsx, happyAgentConnection's `activityOf`).
     public static let phaseWaitingForModel = "Waiting for model"
@@ -219,11 +230,15 @@ extension Strings {
     public static let language = "Language"
     public static let disconnect = "Disconnect"
     public static let signOut = "Sign out"
-    public static let addHappyAccount = "Add Happy account"
-    public static let agentConnection = "Agent"
-    public static let happyAccount = "Happy account"
-    public static let disconnectTitle = "Disconnect agent?"
-    public static let signOutTitle = "Sign out?"
+    public static var addHappyAccount: String { AccountKind.addCLIAccount }
+    /// What an agent connection is, said where its kind is named.
+    public static let agentConnection = AccountKind.agent
+    /// What a Happy account on the relay is, and what one with no name of
+    /// its own yet is called (one made for a computer goes by the computer
+    /// once it has paired).
+    public static let legacyAccount = AccountKind.cli
+    public static var disconnectTitle: String { AccountKind.disconnectAgentTitle }
+    public static var signOutTitle: String { AccountKind.signOutCLITitle }
     public static let removeDetail = "This removes the connection and its credentials from this phone."
     public static let couldNotRename = "Could not rename"
     public static let couldNotSwitch = "Could not switch"
@@ -231,11 +246,9 @@ extension Strings {
     public static let nothingFound = "Nothing found"
     // The QR sheet: nothing is shared, so Scan comes first.
     public static let qrCode = "QR Code"
-    public static let qrText = "Scan an agent’s pairing code, or a code from the terminal or another device."
+    public static let qrText = "Scan a Happy Agent pairing code, or a Happy CLI code from the terminal or another device."
     public static let scanQRCode = "Scan QR Code"
     public static let enterLink = "Enter link manually"
-    public static let signInFirst = "Sign in to Happy"
-    public static let signInFirstDetail = "Sign in to a Happy account before connecting this kind of code."
 
     // The composer's pickers (desktop's ComposerModelControl, flattened).
     public static let model = "Model"
@@ -260,17 +273,6 @@ extension Strings {
         }
     }
 
-    // The composer's "+" sheet, as Claude's "Add to session".
-    public static let addToMessage = "Add to message"
-    public static let photos = "Photos"
-    public static let camera = "Camera"
-    public static let cameraUnavailable = "No camera on this device"
-    public static let pasteFromClipboard = "Paste from clipboard"
-    public static let addFiles = "Add files"
-    public static func addPhotos(_ count: Int) -> String { "Add \(count)" }
-    public static func photo(picked: Int?) -> String { picked.map { "Photo, picked \($0)" } ?? "Photo" }
-    /// The clipboard held nothing a message can carry.
-    public static let nothingToPaste = "Nothing to paste"
     public static let provider = "Provider"
     public static let effort = "Effort"
     public static let modelsNotConfigured = "Models not configured"

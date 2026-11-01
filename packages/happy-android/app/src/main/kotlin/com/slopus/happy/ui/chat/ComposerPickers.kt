@@ -44,6 +44,7 @@ import com.slopus.happy.model.settings.ModeOption
 import com.slopus.happy.model.settings.ModeOptions
 import com.slopus.happy.sync.AgentModeField
 import com.slopus.happy.ui.components.Ionicon
+import com.slopus.happy.ui.components.rememberLastShown
 import com.slopus.happy.ui.components.PickerSheetOption
 import com.slopus.happy.ui.components.PickerSheetSection
 import com.slopus.happy.ui.components.ProviderIcon
@@ -191,13 +192,15 @@ fun ComposerModeChips(
             }
         }
 
-        val picker = open ?: return@Box
+        // The last picker stays drawn while it closes.
+        val picker = rememberLastShown(open) ?: return@Box
         val close = { open = null }
         val title = when (picker) {
             ComposerPicker.Model -> stringResource(R.string.agent_input_model_title)
             ComposerPicker.Effort -> stringResource(R.string.agent_input_effort_title)
         }
         ConversationPopup(
+            expanded = open != null,
             title = title,
             onDismiss = close,
             anchorCenterY = anchorCenterY,

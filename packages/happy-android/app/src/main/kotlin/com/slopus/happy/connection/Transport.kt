@@ -51,10 +51,26 @@ interface Transport {
         silenceMillis: Long = 40_000,
     ): TransportStream = throw AgentConnectionException(AgentConnectionException.Reason.Unavailable)
 
+    /**
+     * A raw TCP stream to the agent's socket, nothing written on it yet:
+     * what the in-app browser speaks HTTP and CONNECT over (iOS's
+     * `browserConnection`). Unavailable where the transport has none.
+     */
+    suspend fun socket(): TransportSocket = throw AgentConnectionException(AgentConnectionException.Reason.Unavailable)
+
     /** Lets go of the tunnel, so the next request makes a new one. */
     suspend fun reset() {}
 
     suspend fun close()
+}
+
+/** Backpressured bytes: each read and write finishes before the next is issued. */
+interface TransportSocket {
+    /** Up to [maximumBytes]; empty once the other side has finished. */
+    suspend fun read(maximumBytes: Int = 65536): ByteArray
+    suspend fun write(bytes: ByteArray)
+    /** Ends the stream both ways; safe to call more than once, from any thread. */
+    fun close()
 }
 
 /**
@@ -162,6 +178,48 @@ class TailcatTransport(
             }
         }
         return TransportStream.open(reader)
+    }
+
+    override suspend fun socket(): TransportSocket {
+        val tunnel = connection()
+        val stream: TailcatConnection = try {
+            withTimeout(requestTimeoutMillis) { runInterruptible(Dispatchers.IO) { tunnel.openTCP(port) } }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            resetIfCurrent(tunnel)
+            throw AgentConnectionException(AgentConnectionException.Reason.Unavailable).initCause(e)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A stack out of connections is busy, not gone: keep the tunnel (and its event stream).
+            if ((e as? io.tailcat.stack.TailcatTransportException)?.reason != io.tailcat.stack.TailcatTransportException.Reason.RESOURCE_LIMIT) resetIfCurrent(tunnel)
+            throw AgentConnectionException(AgentConnectionException.Reason.Unavailable).initCause(e)
+        }
+        return object : TransportSocket {
+            // A cancelled read or write closes the stream, which wakes the blocked call.
+            override suspend fun read(maximumBytes: Int): ByteArray = io { stream.read(maximumBytes) }
+
+            override suspend fun write(bytes: ByteArray) {
+                io { stream.write(bytes) }
+            }
+
+            private suspend fun <T> io(block: () -> T): T = try {
+                runInterruptible(Dispatchers.IO) { block() }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                close()
+                throw e
+            } catch (e: Exception) {
+                close()
+                throw AgentConnectionException(AgentConnectionException.Reason.Unavailable).initCause(e)
+            }
+
+            override fun close() {
+                try {
+                    stream.close()
+                } catch (_: Exception) {
+                    // Already gone.
+                }
+            }
+        }
     }
 
     private suspend fun resetIfCurrent(used: TailcatClient) {

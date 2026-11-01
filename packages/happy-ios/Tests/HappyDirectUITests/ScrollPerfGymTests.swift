@@ -30,7 +30,9 @@ private let skipsQuiescence: Bool = {
 /// `GYM_CHAT` names the conversation's row (its title), `GYM_IMAGES` the
 /// one heavy with pictures, `GYM_STREAM` the one a reply streams into
 /// (`fakellm.py`'s "stream P W"). `GYM_ITERATIONS` repeats the XCTest
-/// metrics (default 3).
+/// metrics (default 3). `GYM_LIVE_AVATARS=1` turns Animated Avatars on, so
+/// the avatars on screen move through the workload; `GYM_AVATAR_FPS`
+/// draws them at another rate.
 @MainActor
 final class ScrollPerfGymTests: XCTestCase {
     /// The transcript, whichever renderer drew it: the agents' chat draws
@@ -50,6 +52,8 @@ final class ScrollPerfGymTests: XCTestCase {
         print("ScrollPerfGymTests skips quiescence: \(skipsQuiescence)")
         app.launchEnvironment["HAPPY_GYM_METER"] = "1"
         app.launchArguments += ["-v2.direct", "YES"]
+        if environment["GYM_LIVE_AVATARS"] == "1" { app.launchArguments += ["-live-avatars", "YES"] }
+        if let fps = environment["GYM_AVATAR_FPS"], !fps.isEmpty { app.launchArguments += ["-avatar-fps", fps] }
     }
 
     // MARK: Workloads
@@ -206,59 +210,27 @@ final class ScrollPerfGymTests: XCTestCase {
         report("sidebar")
     }
 
-    /// Not a workload: a story posted live (`gym.py` posts it on
-    /// `GYM_POST_STORY`, an html artifact as its one frame, as SHIP BOSS's
-    /// was) puts a ring on its task's row, and a tap on that ring opens it
-    /// in the viewer, not the chat, with no relaunch; once it has played
-    /// the ring is seen. Posted twice: with home on screen, and with the
-    /// task's chat on screen, home only come back to after.
-    func testStoryRingOpens() {
-        let task = environment["GYM_STORY_TASK"] ?? "Release notes"
-        launch()
-        var row = find(task)
-        pause(2)
-        print("GYM_POST_STORY \(task)")
-        watchRing(row, "posted on home")
-
-        // As SHIP BOSS had it: in the chat, + and its permission changed
-        // first, then the story posted while the chat is on screen.
-        open(task)
-        app.buttons["Add a picture"].tap()
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        if springboard.alerts.firstMatch.waitForExistence(timeout: 3) {
-            springboard.alerts.firstMatch.buttons["Don’t Allow"].tap()
-        }
-        let permission = app.descendants(matching: .any)["attach-permission"]
-        XCTAssertTrue(permission.waitForExistence(timeout: 5), "+ didn't open its sheet")
-        pause(1)
-        permission.tap()
-        let auto = app.collectionViews.buttons.matching(NSPredicate(format: "label == 'Auto' OR label BEGINSWITH 'Auto,'")).firstMatch
-        XCTAssertTrue(auto.waitForExistence(timeout: 5), "no permission menu")
-        auto.tap()
-        pause(1)
-        app.buttons["attach-close"].tap()
-        pause(1)
-        print("GYM_POST_STORY \(task)")
-        pause(8)
-        app.buttons["chat-back"].firstMatch.tap()
-        row = find(task)
-        watchRing(row, "posted in its chat")
-    }
-
-    /// Not a workload: with the photo library never asked about, the composer's + opens its sheet and Photos opens the
-    /// system's picker without either asking for the library; a photo
-    /// picked there waits in the composer.
-    func testAttachAsksNothing() {
+    /// Not a workload: with the photo library never asked about, the
+    /// composer's + asks once, as Telegram's menu does. Refused, it shows
+    /// why with "Choose Photos or Videos" under it, which opens the system's
+    /// picker without asking again; a photo picked there waits in the composer.
+    func testAttachAsksOnceAndRefusedKeepsTheSystemPicker() {
         app.resetAuthorizationStatus(for: .photos)
         launch()
-        open(environment["GYM_STORY_TASK"] ?? "Release notes")
+        open("Release notes")
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         app.buttons["Add a picture"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["attach-sheet"].waitForExistence(timeout: 5), "+ didn't open its sheet")
-        XCTAssertFalse(springboard.alerts.firstMatch.waitForExistence(timeout: 3), "+ asked for the photo library")
-        app.buttons["attach-photos"].tap()
-        XCTAssertFalse(springboard.alerts.firstMatch.waitForExistence(timeout: 3), "Photos asked for the photo library")
-        XCTAssertFalse(app.descendants(matching: .any)["library-picker"].exists, "Photos opened the app's own library, which needs it")
+        let refuse = springboard.alerts.firstMatch.buttons["Don’t Allow"]
+        XCTAssertTrue(refuse.waitForExistence(timeout: 5), "+ never asked for the photo library")
+        refuse.tap()
+        let explanation = app.descendants(matching: .any)["attach-no-access"]
+        let photos = app.buttons["attach-photos"]
+        XCTAssertTrue(photos.waitForExistence(timeout: 5), "refused, the menu offers no Photos")
+        XCTAssertFalse(app.descendants(matching: .any)["attach-grid"].isHittable, "refused, the menu still shows a grid")
+        XCTAssertGreaterThan(photos.frame.minY, explanation.staticTexts.firstMatch.frame.maxY, "Photos isn't under the explanation")
+        photos.tap()
+        XCTAssertFalse(springboard.alerts.firstMatch.waitForExistence(timeout: 3), "Photos asked for the photo library again")
         let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH 'Photo'")).firstMatch
         XCTAssertTrue(photo.waitForExistence(timeout: 10), "the system's picker shows no photo")
         pause(1.5)
@@ -293,21 +265,6 @@ final class ScrollPerfGymTests: XCTestCase {
         pause(2)
         XCTAssertFalse(app.descendants(matching: .any)["new-work"].exists, "Scan opened the last install's computer")
         XCTAssertFalse(transcriptElement.exists, "Scan opened a chat")
-    }
-
-    /// The ring on `row` turns new, opens its viewer at a tap, and is seen once closed.
-    private func watchRing(_ row: XCUIElement, _ when: String) {
-        XCTAssertTrue(until(40) { (row.value as? String)?.contains("new stor") == true }, "\(when): no new story came to the ring: \(row.value ?? "")")
-        pause(1)
-        // The ring's middle: the disc 7 into the card, which is 3 in, 50 across.
-        row.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 7 + 29, dy: row.frame.height / 2)).tap()
-        let viewer = app.descendants(matching: .any)["story-viewer-page"]
-        XCTAssertTrue(viewer.waitForExistence(timeout: 10), "\(when): a tap on the ring opened no viewer")
-        XCTAssertFalse(transcriptElement.exists, "\(when): the ring opened the chat")
-        pause(2)
-        app.descendants(matching: .any)["story-close"].firstMatch.tap()
-        XCTAssertTrue(until(10) { !viewer.exists }, "\(when): the viewer never closed")
-        XCTAssertTrue(until(10) { (row.value as? String)?.contains("new stor") == false }, "\(when): the ring stayed unseen: \(row.value ?? "")")
     }
 
     private func until(_ seconds: TimeInterval, _ condition: () -> Bool) -> Bool {

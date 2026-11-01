@@ -33,6 +33,7 @@ import com.slopus.happy.conversation.Mode
 import com.slopus.happy.conversation.ModeCatalog
 import com.slopus.happy.conversation.ModelChoice
 import com.slopus.happy.model.settings.ModeOptions
+import com.slopus.happy.ui.components.rememberLastShown
 import com.slopus.happy.ui.theme.HappyTheme
 
 object ConversationModeTags {
@@ -113,14 +114,16 @@ internal fun ConversationModeLabel(catalog: ModeCatalog?, mode: Mode?, onOpen: (
 @Composable
 internal fun ConversationModePicker(open: ModePicker?, onClose: () -> Unit, catalog: ModeCatalog?, mode: Mode?, onModeChange: (Mode) -> Unit, anchorCenterY: Int, belowAnchor: Boolean = false) {
     val current = mode ?: catalog?.defaults ?: return
-    val picker = open ?: return
+    // The last picker stays drawn while it closes.
+    val picker = rememberLastShown(open) ?: return
+    val expanded = open != null
     val efforts = catalog?.model(current.providerId, current.modelId)?.efforts.orEmpty()
     fun pick(next: Mode?) {
         onClose()
         next?.let(onModeChange)
     }
     when (picker) {
-        ModePicker.Permission -> ModePanel(stringResource(R.string.conversation_mode_permission), onClose, anchorCenterY, belowAnchor) {
+        ModePicker.Permission -> ModePanel(expanded, stringResource(R.string.conversation_mode_permission), onClose, anchorCenterY, belowAnchor) {
             ModeCatalog.PERMISSION_MODES.forEach { key ->
                 val (name, description) = permissionText.getValue(key)
                 item(key) {
@@ -130,7 +133,7 @@ internal fun ConversationModePicker(open: ModePicker?, onClose: () -> Unit, cata
                 }
             }
         }
-        ModePicker.Model -> ModePanel(stringResource(R.string.conversation_mode_model), onClose, anchorCenterY, belowAnchor) {
+        ModePicker.Model -> ModePanel(expanded, stringResource(R.string.conversation_mode_model), onClose, anchorCenterY, belowAnchor) {
             catalog?.models.orEmpty().groupBy { it.providerId }.values.forEachIndexed { index, models ->
                 item("provider:${models[0].providerId}") {
                     if (index > 0) HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -172,8 +175,9 @@ private fun PickerHeading(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ModePanel(title: String, onDismiss: () -> Unit, anchorCenterY: Int, belowAnchor: Boolean, content: LazyListScope.() -> Unit) {
+private fun ModePanel(expanded: Boolean, title: String, onDismiss: () -> Unit, anchorCenterY: Int, belowAnchor: Boolean, content: LazyListScope.() -> Unit) {
     ConversationPopup(
+        expanded = expanded,
         title = title,
         onDismiss = onDismiss,
         anchorCenterY = anchorCenterY,

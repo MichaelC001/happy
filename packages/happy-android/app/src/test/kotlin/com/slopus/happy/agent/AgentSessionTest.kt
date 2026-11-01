@@ -3,18 +3,18 @@ package com.slopus.happy.agent
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.slopus.happy.artifacts.ArtifactClient
 import com.slopus.happy.auth.ExpoSecureStore
 import com.slopus.happy.connection.AgentConnectionCredentials
 import com.slopus.happy.connection.AgentConnections
 import com.slopus.happy.connection.Transport
 import com.slopus.happy.connection.TransportResponse
-import com.slopus.happy.conversation.ConversationApi
-import com.slopus.happy.ui.conversation.conversationRequest
 import com.slopus.happy.testing.SoftwareKeys
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -86,10 +86,10 @@ class AgentSessionTest {
                 }
             }
         }
-        ConversationApi(sessions.session(other)!!.conversationRequest()).artifactFile("r1", "2", "images/plot #1.png")
+        ArtifactClient(sessions.session(other)!!.client).file("r1", 2, "images/plot #1.png")
         assertEquals(listOf(Triple("other-addr", "other-token", "/v0/artifacts/r1/versions/2/files/images/plot%20%231.png")), seen)
         seen.clear()
-        ConversationApi(sessions.session(id)!!.conversationRequest()).artifactFile("r1", "2", "report.md")
+        ArtifactClient(sessions.session(id)!!.client).file("r1", 2, "report.md")
         assertEquals(listOf(Triple("addr", "token", "/v0/artifacts/r1/versions/2/files/report.md")), seen)
     }
 
@@ -165,7 +165,48 @@ class AgentSessionTest {
         first.close()
         open.value = null
         val offline = sessions { error("no network") }.session(id)!!
-        assertEquals(listOf("ab1", "at1"), offline.feed.value.conversations.map { it.agentId })
+        // Read off the main thread, so it comes a moment after the session is made.
+        eventually({ offline.feed.value.conversations.map { it.agentId } }) { it == listOf("ab1", "at1") }
+    }
+
+    @Test
+    fun comingBackResumesTheJournalFromTheKeptCursorWithoutTheSnapshot() = runBlocking {
+        val first = sessions().session(id)!!
+        agent.frames.send(Wire.hello("c0"))
+        agent.frames.send(Wire.frame("c1", "agent.updated", Wire.updated("agentId", "at1", "01", "02", buildJsonObject { put("status", "thinking") })))
+        eventually({ first.catalog.value.cursor }) { it == "c1" }
+        eventually({ File(cacheDir, "$id.json").takeIf { it.exists() }?.readText().orEmpty() }) { "\"c1\"" in it }
+        first.close()
+        agent.calls.clear()
+        agent.streamCursors.clear()
+        agent.frames = Channel(Channel.UNLIMITED)
+
+        // A cold start (or the app back in front): the kept catalog, then the journal from its cursor.
+        val again = sessions().session(id)!!
+        eventually({ agent.streamCursors.size }) { it == 1 }
+        assertEquals("c1", agent.streamCursors.single())
+        assertEquals(0, agent.calls.count { it == "GET /v0/bootstrap/desktop" })
+        eventually({ again.feed.value.conversations.single { it.agentId == "at1" } }) { it.working }
+
+        // A gap is the one thing that reads the snapshot again.
+        agent.frames.send(Wire.hello("c9", gap = true))
+        eventually({ agent.calls.count { it == "GET /v0/bootstrap/desktop" } }) { it == 1 }
+    }
+
+    @Test
+    fun goingBehindAndComingBackDoesNotReadTheSnapshotAgain() = runBlocking {
+        val session = sessions().session(id)!!
+        agent.frames.send(Wire.hello("c0"))
+        eventually({ session.status.value }) { it == AgentLinkStatus.Connected }
+        assertEquals(1, agent.calls.count { it == "GET /v0/bootstrap/desktop" })
+        foreground.value = false
+        agent.frames.close()
+        agent.frames = Channel(Channel.UNLIMITED)
+        kotlinx.coroutines.delay(100)
+        foreground.value = true
+        eventually({ agent.streamCursors.size }) { it == 2 }
+        assertEquals("c0", agent.streamCursors[1])
+        assertEquals(1, agent.calls.count { it == "GET /v0/bootstrap/desktop" })
     }
 
     @Test
@@ -201,5 +242,106 @@ class AgentSessionTest {
         eventually({ session.feed.value.loaded }) { it }
         session.upsertTask(Wire.task("t9", "New Task", Wire.agent("at9")))
         eventually({ session.feed.value.conversations.map { it.agentId } }) { "at9" in it }
+    }
+
+    /** A session whose `POST /v0/surfaces/:id/leave` waits for [gate], then answers [status] with [error]. */
+    private fun leavingSession(gate: CompletableDeferred<Unit>, status: Int, error: String? = null, bodies: MutableList<String> = mutableListOf()): AgentSession {
+        agent.bootstrap = Wire.bootstrap(
+            bots = listOf(Wire.bot("b1", "Happy", Wire.agent("ab1"))),
+            surfaces = listOf(Wire.surface("s1", "Groceries", "todo"), Wire.surface("s2", "Plan", "document", mapOf(Wire.USER to "2"))),
+        )
+        return sessions {
+            object : Transport by agent {
+                override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>): TransportResponse {
+                    if (!path.endsWith("/leave")) return agent.request(method, path, credential, body, headers)
+                    agent.calls += "$method $path"
+                    bodies += body?.decodeToString().orEmpty()
+                    gate.await()
+                    val text = if (status in 200..299) "{}" else "{\"error\":${error?.let { "\"$it\"" } ?: "null"},\"code\":\"refused\"}"
+                    return TransportResponse(status, mapOf("content-type" to "application/json"), text.toByteArray())
+                }
+            }
+        }.session(id)!!
+    }
+
+    private fun surfaces(session: AgentSession) = session.feed.value.rows.filterIsInstance<AgentFeedRow.Surface>().map { it.id }
+
+    @Test
+    fun leavingASurfaceTakesItsRowAtOnceAndAsksTheAgent(): Unit = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val bodies = mutableListOf<String>()
+        val session = leavingSession(gate, 200, bodies = bodies)
+        eventually({ surfaces(session) }) { it == listOf("s1", "s2") }
+
+        val answer = async { session.leaveSurface("s1") }
+        // Gone while the agent is still asked.
+        eventually({ surfaces(session) }) { it == listOf("s2") }
+        eventually({ agent.calls }) { "POST /v0/surfaces/s1/leave" in it }
+        // A second press while the first is on its way sends nothing more and shares its answer.
+        val again = async { session.leaveSurface("s1") }
+        gate.complete(Unit)
+        assertNull(answer.await())
+        assertNull(again.await())
+        assertEquals(1, agent.calls.count { it == "POST /v0/surfaces/s1/leave" })
+        assertTrue("It names its mutation", bodies.single().contains("\"mutationId\":\""))
+        // Out of the catalog too, so it stays gone once the leave is answered.
+        assertEquals(listOf("s2"), surfaces(session))
+        assertFalse("s1" in session.catalog.value.surfaces)
+    }
+
+    @Test
+    fun aRefusedLeaveBringsTheRowBackWithTheAgentsWords(): Unit = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val session = leavingSession(gate, 409, "You own this Surface.")
+        eventually({ surfaces(session) }) { it == listOf("s1", "s2") }
+        val answer = async { session.leaveSurface("s1") }
+        eventually({ surfaces(session) }) { it == listOf("s2") }
+        gate.complete(Unit)
+        assertEquals("You own this Surface.", answer.await())
+        eventually({ surfaces(session) }) { it == listOf("s1", "s2") }
+    }
+
+    @Test
+    fun aRefusalWithNoWordsIsEmptyAndGoneAlreadyCountsAsLeft(): Unit = runBlocking {
+        val gate = CompletableDeferred<Unit>().apply { complete(Unit) }
+        val failing = leavingSession(gate, 500)
+        eventually({ surfaces(failing) }) { it == listOf("s1", "s2") }
+        assertEquals("", failing.leaveSurface("s2"))
+        eventually({ surfaces(failing) }) { it == listOf("s1", "s2") }
+        failing.close()
+
+        val gone = leavingSession(gate, 404, "Not found.")
+        eventually({ surfaces(gone) }) { it == listOf("s1", "s2") }
+        assertNull(gone.leaveSurface("s2"))
+        eventually({ surfaces(gone) }) { it == listOf("s1") }
+    }
+
+    @Test
+    fun hidingProjectsOnTheDesktopHidesThemHereLiveAndAChangeHereIsSent(): Unit = runBlocking {
+        agent.bootstrap = Wire.bootstrap(
+            bots = listOf(Wire.bot("b1", "Happy", Wire.agent("ab1"))),
+            projects = listOf(Wire.project("p1", "rig", listOf(Wire.agent("ap1")))),
+            userSettings = emptyList(),
+        )
+        val session = sessions().session(id)!!
+        agent.frames.send(Wire.hello("c0"))
+        eventually({ session.status.value }) { it == AgentLinkStatus.Connected }
+        eventually({ session.feed.value.conversations.map { it.agentId } }) { it == listOf("ab1", "ap1") }
+        assertFalse(session.projectsHidden.value)
+
+        // The desktop hides them: home drops the projects as the event comes.
+        agent.frames.send(Wire.frame("c1", "user_settings.updated", buildJsonObject { put("setting", Wire.projectsHidden(true, "v1")) }))
+        eventually({ session.projectsHidden.value }) { it }
+        eventually({ session.feed.value.conversations.map { it.agentId } }) { it == listOf("ab1") }
+
+        // Shown again from this phone: at once here, then PUT to the agent with its mutation id and time.
+        val path = "/v0/user-settings/${DesktopSettings.PROJECTS_VISIBILITY}"
+        agent.resources[path] = buildJsonObject { put("setting", Wire.projectsHidden(false, "v2")) }
+        session.setProjectsHidden(false)
+        eventually({ session.feed.value.conversations.map { it.agentId } }) { it == listOf("ab1", "ap1") }
+        eventually({ agent.calls }) { "PUT $path" in it }
+        eventually({ session.catalog.value.pendingSettings }) { it.isEmpty() }
+        assertFalse(session.projectsHidden.value)
+        assertEquals("v2", session.catalog.value.settings.getValue(DesktopSettings.PROJECTS_VISIBILITY)["version"].toString().trim('"'))
     }
 }

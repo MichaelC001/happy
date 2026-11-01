@@ -15,6 +15,19 @@ import UIKit
 final class ProfileSource {
     private let client: AgentClient
     private let engine: SyncEngine
+    /// What the person's placeholder picture is picked by, while they have
+    /// no picture of their own (`Session.personSeed`). A new one is decoded
+    /// and shown when someone watches.
+    var placeholderSeed: String {
+        didSet {
+            guard placeholderSeed != oldValue, placeholder != nil || placeholderJob != nil else { return }
+            placeholderJob?.cancel()
+            loadPlaceholder()
+        }
+    }
+    /// That placeholder, decoded once someone watches.
+    private(set) var placeholder: UIImage?
+    private var placeholderJob: Task<Void, Never>?
     private(set) var state = ProfileState()
     /// The picture to show: one picked here, the computer's, or its
     /// ThumbHash until the bytes come.
@@ -30,9 +43,10 @@ final class ProfileSource {
     private var reading: Task<Void, Never>?
     private var readAgain = false
 
-    init(client: AgentClient, engine: SyncEngine) {
+    init(client: AgentClient, engine: SyncEngine, placeholderSeed: String) {
         self.client = client
         self.engine = engine
+        self.placeholderSeed = placeholderSeed
     }
 
     /// Calls `watch` now and whenever what shows changes. The computer's
@@ -41,11 +55,22 @@ final class ProfileSource {
         let id = UUID()
         watchers[id] = watch
         if following == nil { follow() }
+        if placeholder == nil, placeholderJob == nil { loadPlaceholder() }
         watch()
         return Watch { [weak self] in
             guard let self else { return }
             watchers.removeValue(forKey: id)
             if watchers.isEmpty { following?.cancel(); following = nil }
+        }
+    }
+
+    private func loadPlaceholder() {
+        let seed = placeholderSeed
+        placeholderJob = Task { [weak self] in
+            let image = await AvatarPlaceholderImages.image(seed: seed, side: ProfileLayout.Metrics.avatar)
+            guard let self, !Task.isCancelled, placeholderSeed == seed else { return }
+            placeholder = image
+            publish()
         }
     }
 
@@ -74,9 +99,10 @@ final class ProfileSource {
             reading = nil
             if let profile {
                 let before = state
+                let shown = photo
                 state.heard(profile)
-                if state != before { publish() }
                 loadPhoto()
+                if state != before || photo !== shown { publish() }
             }
             if readAgain {
                 readAgain = false
@@ -179,20 +205,17 @@ final class ProfileSource {
         case nil: break
         }
         guard let hash = state.thumbhash else {
-            if photo != nil || photoHash != nil { showPhoto(nil, hash: nil); publish() }
+            if photo != nil || photoHash != nil { showPhoto(nil, hash: nil) }
             return
         }
         guard hash != photoHash else { return }
-        let showing = photo != nil
         photoJob?.cancel()
         photoHash = hash
+        // The blur in the same publish that brings the hash, so no frame
+        // shows the page without it.
+        if photo == nil { photo = ThumbHashImages.image(hash) }
         let client = client
         photoJob = Task { [weak self] in
-            if !showing, let blur = await Task.detached(operation: { AccountPictureImages.placeholder(hash)?.picture as? UIImage }).value {
-                guard let self, !Task.isCancelled, photoHash == hash else { return }
-                photo = blur
-                publish()
-            }
             guard let read = try? await client.profilePhoto(), !Task.isCancelled else { return }
             let image = await Task.detached(operation: { AccountPictureImages.decode(read.data)?.picture as? UIImage }).value
             guard let self, !Task.isCancelled, photoHash == hash, let image else { return }

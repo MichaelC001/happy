@@ -21,8 +21,6 @@ public struct Snapshot: Equatable, Sendable {
     public var allRows: [Row] = []
     /// The document those rows are drawn from, for gestures that edit it.
     public var document: SpaceSidebarDocument?
-    /// Happy's own row, below which new work goes.
-    public var happySpaceId: String?
     /// Happy's own conversation, which Settings' asks are typed into
     /// (`ChatPrefill`); nil until the bots have been read, or where the
     /// account has no Chief of Staff running.
@@ -31,29 +29,10 @@ public struct Snapshot: Equatable, Sendable {
     public var prioritizing: Bool?
     /// The last act the daemon refused: its reason, empty when it gave none.
     public var error: String?
-    /// Why the last new work could not be made, as `error`.
-    public var creationError: String?
     /// What the references in messages read as and open.
     public var references = References()
 
     public init() {}
-}
-
-/// New work, named on this phone before the daemon answers.
-public struct Creation: Sendable {
-    public let spaceId: String
-    public let agentId: String
-    public let workspaceId: String
-    /// The conversation's ID once the daemon has made it (`agentId` when the
-    /// daemon takes the phone's names); a refusal takes the row away again.
-    public let created: Task<String, Error>
-
-    public init(spaceId: String, agentId: String, workspaceId: String, created: Task<String, Error>) {
-        self.spaceId = spaceId
-        self.agentId = agentId
-        self.workspaceId = workspaceId
-        self.created = created
-    }
 }
 
 /// One paired computer's V2 sidebar, a port of desktop's
@@ -69,6 +48,11 @@ public actor Store {
 
     private let client: AgentClient
     private let offline: OfflineFile?
+    /// The account's pending actions (`SyncEngine.intents`): archives,
+    /// leaves and renames are kept and sent through it, and laid over the
+    /// rows until the computer answers. Nil standalone: asked directly.
+    private let intents: IntentOutbox?
+    private var overlay = IntentOverlay()
     private var keeping: Task<Void, Never>?
     private let labels: Rows.Labels
     private let continuation: AsyncStream<Snapshot>.Continuation
@@ -94,14 +78,9 @@ public actor Store {
     private struct Batch { let mutationId: String; let operations: [SpaceSidebarOperation]; let base: SpaceSidebarDocument }
     /// This phone's edits the daemon has not confirmed yet, oldest first.
     private var batches: [Batch] = []
-    /// New work drawn where it was made until the held document has it.
-    private var inserts: [(spaceId: String, sectionId: String?, happySpaceId: String?)] = []
-    private var creating: Set<String> = []
-    /// New work being made, by space: what putting it away waits for.
-    private var creations: [String: Task<String, Error>] = [:]
     /// Rows taken off here, by document node, as desktop's `removals`: off
-    /// the sidebar at once, before the computer hears (new work closed,
-    /// work archived or left), and kept off through every read and event
+    /// the sidebar at once, before the computer hears (work archived or
+    /// left), and kept off through every read and event
     /// that still lists them. Let go of once the computer no longer has
     /// them: a space at `space.removed` or a full read without it, a
     /// subtask once no bot or task holds it. Back only on a refusal.
@@ -113,8 +92,6 @@ public actor Store {
         /// took it or had nothing to take, false when it refused.
         let asked: Task<Bool, Never>
     }
-    /// Stopped: Close new work stops asking a computer out of reach.
-    private var stopped = false
     private var writes = 0
     private var dragging = false
     /// An event or read waited for the hand to lift.
@@ -150,9 +127,10 @@ public actor Store {
     private var attentionIdle: Task<Void, Never>?
     private var attentionVisible = true
 
-    public init(client: AgentClient, offline: OfflineFile? = nil, labels: Rows.Labels = Rows.Labels()) {
+    public init(client: AgentClient, offline: OfflineFile? = nil, intents: IntentOutbox? = nil, labels: Rows.Labels = Rows.Labels()) {
         self.client = client
         self.offline = offline
+        self.intents = intents
         self.labels = labels
         (updates, continuation) = AsyncStream.makeStream(of: Snapshot.self, bufferingPolicy: .bufferingNewest(1))
     }
@@ -213,14 +191,12 @@ public actor Store {
     }
 
     public func stop() async {
-        stopped = true
         await flush()
         following?.cancel(); following = nil
         loading?.cancel(); loading = nil
         placesReload?.cancel(); placesReload = nil
         attentionIdle?.cancel(); attentionIdle = nil
         keeping?.cancel(); keeping = nil
-        draftPublish?.cancel(); draftPublish = nil
         continuation.finish()
         await client.close()
     }
@@ -291,7 +267,7 @@ public actor Store {
 
     private var typeListeners: [UUID: (prefixes: [String], continuation: AsyncStream<ConversationEvent>.Continuation)] = [:]
 
-    /// Every event whose type starts with one of `prefixes` (`"story."`),
+    /// Every event whose type starts with one of `prefixes` (`"artifact."`),
     /// for what no conversation or Surface key names. `resync` as above.
     public func events(matching prefixes: [String]) -> AsyncStream<ConversationEvent> {
         let id = UUID()
@@ -522,56 +498,11 @@ public actor Store {
             guard let data = try? JSONEncoder().encode(value) else { return [] }
             return (try? decoder.decode([Lossy<T>].self, from: data))?.compactMap(\.value) ?? []
         }
-        places = Places(bots: decode(composed(bots)), tasks: decode(composed(tasks)), surfaces: surfaces, drafts: draftsShown)
+        places = Places(bots: decode(composed(bots)), tasks: decode(composed(tasks)), surfaces: surfaces)
         // A subtask being archived that no bot or task holds any more is gone.
         for (id, removal) in removing where removal.subtask && places.agent(id) == nil { removing[id] = nil }
     }
 
-    // MARK: Drafts
-
-    /// The latest stamp heard for each conversation's draft, the previews
-    /// rows show, and the ones waiting for typing to pause.
-    private var draftStamps: [String: Double] = [:]
-    private var draftsShown: [String: String] = [:]
-    private var draftsWaiting: [String: String] = [:]
-    private var draftPublish: Task<Void, Never>?
-    /// How long typing pauses before a row's draft follows the composer.
-    static let draftDelay: Duration = .seconds(1)
-
-    /// A conversation's draft changed, on this phone or another device: its
-    /// row follows a second after typing pauses, or at once when the draft
-    /// empties, so typing doesn't redraw the list on every keystroke. An
-    /// older stamp than one already heard changes nothing.
-    public func noteDraft(_ agentId: String, text: String?, updatedAt: Double) {
-        if let stamp = draftStamps[agentId], updatedAt < stamp { return }
-        draftStamps[agentId] = updatedAt
-        guard let preview = Rows.draftPreview(text) else {
-            draftsWaiting.removeValue(forKey: agentId)
-            guard draftsShown.removeValue(forKey: agentId) != nil else { return }
-            places.drafts = draftsShown
-            publish()
-            return
-        }
-        guard draftsShown[agentId] != preview else {
-            draftsWaiting.removeValue(forKey: agentId)
-            return
-        }
-        draftsWaiting[agentId] = preview
-        draftPublish?.cancel()
-        draftPublish = Task { [weak self] in
-            try? await Task.sleep(for: Self.draftDelay)
-            guard !Task.isCancelled else { return }
-            await self?.showWaitingDrafts()
-        }
-    }
-
-    private func showWaitingDrafts() {
-        guard !draftsWaiting.isEmpty else { return }
-        draftsShown.merge(draftsWaiting) { _, waiting in waiting }
-        draftsWaiting = [:]
-        places.drafts = draftsShown
-        publish()
-    }
 
     // MARK: Events
 
@@ -585,7 +516,6 @@ public actor Store {
         case "space.removed":
             if let id = payload["spaceId"]?.stringValue {
                 spaces.removeValue(forKey: id)
-                inserts.removeAll { $0.spaceId == id }
                 if removing[id]?.subtask == false { removing[id] = nil }
             }
         case "space.sidebar.changed":
@@ -638,10 +568,7 @@ public actor Store {
                 // A page shown inline follows its latest version, entry and display.
                 read(artifacts: [id])
             }
-        case "agent.draft.updated":
-            guard let id = payload["agentId"]?.stringValue else { return }
-            noteDraft(id, text: payload["draft"]?["value"]?["text"]?.stringValue, updatedAt: payload["draft"]?["updatedAt"]?.numberValue ?? 0)
-            return
+
         case "user_settings.updated":
             if payload["setting"]?["key"]?.stringValue == Self.settingKey {
                 snapshot.prioritizing = payload["setting"]?["value"] == .bool(true)
@@ -670,11 +597,10 @@ public actor Store {
         if let mutationId = payload["mutationId"]?.stringValue { batches.removeAll { $0.mutationId == mutationId } }
     }
 
-    /// A full read: a space being taken off that it no longer lists is
-    /// gone, unless it is still being made here.
+    /// A full read: a space being taken off that it no longer lists is gone.
     private func letGo(listing listed: [AgentWire.Space]) {
         let ids = Set(listed.map(\.id))
-        for (id, removal) in removing where !removal.subtask && !ids.contains(id) && !creating.contains(id) { removing[id] = nil }
+        for (id, removal) in removing where !removal.subtask && !ids.contains(id) { removing[id] = nil }
     }
 
     private func adopt(_ space: AgentWire.Space) {
@@ -706,7 +632,7 @@ public actor Store {
 
     // MARK: The document on screen
 
-    /// The held document with every unconfirmed edit on top, without new work.
+    /// The held document with every unconfirmed edit on top.
     private func confirmedShown() -> SpaceSidebarDocument? {
         guard let held, var document = try? SpaceSidebar.parse(held.html) else { return nil }
         for batch in batches {
@@ -717,13 +643,9 @@ public actor Store {
         return document
     }
 
-    /// What is on screen: the confirmed document and new work where it was made.
+    /// What is on screen: the confirmed document, less the rows being taken off.
     private func shown() -> SpaceSidebarDocument? {
         guard var document = confirmedShown() else { return nil }
-        inserts.removeAll { insert in !creating.contains(insert.spaceId) && SpaceSidebar.locate(document, insert.spaceId) != nil }
-        for insert in inserts where SpaceSidebar.locate(document, insert.spaceId) == nil {
-            document = SidebarDocumentEdits.insert(document, spaceId: insert.spaceId, sectionId: insert.sectionId, happySpaceId: insert.happySpaceId) ?? document
-        }
         for id in removing.keys {
             if let applied = try? SpaceSidebar.apply(document, [.remove(id)]) { document = applied.document }
         }
@@ -732,12 +654,11 @@ public actor Store {
 
     private func publish() {
         if let document = shown() {
-            let all = Rows.all(document, spaces: spaces, places: places, agentIcons: agentIcons, labels: labels)
+            let all = overlay.apply(Rows.all(document, spaces: spaces, places: places, agentIcons: agentIcons, labels: labels))
             snapshot.rows = Rows.visible(all)
             snapshot.allRows = all
             snapshot.document = document
         }
-        snapshot.happySpaceId = spaces.values.first { places.isHappy($0) }?.id
         snapshot.happyAgentId = places.chiefOfStaffAgentId
         var references = References.entities(owners: composedOwners)
         references.artifacts = artifactTitles
@@ -868,245 +789,39 @@ public actor Store {
 
     // MARK: New work
 
-    /// Makes new work right below Happy's row. The row and its conversation
-    /// exist here at once and the daemon is told after; the first message
-    /// waits for `created`.
-    /// New work: below Happy, or at the top of the section `sectionId`.
-    public func createV2(sectionId: String? = nil) -> Creation {
-        let spaceId = ClientID.make()
-        let mutationId = ClientID.make()
-        let identity = Identity.make()
-        let happySpaceId = snapshot.happySpaceId
-        let named = capabilities.identities == true
-        creating.insert(spaceId)
-        inserts.append((spaceId, sectionId, happySpaceId))
-        let now = Date().timeIntervalSince1970 * 1000
-        // Version 0 is older than anything the daemon says about it.
-        spaces[spaceId] = AgentWire.Space(
-            id: spaceId, title: nil, icon: .seedling,
-            target: AgentWire.SpaceTarget(kind: "task", id: identity.taskId, agentId: identity.agentId, workspaceId: identity.workspaceId),
-            version: 0, createdAt: now, updatedAt: now
-        )
-        snapshot.creationError = nil
-        publish()
-        let client = client
-        let created = Task<String, Error> {
-            do {
-                var response: AgentWire.CreateV2Response?
-                for attempt in 0..<4 {
-                    do {
-                        response = try await client.createV2(id: spaceId, mutationId: mutationId, sectionId: sectionId, identity: named ? identity : nil)
-                        break
-                    } catch let error as AgentClientError where (error.status ?? 500) < 500 {
-                        throw error
-                    } catch {
-                        if attempt == 3 { throw error }
-                        try await Task.sleep(for: .milliseconds(500 * (attempt + 1)))
-                    }
-                }
-                guard let response else { throw AgentClientError.invalidResponse }
-                await self.created(spaceId, response)
-                return response.agent.id
-            } catch {
-                await self.refused(spaceId, error)
-                throw error
-            }
-        }
-        creations[spaceId] = created
-        return Creation(spaceId: spaceId, agentId: identity.agentId, workspaceId: identity.workspaceId, created: created)
-    }
+    /// The task compose opens, until its first message makes it: compose
+    /// again before that opens the same one, with what was typed in it.
+    private var unsent: NewTask?
 
-    private func created(_ spaceId: String, _ response: AgentWire.CreateV2Response) {
-        creating.remove(spaceId)
-        creations.removeValue(forKey: spaceId)
-        adopt(response.space)
-        agents.absorb((try? JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(response.agent))) ?? .null)
-        schedulePlacesReload()
-        publish()
-    }
-
-    private func refused(_ spaceId: String, _ error: Error) {
-        creating.remove(spaceId)
-        creations.removeValue(forKey: spaceId)
-        inserts.removeAll { $0.spaceId == spaceId }
-        if spaces[spaceId]?.version == 0 { spaces.removeValue(forKey: spaceId) }
-        // The reason alone; the screen says what failed.
-        snapshot.creationError = Self.describe(error)
-        publish()
-        // Whatever the daemon did keep is read back.
-        if creating.isEmpty { if dragging { stale = true } else { reloadSidebar() } }
-    }
-
-    public func dismissV2Error() {
-        snapshot.creationError = nil
-        publish()
-    }
-
-    /// Closes new work nobody wrote in ("Close new work"), as desktop's
-    /// `discard`: off the sidebar at once, then off the computer,
-    /// once it is made there if it is still being made. A lost answer is
-    /// asked again with the same mutation until the computer answers. Gone
-    /// already (404), it stays gone; a refusal (409, the chat has a
-    /// message) brings it back and reads the sidebar again.
-    @discardableResult
-    public func discard(_ spaceId: String) async -> Bool {
-        let client = client
-        let creation = creations[spaceId]
-        return await removeAtOnce(spaceId) {
-            // Never made there: nothing to close.
-            if let creation, (try? await creation.value) == nil { return true }
-            let mutationId = ClientID.make()
-            var wait = 1.0
-            while !(await self.stopped) {
-                do {
-                    try await client.removeSpace(spaceId, mutationId: mutationId)
-                    await self.closed(spaceId)
-                    return true
-                } catch AgentClientError.status(404, _, _) {
-                    await self.closed(spaceId)
-                    return true
-                } catch let error as AgentClientError where (error.status ?? 500) < 500 {
-                    await self.discardRefused(spaceId)
-                    return false
-                } catch {
-                    try? await Task.sleep(for: .seconds(wait))
-                    wait = min(wait * 2, 10)
-                }
-            }
-            return false
-        }
-    }
-
-    private func closed(_ spaceId: String) {
-        inserts.removeAll { $0.spaceId == spaceId }
-    }
-
-    /// Real work after all, as the computer holds it.
-    private func discardRefused(_ spaceId: String) {
-        removing[spaceId] = nil
-        publish()
-        reloadSidebar()
-    }
-
-    // MARK: Reuse
-
-    /// Untouched new work the person could be sent back to rather than
-    /// given another: its space, its conversation, the section its row is
-    /// in, and how it is being made when it still is.
-    public struct NewWork: Sendable {
-        public let spaceId: String
-        public let agentId: String
-        public let workspaceId: String
-        public let sectionId: String?
-        public let creation: Task<String, Error>?
-    }
-
-    /// Unnamed new work to try in turn, newest first, as desktop has it:
-    /// for a heading's "+" only what stands under that heading, for new
-    /// work anywhere. Nothing being taken off counts, nor new work this
-    /// phone last left holding something (`leftHolding`).
-    public func newWork(under heading: String?) -> [NewWork] {
-        let document = shown()
-        let all = spaces.values
-            .filter { $0.target.kind == "task" && Self.untouched($0) && removing[$0.id] == nil && !heldOnLeaving.contains($0.id) }
-            .sorted { $0.createdAt > $1.createdAt }
-            .compactMap { space -> NewWork? in
-                guard let agentId = space.target.agentId, let workspaceId = space.target.workspaceId else { return nil }
-                return NewWork(spaceId: space.id, agentId: agentId, workspaceId: workspaceId, sectionId: document.flatMap { Self.section(of: space.id, in: $0) }, creation: creations[space.id])
-            }
-        guard let heading else { return all }
-        return all.filter { $0.sectionId == heading }
-    }
-
-    /// New work left holding something (text, a picture), whose draft may
-    /// not have reached the computer and whose pictures never do: not
-    /// reused until it is left empty again. Kept for this launch only, as
-    /// desktop keeps it for its window.
-    private var heldOnLeaving: Set<String> = []
-
-    /// New work being made or looked for, by the heading whose "+" asked
-    /// for it, nil for new work from the dock: what another ask meanwhile
-    /// gets instead of a second one.
-    private var goingToNewWork: [String?: (id: UUID, work: Task<Creation, Never>)] = [:]
-
-    /// New work to go to, as desktop's `create`: from the dock,
-    /// new work holding nothing wherever it is, newest first; from a
-    /// heading's "+", only such new work under that heading. Made, right
-    /// below Happy or that heading, only when none is empty. Asked again
-    /// while one is on its way, the dock gets any, a "+" its own
-    /// heading's: the same `id`, so it is opened once.
-    public func goToNewWork(under heading: String?) -> (id: UUID, work: Task<Creation, Never>) {
-        if let waiting = heading == nil ? goingToNewWork.values.first : goingToNewWork[heading] { return waiting }
-        let id = UUID()
-        let candidates = newWork(under: heading)
-        let work = Task<Creation, Never> {
-            defer { Task { await self.wentToNewWork(heading, id) } }
-            for candidate in candidates where await isEmpty(candidate) {
-                // Still new work, and still on the sidebar, once the computer has answered.
-                guard let space = spaces[candidate.spaceId], Self.untouched(space), removing[space.id] == nil else { continue }
-                let agentId = candidate.agentId
-                return Creation(spaceId: candidate.spaceId, agentId: agentId, workspaceId: candidate.workspaceId, created: candidate.creation ?? Task { agentId })
-            }
-            return createV2(sectionId: heading)
-        }
-        goingToNewWork[heading] = (id, work)
-        return (id, work)
-    }
-
-    private func wentToNewWork(_ heading: String?, _ id: UUID) {
-        if goingToNewWork[heading]?.id == id { goingToNewWork[heading] = nil }
-    }
-
-    public func leftHolding(_ spaceId: String, _ holding: Bool) {
-        if holding { heldOnLeaving.insert(spaceId) } else { heldOnLeaving.remove(spaceId) }
-    }
-
-    /// `happyAgentSpaceNewWorkIs`: nobody has named it yet.
-    static func untouched(_ space: AgentWire.Space) -> Bool { space.title == nil && space.icon == .seedling }
-
-    /// The section (or separator) heading the top-level row `id` sits under.
-    static func section(of id: String, in document: SpaceSidebarDocument) -> String? {
-        var heading: String?
-        for item in document.items {
-            if item.kind == .section || item.kind == .separator { heading = item.id }
-            if item.kind == .space && item.id == id { return heading }
-        }
-        return nil
-    }
-
-    /// Whether new work still holds nothing on the computer, as desktop
-    /// reads it: no run in its history, nothing pending, idle, not
-    /// archived, and no draft text. A read that fails is not empty.
-    public func isEmpty(_ work: NewWork) async -> Bool {
-        // Still being made here: nothing can be in it yet.
-        if let creation = work.creation { return (try? await creation.value) != nil }
-        let client = client
-        async let history = client.messages(work.agentId, limit: 1)
-        async let start = client.bootstrap(work.agentId)
-        guard let runs = try? await history.runs, let start = try? await start else { return false }
-        return runs.isEmpty && (start.pending ?? []).isEmpty && start.agent.status == "idle" && start.agent.archivedAt == nil
-            && (start.draft?.value?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    /// What compose opens: a task nothing exists of yet anywhere but here,
+    /// made on the computer by its first message (`NewTask`). Opening it
+    /// makes nothing, so leaving it leaves nothing behind.
+    public func newTask() async -> NewTask {
+        if let unsent, !(await unsent.isMade) { return unsent }
+        let task = NewTask(client: client)
+        unsent = task
+        return task
     }
 
     /// Leaves a task: its row goes at once, and comes back if the computer refuses.
     @discardableResult
     public func leave(taskId: String, nodeId: String) async -> Bool {
         let client = client
-        return await removeAtOnce(nodeId, asking: { try await client.leaveTask(taskId) })
+        return await removeAtOnce(nodeId, intent: (.leave, taskId, "task"), asking: { try await client.leaveTask(taskId) })
     }
 
     /// Leaves a Surface: its row goes at once, and comes back if the computer refuses.
     @discardableResult
     public func leave(surfaceId: String, nodeId: String) async -> Bool {
         let client = client
-        return await removeAtOnce(nodeId, asking: { try await client.leaveSurface(surfaceId) })
+        return await removeAtOnce(nodeId, intent: (.leave, surfaceId, "surface"), asking: { try await client.leaveSurface(surfaceId) })
     }
 
     /// Archives a task or bot: its row goes at once, and comes back if the computer refuses.
     @discardableResult
     public func archive(kind: String, id: String, nodeId: String) async -> Bool {
         let client = client
-        return await removeAtOnce(nodeId, asking: { try await kind == "bot" ? client.archiveBot(id) : client.archiveTask(id) })
+        return await removeAtOnce(nodeId, intent: (.archive, id, kind == "bot" ? "bot" : "task"), asking: { try await kind == "bot" ? client.archiveBot(id) : client.archiveTask(id) })
     }
 
     /// Archives a subtask, and with its row everything under it: it goes
@@ -1114,13 +829,32 @@ public actor Store {
     @discardableResult
     public func archiveSubtask(_ agentId: String, nodeId: String) async -> Bool {
         let client = client
-        return await removeAtOnce(nodeId, subtask: true, asking: { try await client.archiveAgent(agentId) })
+        return await removeAtOnce(nodeId, subtask: true, intent: (.archive, agentId, "agent"), asking: { try await client.archiveAgent(agentId) })
     }
 
-    /// A leave or archive asked of the computer: gone already (404) counts
-    /// as taken; anything else it answers is a refusal, with its reason.
-    private func removeAtOnce(_ nodeId: String, subtask: Bool = false, asking work: @escaping @Sendable () async throws -> Void) async -> Bool {
-        await removeAtOnce(nodeId, subtask: subtask) {
+    /// Takes `nodeId`'s row off at once and asks the computer with `work`.
+    /// A second press while one is on its way sends nothing and shares its
+    /// answer; a row already gone answers true. Gone already on the
+    /// computer (404) counts as taken; anything else it answers is a
+    /// refusal, with its reason.
+    ///
+    /// With the account's outbox it is kept and sent through it instead
+    /// (`intent`), so it outlives the app, and answers once the computer
+    /// has: true when it took it, false when it refused.
+    private func removeAtOnce(_ nodeId: String, subtask: Bool = false, intent: (kind: Intent.Kind, target: String, of: String)? = nil, asking work: @escaping @Sendable () async throws -> Void) async -> Bool {
+        if let pending = removing[nodeId] { return await pending.asked.value }
+        guard subtask ? places.agent(nodeId) != nil : spaces[nodeId] != nil else { return true }
+        let intents = intents
+        let asked = Task {
+            if let intents, let intent {
+                guard let kept = try? await intents.enqueue(intent.kind, target: intent.target, value: .object(["kind": .string(intent.of)])) else {
+                    await self.removalRefused(nodeId, CancellationError())
+                    return false
+                }
+                if await intents.outcome(kept.id) { return true }
+                await self.removalRefused(nodeId, nil)
+                return false
+            }
             do { try await work() }
             catch AgentClientError.status(404, _, _) {}
             catch {
@@ -1129,24 +863,16 @@ public actor Store {
             }
             return true
         }
-    }
-
-    /// Takes `nodeId`'s row off at once and asks the computer with `ask`.
-    /// A second press while one is on its way sends nothing and shares its
-    /// answer; a row already gone answers true.
-    private func removeAtOnce(_ nodeId: String, subtask: Bool = false, _ ask: @escaping @Sendable () async -> Bool) async -> Bool {
-        if let pending = removing[nodeId] { return await pending.asked.value }
-        guard subtask ? places.agent(nodeId) != nil : spaces[nodeId] != nil else { return true }
-        let asked = Task { await ask() }
         removing[nodeId] = Removal(subtask: subtask, asked: asked)
         snapshot.error = nil
         publish()
         return await asked.value
     }
 
-    private func removalRefused(_ nodeId: String, _ error: Error) {
+    /// Its row comes back; nil: the account's notice says why.
+    private func removalRefused(_ nodeId: String, _ error: Error?) {
         removing[nodeId] = nil
-        failed(error)
+        if let error { failed(error) } else { publish() }
     }
 
     private func failed(_ error: Error) {
@@ -1165,6 +891,17 @@ public actor Store {
         spaces[spaceId]?.title = title
         publish()
         let client = client
+        if let intents, space.target.kind == "task" || space.target.kind == "bot" {
+            // Kept and sent as one; refused, the old name comes back.
+            Task {
+                guard let kept = try? await intents.enqueue(.rename, target: space.target.id, value: .object(["title": .string(title), "kind": .string(space.target.kind)])) else {
+                    await self.withdraw(spaceId, title: title)
+                    return
+                }
+                if await !intents.outcome(kept.id) { await self.withdraw(spaceId, title: title) }
+            }
+            return
+        }
         Task {
             do {
                 switch space.target.kind {
@@ -1182,6 +919,13 @@ public actor Store {
         guard let intent = titleIntents[spaceId], intent.title == title else { return }
         titleIntents.removeValue(forKey: spaceId)
         spaces[spaceId]?.title = intent.base
+        publish()
+    }
+
+    /// The account's pending actions changed (`SyncEngine`): the rows wear them.
+    public func setOverlay(_ overlay: IntentOverlay) {
+        guard overlay != self.overlay else { return }
+        self.overlay = overlay
         publish()
     }
 

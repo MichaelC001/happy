@@ -8,6 +8,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -21,6 +25,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.slopus.happy.model.AvatarHarness
 import com.slopus.happy.model.ProviderIconKind
 import com.slopus.happy.ui.PHONE
+import com.slopus.happy.ui.components.avatar.AvatarPlaceholder
+import com.slopus.happy.ui.components.avatar.PlaceholderAvatarTags
+import com.slopus.happy.ui.components.avatar.PlaceholderIndexKey
 import com.slopus.happy.ui.assertBox
 import com.slopus.happy.ui.assertDp
 import com.slopus.happy.ui.bounds
@@ -40,24 +47,6 @@ import org.robolectric.annotation.GraphicsMode
 class HomeComponentsLayoutTest {
     @get:Rule
     val rule = createComposeRule()
-
-    // The generated avatars pick their art from the same JS hash happy-app
-    // uses; these values were computed by running Avatar*.tsx's hashCode in Node.
-
-    @Test
-    fun avatarHashMatchesJavaScript() {
-        assertEquals(269061190L, avatarHash("m1:/Users/dev/happy"))
-        assertEquals(23692677L, avatarHash("session-123"))
-        assertEquals(61901292L, avatarHash("é😀x"))
-        assertEquals(1042809472L, avatarHash("a".repeat(40)))
-        assertEquals("Brutalism-69", BrutalistArt.imageFor("m1:/Users/dev/happy")) // index 370 = 262 + 40 + 68
-        assertEquals(BrutalistArt.colorPairs[5], BrutalistArt.colorsFor("m1:/Users/dev/happy"))
-        assertEquals("Abstract-58", BrutalistArt.imageFor("session-123")) // index 57
-        assertEquals(
-            listOf(0, 1, 0, 1, 2, 3, 1, 0, 1, 2, 3, 4).map { PixelatedArt.colors[it] },
-            PixelatedArt.cells("session-123", monochrome = false).take(12),
-        )
-    }
 
     @Test
     fun harnessBadgeGeometry() {
@@ -90,18 +79,13 @@ class HomeComponentsLayoutTest {
         rule.onAllNodesWithTag(AvatarTags.BADGE, useUnmergedTree = true).assertCountEquals(0)
     }
 
+    /** A bot or anyone without a picture wears the placeholder its id picks, filling its box. */
     @Test
-    fun everyStyleAndTheBotFillTheirBox() {
-        for (style in AvatarStyle.entries) {
-            assertEquals(style, AvatarStyle.normalize(style.key))
-        }
-        assertEquals(AvatarStyle.Brutalist, AvatarStyle.normalize("legacy"))
-        rule.setHappyContent {
-            CompositionLocalProvider(LocalAvatarSettings provides AvatarSettings(style = AvatarStyle.Pixelated)) {
-                Avatar(id = "bot", size = 40.dp, bot = true)
-            }
-        }
+    fun aBotWithoutAPictureWearsItsPlaceholder() {
+        rule.setHappyContent { Avatar(id = "bot", size = 40.dp, bot = true) }
         assertBox("bot avatar", rule.node(AvatarTags.AVATAR).bounds, 0.dp, 0.dp, 40.dp, 40.dp)
+        assertBox("placeholder", rule.node(PlaceholderAvatarTags.STILL).bounds, 0.dp, 0.dp, 40.dp, 40.dp)
+        rule.onNode(SemanticsMatcher.expectValue(PlaceholderIndexKey, AvatarPlaceholder.index("bot")), useUnmergedTree = true).assertExists()
     }
 
     // StatusDot.tsx: 6 by default.
@@ -180,7 +164,7 @@ class HomeComponentsLayoutTest {
         assertEquals(null, result)
     }
 
-    // NativeSettingsMenu.android.tsx: "Group: ✓ Option" rows.
+    // NativeSettingsMenu.android.tsx: "Group: Option" rows, the selected one checked.
     @Test
     fun settingsMenuPrefixesTheGroupAndChecksTheSelection() {
         var picked: String? = null
@@ -194,7 +178,9 @@ class HomeComponentsLayoutTest {
                 onDismiss = {},
             ) { Box(Modifier.padding(4.dp)) }
         }
-        rule.onNodeWithText("Group sessions: ✓ Flat list").assertExists()
+        rule.onNodeWithTag(OptionMenuTags.item("grouping", "flat"), useUnmergedTree = true).assertIsSelected()
+        rule.onNodeWithTag(OptionMenuTags.item("grouping", "project"), useUnmergedTree = true).assertIsNotSelected()
+        rule.onNodeWithText("Group sessions: Flat list").assertExists()
         rule.onNodeWithText("Appearance settings").assertExists()
         rule.onNodeWithText("Group sessions: By project").performClick()
         assertEquals("project", picked)

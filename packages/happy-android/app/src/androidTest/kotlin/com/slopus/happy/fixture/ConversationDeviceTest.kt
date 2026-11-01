@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
@@ -20,7 +21,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
-import com.slopus.happy.ui.conversation.ArtifactTags
+import com.slopus.happy.ui.artifacts.ArtifactTags
+import com.slopus.happy.ui.artifacts.PlaceTags
 import com.slopus.happy.ui.conversation.ConversationRowTags
 import com.slopus.happy.ui.conversation.ConversationScreenTags
 import com.slopus.happy.ui.conversation.PictureViewerTags
@@ -166,20 +168,53 @@ class ConversationDeviceTest {
         capture("04-picture-back")
     }
 
-    @Test fun video_hands_off_to_another_app_and_back_returns_to_the_chat() {
+    /**
+     * The photos at the edges their words use (the person's flush right
+     * under the bubble, the agent's flush left), then a picture dragged
+     * halfway (the black half gone) and on down: it goes, and the chat is
+     * back.
+     */
+    @Test fun picture_swipes_away_and_the_chat_is_back() {
         show()
-        rule.onAllNodesWithTag(ConversationRowTags.MEDIA_FILE, useUnmergedTree = true).fetchSemanticsNodes()
-            .let { log("media file rows: ${it.size}") }
-        rule.onNodeWithText("sample.mp4", substring = true, useUnmergedTree = true).performScrollTo().performClick()
-        val handler = otherAppInFront("video open")
-        capture("05-video-handler")
-        SystemClock.sleep(1_500)
+        capture("06-pictures-in-chat")
+        val tile = rule.onNodeWithContentDescription("sample.png", useUnmergedTree = true).performScrollTo()
+        tile.performClick()
+        rule.waitUntil(10_000) { rule.onAllNodesWithTag(PictureViewerTags.VIEWER, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
+        SystemClock.sleep(400)
+        val viewer = rule.onNodeWithTag(PictureViewerTags.VIEWER, useUnmergedTree = true)
+        viewer.performTouchInput {
+            down(center)
+            repeat(10) {
+                advanceEventTime(30)
+                moveBy(androidx.compose.ui.geometry.Offset(0f, height / 40f))
+            }
+        }
+        capture("07-picture-dragged-halfway")
+        viewer.performTouchInput {
+            repeat(5) {
+                advanceEventTime(16)
+                moveBy(androidx.compose.ui.geometry.Offset(0f, height / 20f))
+            }
+            up()
+        }
+        rule.waitUntil(5_000) { rule.onAllNodesWithTag(PictureViewerTags.VIEWER, useUnmergedTree = true).fetchSemanticsNodes().isEmpty() }
+        assertChatInFront("picture swiped away")
+        capture("08-picture-swiped-away")
+        // The person's own photo, under their words at the right.
+        rule.onNodeWithTag(ConversationScreenTags.LIST, useUnmergedTree = true).performScrollToNode(androidx.compose.ui.test.hasContentDescription("Picture"))
+        capture("09-person-photo")
+    }
+
+    /** A recording is a tile; tapped, it plays in the viewer's page, read a range at a time, and Back returns to the chat. */
+    @Test fun video_plays_in_the_viewer_and_back_returns_to_the_chat() {
+        show()
+        rule.onNodeWithContentDescription("sample.mp4", useUnmergedTree = true).performScrollTo()
+        capture("05-video-tile")
+        rule.onNodeWithContentDescription("sample.mp4", useUnmergedTree = true).performClick()
+        rule.waitUntil(10_000) { rule.onAllNodesWithTag(PictureViewerTags.VIDEO, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
+        SystemClock.sleep(2_500)
         capture("06-video-playing")
-        // The handler's own rotation only; ours is not checked in this host.
-        device.setOrientationLeft()
-        capture("07-video-rotated-in-handler")
-        device.setOrientationNatural()
-        log("video handler was $handler")
+        assertTrue("video: the viewer is ours", device.currentPackageName == app.packageName)
         assertTrue("video back: never returned to the chat", backTo("video back", ::chatShowing) > 0)
         assertChatInFront("video back")
         capture("08-video-back")
@@ -202,11 +237,12 @@ class ConversationDeviceTest {
             val slug = title.substringAfter(' ')
             rule.onNodeWithText(title, useUnmergedTree = true).performScrollTo().performClick()
             rule.waitUntil(10_000) {
-                rule.onAllNodesWithTag(ArtifactTags.LOADING, useUnmergedTree = true).fetchSemanticsNodes().isEmpty() &&
+                rule.onAllNodesWithTag(PlaceTags.LOADER, useUnmergedTree = true).fetchSemanticsNodes().isEmpty() &&
                     rule.onAllNodesWithTag(ArtifactTags.SCREEN, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
             }
             capture("11-artifact-$slug")
-            if (slug == "video" || slug == "document") {
+            // A PDF is the one kind the WebView can't draw; it goes to an app that reads it.
+            if (slug == "document") {
                 rule.onNodeWithTag(ArtifactTags.OPEN, useUnmergedTree = true).performClick()
                 val handler = otherAppInFront("artifact $slug open")
                 capture("12-artifact-$slug-handler")

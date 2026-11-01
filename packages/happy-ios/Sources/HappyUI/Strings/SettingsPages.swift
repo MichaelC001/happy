@@ -5,7 +5,6 @@ extension Strings {
     public enum SettingsTitles {
         /// en.ts `navigation.whatsNew`.
         public static var whatsNew: String { localized("navigation.whatsNew", "What's New") }
-        public static let connectClaude = "Connect to Claude"  // (app)/_layout.tsx:417, spelled out
     }
 
     /// hooks/useHappyAction.ts's alert, which is hard-coded there.
@@ -32,14 +31,16 @@ extension Strings {
         public static let addAccount = "Add Account"
         /// The account switcher's one way to add an account or a connection.
         public static let add = "Add"
-        public static let manageAccounts = "Manage Accounts"
         /// The bar's switcher, to VoiceOver.
         public static let switcher = "Account"
-        /// Precedes the start of the account id when nothing better is known.
-        public static let fallbackTitle = "Account"
         public static let signOut = "Sign Out"
         public static func signOutConfirm(_ name: String) -> String {
             "Sign out of \(name)? Its data is removed from this phone. Make sure you have backed up its secret key!"
+        }
+        /// An account made for a computer has no key to back up: its secret
+        /// is on this phone only (the computer got its content key).
+        public static func signOutMadeForComputer(_ name: String) -> String {
+            "Sign out of \(name)? Its key is only on this phone, so once you sign out no phone can open this account again."
         }
         public static let switchFailed = "Couldn’t switch accounts. Try again."
         public static let signOutFailed = "Couldn’t sign out of that account. Try again."
