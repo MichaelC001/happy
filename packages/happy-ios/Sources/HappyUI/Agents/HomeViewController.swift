@@ -59,6 +59,10 @@ final class HomeViewController: UIViewController {
     /// Every snapshot shown, for the screen around this one.
     var onSnapshot: ((Snapshot) -> Void)?
 
+    /// Home's list moved, however it moved, for the screen around this
+    /// one: the iPad sidebar's search field rides on it.
+    var onListScroll: (() -> Void)?
+
     /// The scroll edge the bar shades: it follows home's list.
     var list: UIScrollView { sidebar.edge }
 
@@ -88,7 +92,8 @@ final class HomeViewController: UIViewController {
         super.viewDidLoad()
         // The conversation's own ground, light and dark; the list on it is
         // grouped, a quiet card per section, Happy's own card first.
-        view.backgroundColor = UIColor(Palette.groupedGround)
+        applyGround()
+        registerForTraitChanges([SidebarColumnTrait.self]) { (self: Self, _) in self.applyGround() }
         view.addSubview(sidebar)
         view.addSubview(empty)
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChange(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
@@ -110,6 +115,7 @@ final class HomeViewController: UIViewController {
         sidebar.onOpenPreview = { [weak self] row in self?.open(row, animated: false) }
         sidebar.onWillBeginDragging = { [weak self] in self?.listWillBeginDragging() }
         sidebar.onScroll = { [weak self] in self?.listDidScroll() }
+        sidebar.onMove = { [weak self] in self?.onListScroll?() }
         sidebar.onDidEndDragging = { [weak self] decelerate in self?.listDidEndDragging(decelerate: decelerate) }
         sidebar.onDidEndDecelerating = { [weak self] in self?.listDidEndDecelerating() }
         empty.onPair = { [weak self] in
@@ -128,14 +134,26 @@ final class HomeViewController: UIViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        // The row opened stays lit while its screen comes in, then lets go,
-        // as Telegram's chat list does: coming back, by the back button or
-        // a swipe, finds nothing selected. This list is never beside the
-        // conversation it opened (on iPad too it is pushed over), so there
-        // is no open chat for a selection to show.
+        // On a phone the row opened stays lit while its screen comes in,
+        // then lets go, as Telegram's chat list does: coming back, by the
+        // back button or a swipe, finds nothing selected. Beside the main
+        // panel home never disappears, and its selection follows what the
+        // panel shows (`shownBeside`).
         sidebar.selectedRowId = nil
         if let store = session?.store { Task { await store.attentionVisibleUpdate(false) } }
     }
+
+    /// No ground as the iPad's sidebar: the system's sidebar shows there.
+    private func applyGround() {
+        view.backgroundColor = traitCollection.isSidebarColumn ? .clear : UIColor(Palette.groupedGround)
+        // What search finds is on the sidebar's glass too; home's list
+        // fades from under it instead (`listShowsUnderResults`).
+        resultsView.backgroundColor = traitCollection.isSidebarColumn ? .clear : UIColor(Palette.groupedGround)
+    }
+
+    /// What search finds covers home's list on its own ground; on the
+    /// sidebar's glass, where it has none, the list fades out under it.
+    private var listShowsUnderResults: Bool { !traitCollection.isSidebarColumn }
 
     /// The computer shown: the fixed one, the last chosen, or the first paired.
     private func agentConnectionID() -> String? {
@@ -192,7 +210,10 @@ final class HomeViewController: UIViewController {
         // A refused action says why for a moment, where a lost connection would.
         snapshot.error = (waitingForNetwork ? nil : agentHome.error) ?? agentHome.notice.map { $0.isEmpty ? Strings.refused : $0 }
         onSnapshot?(snapshot)
-        if previous != snapshot.rows { sidebar.apply(snapshot.rows) }
+        if previous != snapshot.rows {
+            sidebar.apply(snapshot.rows)
+            if shownBeside != nil { updateSelection() }
+        }
         if search != nil { showResults() }
         warmUp()
         applyChrome()
@@ -233,6 +254,7 @@ final class HomeViewController: UIViewController {
         resultsView.isHidden = false
         UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
             self.resultsView.alpha = 1
+            if !self.listShowsUnderResults { self.sidebar.alpha = 0 }
         }
     }
 
@@ -250,9 +272,11 @@ final class HomeViewController: UIViewController {
         if animated {
             UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
                 self.resultsView.alpha = 0
+                self.sidebar.alpha = 1
             } completion: { _ in gone() }
         } else {
             resultsView.alpha = 0
+            sidebar.alpha = 1
             gone()
         }
         onSearchEnded?()
@@ -378,6 +402,41 @@ final class HomeViewController: UIViewController {
     }
 
 
+    // MARK: Beside the main panel
+
+    /// The main panel's root while home is the iPad's sidebar; nil on a
+    /// phone. Its row stays selected, found again as the rows change.
+    var shownBeside: UIViewController? {
+        didSet { if shownBeside !== oldValue { updateSelection() } }
+    }
+
+    /// The row each screen was opened from, while it lives.
+    private let openedRows = NSMapTable<UIViewController, NSString>.weakToStrongObjects()
+
+    private func updateSelection() {
+        sidebar.selectedRowId = shownBeside.flatMap(selectedRowId(for:))
+    }
+
+    /// The row of what `shown` shows: the one it was opened from while
+    /// that is still listed, else the first row of its conversation.
+    private func selectedRowId(for shown: UIViewController) -> String? {
+        let rows = snapshot.rows
+        if let opened = openedRows.object(forKey: shown) as String?, rows.contains(where: { $0.id == opened }) { return opened }
+        if let chat = shown as? ChatViewController, !chat.shownAgentId.isEmpty {
+            return rows.first { ($0.kind == .space || $0.kind == .session) && $0.targetKind != "surface" && $0.agentId == chat.shownAgentId }?.id
+        }
+        if shown is ArtifactsViewController { return rows.first { $0.targetKind == "artifacts" }?.id }
+        if shown is TodoListsViewController { return rows.first { $0.targetKind == "todos" }?.id }
+        return nil
+    }
+
+    /// Pushes what a row opens; from the sidebar it becomes the main
+    /// panel's root (`SidebarNavigationController`).
+    private func show(_ controller: UIViewController, for row: Row, animated: Bool) {
+        openedRows.setObject(row.id as NSString, forKey: controller)
+        navigationController?.pushViewController(controller, animated: animated)
+    }
+
     // MARK: Acts
 
     private func open(_ row: Row, animated: Bool = true) {
@@ -394,7 +453,11 @@ final class HomeViewController: UIViewController {
             // A folder opens nothing: its sessions are listed under it.
             break
         case .space where row.targetKind == "artifacts":
-            navigationController?.pushViewController(ArtifactsViewController(session: session), animated: animated)
+            sidebar.selectedRowId = row.id
+            show(ArtifactsViewController(session: session), for: row, animated: animated)
+        case .space where row.targetKind == "todos":
+            sidebar.selectedRowId = row.id
+            show(TodoListsViewController(session: session), for: row, animated: animated)
         case .search:
             beginSearch()
         case .create:
@@ -403,14 +466,16 @@ final class HomeViewController: UIViewController {
             guard let surfaceId = row.targetId else { return }
             sidebar.selectedRowId = row.id
             let surface = AgentWire.Surface(id: surfaceId, type: row.surfaceType ?? "", name: row.label)
-            navigationController?.pushViewController(SurfaceViewController(session: session, surface: surface), animated: animated)
+            let controller = SurfaceScreens.make(session: session, surface: surface)
+            MainPanelKey.record("surface:\(surfaceId)", for: controller)
+            show(controller, for: row, animated: animated)
         case .space, .session:
             guard let agentId = row.agentId else { return }
             sidebar.selectedRowId = row.id
             session.warm.tap(agentId)
             let space = row.spaceId.flatMap { id in snapshotSpace(id) }
             let chat = ChatViewController(session: session, agentId: agentId, title: row.label, spaceId: row.spaceId, intro: space)
-            navigationController?.pushViewController(chat, animated: animated)
+            show(chat, for: row, animated: animated)
         default:
             break
         }
@@ -458,9 +523,14 @@ final class HomeViewController: UIViewController {
             Haptics.play(.newWork)
             let chat = NewWork.chat(session, task: task, library: library)
             guard let navigation = navigationController else { return }
-            navigation.pushViewController(chat, animated: true)
-            // Over the screen it goes to, as that screen comes in.
-            if library { chat.presentAttach(from: navigation) }
+            if library {
+                navigation.pushViewController(chat, animated: true)
+                // Over the screen it goes to, as that screen comes in.
+                chat.presentAttach(from: navigation)
+            } else {
+                // The keyboard first, then the push in its frame (`KeyboardPush`).
+                KeyboardPush.push(chat, on: navigation, traits: chat.card.textView)
+            }
         }
     }
 }

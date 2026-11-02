@@ -113,6 +113,8 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
     /// (`stopRequested`), so a late status update can't leave it up.
     private var stopRequested = false
     private var isSending = false
+    /// A send is on its way, for tests.
+    var sending: Bool { isSending }
     /// Picked images wait here until the outbox has its own copies.
     private let staging: ComposerAttachmentStaging
     private let images: ComposerImagePicker
@@ -225,9 +227,6 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
         registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitHorizontalSizeClass.self]) { (self: Self, _) in
             self.applyDetails()
             self.composerDelegate?.composerDidInvalidateHeight(self)
-        }
-        registerForTraitChanges([ZenModeTrait.self]) { (self: Self, _) in
-            self.applyConfiguration()
         }
         registerForTraitChanges(UIView.textSizeTraits) { (self: Self, _) in
             guard self.syncTextSize() else { return }
@@ -353,7 +352,7 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
             stopRequested = false
         }
         // Nothing to attach to: a picked image would be dropped at send.
-        if !SessionComposerRules.canUseAttachments(record), !images.images.isEmpty {
+        if !canAttach, !images.images.isEmpty {
             images.clear()
         }
 
@@ -555,6 +554,16 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
     }
 
     func agentInputCard(_ card: AgentInputCardView, didSelect key: String, in chip: AgentInputChip) {
+        if let creation = environment.newSession {
+            guard !card.configuration.refusesControls else { return }
+            switch chip {
+            case .permission: creation.selectPermission(key)
+            case .model: creation.selectModel(key)
+            case .effort: creation.selectEffort(key)
+            }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            return
+        }
         guard let record = state?.session.record else { return }
         let patch: SessionAgentModesPatch
         switch chip {
@@ -603,10 +612,20 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
 
     // MARK: Card
 
+    /// "+" and the strip: the session's agent takes pictures, or, in an
+    /// empty chat with no session yet, the harness its first send starts
+    /// does. Those pictures go with the first message once it has made the
+    /// session (`LegacyComposeStart`).
+    private var canAttach: Bool {
+        guard let state else { return false }
+        if state.newSessionChoices != nil { return state.newSessionTakesAttachments }
+        return SessionComposerRules.canUseAttachments(state.session.record)
+    }
+
     private func applyConfiguration() {
         let record = state?.session.record
-        let chips = ComposerChipSet(modes: modes, record: record, titles: Self.titles)
-        let canAttach = SessionComposerRules.canUseAttachments(record)
+        let chips = state?.newSessionChoices.map { ComposerChipSet(choices: $0, titles: Self.titles) }
+            ?? ComposerChipSet(modes: modes, record: record, titles: Self.titles)
         let primary = AgentInputPrimaryAction.resolve(
             hasComposerContent: hasComposerContent,
             isSendBlocked: SessionComposerRules.isSendBlocked(record),
@@ -619,12 +638,12 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
         configuration.permission = chips.permission.map(Self.chip)
         configuration.model = Self.chip(chips.model)
         configuration.effort = chips.effort.map(Self.chip)
+        configuration.placeholder = state?.newSessionPlaceholder ?? state?.newSessionChoices?.promptPlaceholder ?? Strings.Composer.inputPlaceholder
+        configuration.refusesControls = state?.isStartingNewSession == true
         configuration.primaryAction = primary
         configuration.primaryAccessibilityLabel = primary == .voice ? Strings.Voice.title : nil
         configuration.isPrimaryBusy = isAborting
         configuration.showsAdd = canAttach
-        // localSettings.zenMode, as SessionView passes it.
-        configuration.zenMode = traitCollection.isZenMode
         configuration.attachments = canAttach
             ? images.images.map { AgentInputAttachmentPreview(id: $0.id, fileURL: $0.attachment.fileURL) }
             : []
@@ -767,7 +786,8 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
 
     /// Telegram's attachment menu, as the agent chat's "+" opens it.
     func agentInputCardDidPressAdd(_ card: AgentInputCardView) {
-        guard SessionComposerRules.canUseAttachments(state?.session.record), let host = hostViewController else { return }
+        // Not while the empty chat's first send is making the session.
+        guard canAttach, !card.configuration.refusesControls, let host = hostViewController else { return }
         attach.present(from: host)
     }
 
@@ -816,6 +836,7 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
         // chat's submit empties its record even if the session arrives
         // before it returns, and the handover carries the record over.
         let clearsStored = !isDraftSynced && !isPending
+        composerDelegate?.composerWillSend(self, from: card)
         // Behind the draft writes before it, ahead of the ones after.
         let sending = draftWriter.send(message)
         // The outbox copies the staged files; they outlive a composer

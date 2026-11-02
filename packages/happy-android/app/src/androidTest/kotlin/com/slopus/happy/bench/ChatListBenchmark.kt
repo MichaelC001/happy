@@ -43,6 +43,7 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import com.slopus.happy.chat.ChatMessage
 import com.slopus.happy.chat.ChatRow
@@ -57,6 +58,7 @@ import com.slopus.happy.conversation.ComposerFocus
 import com.slopus.happy.conversation.ConversationRow
 import com.slopus.happy.conversation.ConversationRowBuilder
 import com.slopus.happy.conversation.ConversationState
+import com.slopus.happy.conversation.Delivery
 import com.slopus.happy.conversation.Message
 import com.slopus.happy.conversation.Presentation
 import com.slopus.happy.ui.chat.AgentMessage
@@ -72,6 +74,8 @@ import com.slopus.happy.ui.conversation.ConversationRowActions
 import com.slopus.happy.ui.conversation.ConversationRowView
 import com.slopus.happy.ui.conversation.ConversationScreen
 import com.slopus.happy.ui.conversation.ConversationScreenActions
+import com.slopus.happy.ui.conversation.ProseThread
+import com.slopus.happy.ui.conversation.Typesetter
 import com.slopus.happy.ui.theme.HappyTheme
 import com.slopus.happy.ui.components.LocalGlassBlur
 import com.slopus.happy.ui.theme.ThemePreference
@@ -82,6 +86,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -93,6 +98,7 @@ import java.io.File
 import java.util.Locale
 
 private const val GLASS_DP = 120
+private const val GLASS_STEPS = 40
 
 /**
  * The chat's frame costs, for research/telegram-chat.md. Each case logs one
@@ -187,12 +193,34 @@ class ChatListBenchmark {
         messages
     }
 
-    private val builder = ConversationRowBuilder()
+    /** The rows' text is laid out as a conversation's lane lays it out: off the main thread, before the screen sees it. */
+    private val typesetter by lazy { Typesetter.of(app) }
+    private val builder by lazy { ConversationRowBuilder(typesetter = typesetter) }
     private val agent = AgentInfo("fx-agent", "fx-workspace", null, "Fixture chat", "idle", null, null, now, now, 0, 0)
 
-    /** Newest first, as the screen takes them. */
+    /**
+     * Newest first, as the screen takes them, laid out as the lane would have
+     * them (all of them, as a second or so after a chat opens).
+     */
     private fun rows(messages: List<Message>): List<ConversationRow> =
-        messages.flatMap { builder.rows(it, "fx-agent", null, false) }.asReversed()
+        messages.flatMap { builder.rows(it, "fx-agent", null, false) }.asReversed().also(::laidOut)
+
+    /** [rows] laid out on this (instrumentation) thread and the typesetter's lane, as Conversation does; reports the cost. */
+    private fun laidOut(rows: List<ConversationRow>) {
+        Runtime.getRuntime().gc()
+        val native = Debug.getNativeHeapAllocatedSize()
+        val heap = Runtime.getRuntime().let { it.totalMemory() - it.freeMemory() }
+        val start = Debug.threadCpuTimeNanos()
+        val wall = SystemClock.uptimeMillis()
+        typesetter.prepare(rows)
+        val first = (Debug.threadCpuTimeNanos() - start) / 1e6
+        runBlocking { withContext(typesetter.lane) {} }
+        val took = SystemClock.uptimeMillis() - wall
+        Runtime.getRuntime().gc()
+        val nativeMb = (Debug.getNativeHeapAllocatedSize() - native) / 1e6
+        val heapMb = (Runtime.getRuntime().let { it.totalMemory() - it.freeMemory() } - heap) / 1e6
+        report(String.format(Locale.US, "  laid out off the main thread: %d rows, first screens %.0f ms cpu, all in %d ms; +%.1f MB native, +%.1f MB heap", rows.size, first, took, nativeMb, heapMb))
+    }
 
     private val allRows: List<ConversationRow> by lazy {
         rows(heavy).also { rows ->
@@ -217,6 +245,8 @@ class ChatListBenchmark {
                 activity = a
                 a.enableEdgeToEdge()
                 a.window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                // As MainActivity asks, unless `-e rate system` leaves the window at the system's choice.
+                if (InstrumentationRegistry.getArguments().getString("rate") != "system") com.slopus.happy.MaxRefreshRate.follow(a)
             }
         }
     }
@@ -253,6 +283,7 @@ class ChatListBenchmark {
 
     /** Runs [block] while recording frames, then logs both summaries. */
     private fun record(name: String, block: () -> Unit): List<FrameRecorder.Frame> {
+        val builds = ProseThread.mainBuilds.get()
         shell("dumpsys gfxinfo ${app.packageName} reset")
         val recorder = FrameRecorder(activity.window)
         var mainCpu = 0L
@@ -266,17 +297,23 @@ class ChatListBenchmark {
         val process = android.os.Process.getElapsedCpuTime() - processCpu
         val frames = recorder.stop()
         FrameSummary(frames).let { report(it.line(name)); report(it.parts()) }
+        // The rate frames actually came at while something moved: consecutive frames under 40 ms apart.
+        val gaps = frames.map { it.vsyncNs }.zipWithNext { a, b -> (b - a) / 1e6 }.filter { it in 0.1..40.0 }.sorted()
+        if (gaps.isNotEmpty()) report(String.format(java.util.Locale.US, "  frame interval while moving: p50 %.1f ms, %d of %d at 120 Hz (< 10 ms)", gaps[gaps.size / 2], gaps.count { it < 10 }, gaps.size))
+        report(String.format(java.util.Locale.US, "  display: %.0f Hz, window asks %.0f", activity.windowManager.defaultDisplay.refreshRate, activity.window.attributes.preferredRefreshRate))
         if (dumpFrames) dump(name, frames)
         // CPU time, unlike wall time, barely moves with a loaded host: the steadier comparison.
         report(String.format(java.util.Locale.US, "  cpu: main %.0f ms (%.2f ms/frame), process %d ms", mainCpu / 1e6, mainCpu / 1e6 / frames.size.coerceAtLeast(1), process))
         val gfx = shell("dumpsys gfxinfo ${app.packageName}")
         val keep = listOf("Total frames rendered", "Janky frames", "50th percentile", "90th percentile", "99th percentile")
+        report("  prose laid out on the main thread: ${ProseThread.mainBuilds.get() - builds}")
         report("  gfxinfo: " + gfx.lines().map { it.trim() }.filter { l -> keep.any { l.startsWith(it) } }.distinct().take(5).joinToString("; "))
         return frames
     }
 
     /** Five opens: the content switched off, then on, each recorded; the first frame is the one that composes it. */
     private fun opens(name: String) {
+        val builds = ProseThread.mainBuilds.get()
         val first = ArrayList<FrameRecorder.Frame>()
         val all = ArrayList<FrameRecorder.Frame>()
         val cpu = ArrayList<Double>()
@@ -297,6 +334,7 @@ class ChatListBenchmark {
             frames.firstOrNull()?.let(first::add)
             all += frames
         }
+        report("  prose laid out on the main thread: ${ProseThread.mainBuilds.get() - builds}")
         report(FrameSummary(first).line("$name open/first"))
         report(FrameSummary(all).line("$name open/all"))
         report("  open main cpu ms: ${cpu.map { String.format(java.util.Locale.US, "%.0f", it) }} median ${String.format(java.util.Locale.US, "%.0f", cpu.sorted()[cpu.size / 2])}")
@@ -374,6 +412,65 @@ class ChatListBenchmark {
         streams("conversation $chat") { text -> withContext(lane) { check(builder.grow(live(text), 0)) } }
     }
 
+    /** The agent working with nothing streaming, for 5 s: what the bar's shimmering title, status and pulsing dot cost alone. */
+    @Test fun conversation_working() {
+        val state = conversation().copy(working = true, activity = Activity.Working)
+        content { ConversationScreen(state, null, actions) }
+        SystemClock.sleep(1_000)
+        record("conversation $chat working") { SystemClock.sleep(5_000) }
+    }
+
+    /**
+     * For recordings of the transcript's motion: the chat, live for `-e seconds N` (60 by default).
+     * What is sent in the composer goes in as a message, and an answer arrives 1.2 s later. With
+     * `-e drive on` it sends two, reads older and comes back by the jump button itself, for a
+     * screen recording made beside it. Frames are summarised at the end.
+     */
+    @Test fun conversation_motion() {
+        var state by mutableStateOf(conversation())
+        var sent = 0
+        val reply = "Done. The guard now waits for the session cookie before it redirects, so the login page no longer loops."
+        val actions = ConversationScreenActions(loadMedia = { pictureBytes }, onSend = { text, _ ->
+            val id = "sent${sent++}"
+            state = state.copy(rows = listOf(ConversationRow.User("$id:user", id, text, parseMarkdown(text), emptyList(), Delivery.Sending)) + state.rows)
+            scope.launch {
+                delay(1_200)
+                state = state.copy(rows = listOf(ConversationRow.Text("$id-answer:0", reply, parseMarkdown(reply))) + state.rows)
+            }
+            true
+        })
+        content { ConversationScreen(state, null, actions) }
+        val recorder = FrameRecorder(activity.window)
+        main { recorder.start() }
+        if (InstrumentationRegistry.getArguments().getString("drive") == "on") {
+            // Two sends, each answered; away from the newest end and back by hand; away again and the jump button.
+            SystemClock.sleep(2_500)
+            for (words in listOf("Ship%sit", "And%sthe%slogout%spage%stoo?")) {
+                device.findObject(By.text("Message"))?.click()
+                SystemClock.sleep(900)
+                device.executeShellCommand("input text $words")
+                SystemClock.sleep(700)
+                device.findObject(By.desc("Send"))?.click()
+                SystemClock.sleep(3_500)
+            }
+            device.pressBack()
+            SystemClock.sleep(1_200)
+            val x = device.displayWidth / 2
+            val h = device.displayHeight
+            device.swipe(x, h / 3, x, h * 2 / 3, 30)
+            SystemClock.sleep(2_000)
+            device.swipe(x, h * 2 / 3, x, h / 3, 30)
+            SystemClock.sleep(2_000)
+            device.swipe(x, h / 3, x, h * 2 / 3, 30)
+            SystemClock.sleep(2_000)
+            device.findObject(By.desc("Jump to latest"))?.click()
+            SystemClock.sleep(3_000)
+        } else {
+            SystemClock.sleep((InstrumentationRegistry.getArguments().getString("seconds")?.toLongOrNull() ?: 60L) * 1_000)
+        }
+        report(FrameSummary(recorder.stop()).line("conversation $chat motion, $sent sent"))
+    }
+
     @Test fun conversation_older() {
         val pages = listOf(0.34, 0.67, 1.0).map { conversation(it) }
         var state by mutableStateOf(pages[0])
@@ -410,18 +507,94 @@ class ChatListBenchmark {
         check(imeVisible()) { "The keyboard never opened" }
         SystemClock.sleep(1_000)
         val controller = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
+        // `-e open tap`: as a person does it, a tap on the composer and Back, so the display has the touch
+        // it boosts its rate for; otherwise the controller, with no finger on the screen.
+        val tap = InstrumentationRegistry.getArguments().getString("open") == "tap"
+        var field = 0 to 0
+        main {
+            val decor = activity.window.decorView
+            val bottom = ViewCompat.getRootWindowInsets(decor)?.getInsets(WindowInsetsCompat.Type.navigationBars())?.bottom ?: 0
+            field = decor.width / 2 to decor.height - bottom - (88 * decor.resources.displayMetrics.density).toInt()
+        }
         val seen = ArrayList<Boolean>()
-        record("conversation $chat ime") {
+        record("conversation $chat ime${if (tap) " tap" else ""}") {
             repeat(4) {
-                main { controller.hide(WindowInsetsCompat.Type.ime()) }
+                if (tap) device.pressBack() else main { controller.hide(WindowInsetsCompat.Type.ime()) }
                 SystemClock.sleep(1_500)
                 seen += imeVisible()
-                main { controller.show(WindowInsetsCompat.Type.ime()) }
+                if (tap) device.click(field.first, field.second) else main { controller.show(WindowInsetsCompat.Type.ime()) }
                 SystemClock.sleep(1_500)
                 seen += imeVisible()
             }
         }
         report("  ime visible after each step: $seen")
+    }
+
+    /**
+     * The glass's steadiness, research/telegram-glass.md's method: a finger
+     * held on the transcript moves it 1 px at a time, [GLASS_STEPS] steps,
+     * with a screenshot after each. For each band of the bar, D is the mean
+     * |frame − previous frame| in 8-bit luma: a steady blur drifts evenly (a
+     * low coefficient of variation), an unsteady one sits still and jumps.
+     * The first and last screenshots are written to `files/glass-steps-*.png`,
+     * so two builds can be compared pixel for pixel.
+     */
+    @Test fun glass_steps() {
+        val state = conversation()
+        content { ConversationScreen(state, null, actions) }
+        val density = app.resources.displayMetrics.density
+        var status = 0
+        main { status = ViewCompat.getRootWindowInsets(activity.window.decorView)?.getInsets(WindowInsetsCompat.Type.statusBars())?.top ?: 0 }
+        val bands = listOf(
+            "status" to (0 until status),
+            "title" to (status until status + (32 * density).toInt()),
+            "foot" to (status + (32 * density).toInt() until status + (64 * density).toInt()),
+            "feather" to (status + (64 * density).toInt() until status + (88 * density).toInt()),
+        )
+        val x = device.displayWidth / 2f
+        var y = device.displayHeight / 2f
+        val start = SystemClock.uptimeMillis()
+        fun touch(action: Int) = instrumentation.sendPointerSync(android.view.MotionEvent.obtain(start, SystemClock.uptimeMillis(), action, x, y, 0))
+        touch(android.view.MotionEvent.ACTION_DOWN)
+        // Past the touch slop, so every step after this scrolls by its pixel.
+        repeat(10) { y += 6f; touch(android.view.MotionEvent.ACTION_MOVE); SystemClock.sleep(16) }
+        SystemClock.sleep(500)
+        fun luma(): Array<FloatArray> {
+            SystemClock.sleep(250)
+            val shot = instrumentation.uiAutomation.takeScreenshot()
+            return bands.map { (_, rows) ->
+                FloatArray(rows.count() * shot.width).also { out ->
+                    var i = 0
+                    for (row in rows) for (col in 0 until shot.width) {
+                        val c = shot.getPixel(col, row)
+                        out[i++] = 0.299f * Color.red(c) + 0.587f * Color.green(c) + 0.114f * Color.blue(c)
+                    }
+                }
+            }.toTypedArray().also { shot.recycle() }
+        }
+        fun save(name: String) {
+            val shot = instrumentation.uiAutomation.takeScreenshot()
+            File(app.getExternalFilesDir(null), "glass-steps-$name.png").outputStream().use { shot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            shot.recycle()
+        }
+        save("first")
+        var last = luma()
+        val d = bands.map { ArrayList<Double>() }
+        repeat(GLASS_STEPS) {
+            y += 1f
+            touch(android.view.MotionEvent.ACTION_MOVE)
+            val now = luma()
+            for (b in bands.indices) d[b] += now[b].indices.sumOf { kotlin.math.abs(now[b][it] - last[b][it]).toDouble() } / now[b].size.coerceAtLeast(1)
+            last = now
+        }
+        save("last")
+        touch(android.view.MotionEvent.ACTION_UP)
+        bands.forEachIndexed { b, (name, rows) ->
+            val v = d[b]
+            val mean = v.average()
+            val sd = kotlin.math.sqrt(v.sumOf { (it - mean) * (it - mean) } / v.size)
+            report(String.format(Locale.US, "  glass steps %-8s y %4d-%4d: D mean %.3f max %.3f cv %.2f", name, rows.first, rows.last, mean, v.max(), if (mean > 0) sd / mean else 0.0))
+        }
     }
 
     // ---- the legacy chat ----
@@ -504,6 +677,7 @@ class ChatListBenchmark {
         SystemClock.sleep(500)
         val count = 60
         var cpu = 0L
+        val builds = ProseThread.mainBuilds.get()
         val recorder = FrameRecorder(activity.window)
         main { recorder.start() }
         for (i in 0 until count) {
@@ -519,6 +693,7 @@ class ChatListBenchmark {
         val frames = recorder.stop()
         report(FrameSummary(frames).line("$name jumps"))
         val ui = frames.sumOf { it.uiNs } / 1e6
+        report("  prose laid out on the main thread: ${ProseThread.mainBuilds.get() - builds}")
         report(String.format(Locale.US, "  jumps: %d, main-thread frame work %.1f ms (%.2f ms a jump), call itself %.2f ms a jump", count, ui, ui / count, cpu / 1e6 / count))
     }
 
@@ -533,6 +708,7 @@ class ChatListBenchmark {
         main { idle = Debug.threadCpuTimeNanos() }
         SystemClock.sleep(IDLE_MILLIS)
         main { idle = Debug.threadCpuTimeNanos() - idle }
+        val builds = ProseThread.mainBuilds.get()
         val recorder = FrameRecorder(activity.window)
         var started = 0L
         main {
@@ -560,6 +736,7 @@ class ChatListBenchmark {
         }
         val frames = recorder.stop()
         FrameSummary(frames).let { report(it.line("$name stream")); report(it.parts()) }
+        report("  prose laid out on the main thread: ${ProseThread.mainBuilds.get() - builds}")
         report(String.format(Locale.US, "  stream: %d updates (final %d chars), main cpu %.0f ms, %.2f ms an update", updates, words.length, mainCpu / 1e6, mainCpu / 1e6 / updates))
         val working = idle / 1e6 / IDLE_MILLIS * elapsed
         report(String.format(Locale.US, "  working screen alone: %.0f ms of main a second; the stream added %.2f ms an update", idle / 1e3 / IDLE_MILLIS, (mainCpu / 1e6 - working) / updates))
@@ -589,6 +766,34 @@ class ChatListBenchmark {
         // Parsed off the main thread, as the feeds do; Compose measures the text on it.
         streams("proto compose current") { text -> live = withContext(Dispatchers.Default) { answerRow(text) } }
         flings("proto compose current", reverse = false)
+    }
+
+    /**
+     * The same 200 answers as the conversation draws them now (ConversationRowView's
+     * drawn answer: laid out on the lane by the Typesetter, one node a segment, code
+     * blocks composed), for the same open, jumps, stream and flings as the two above.
+     */
+    @Test fun proto_compose_prose() {
+        val rows = answers.mapIndexed { i, text -> ConversationRow.Text("p$i:0", text, parseMarkdown(text)) }
+        laidOut(rows)
+        val actions = ConversationRowActions(MessageCallbacks(), onRetryFailure = {}, loadMedia = { pictureBytes })
+        val bubble = BubblePalette(androidx.compose.ui.graphics.Color(0xFFF0F0F0), androidx.compose.ui.graphics.Color(0xFFDDDDDD), androidx.compose.ui.graphics.Color.Gray)
+        val list = LazyListState()
+        fun liveRow(text: String) = ConversationRow.Text("live:0", text, parseMarkdown(text))
+        var live by mutableStateOf(liveRow("Starting").also { laidOut(listOf(it)) })
+        content {
+            LazyColumn(Modifier.fillMaxSize(), state = list) {
+                item(key = "live", contentType = ConversationRow.Text::class) { ConversationRowView(live, bubble, actions) }
+                items(rows, key = { it.key }, contentType = { it::class }) { ConversationRowView(it, bubble, actions) }
+            }
+        }
+        opens("proto compose prose")
+        jumps("proto compose prose", 100, 1) { scope.launch { list.scrollToItem(it) } }
+        main { scope.launch { list.scrollToItem(0) } }
+        SystemClock.sleep(500)
+        // Parsed and laid out on the lane, as a conversation's row is.
+        streams("proto compose prose") { text -> live = withContext(typesetter.lane) { liveRow(text).also { typesetter.prepare(listOf(it)) } } }
+        flings("proto compose prose", reverse = false)
     }
 
     /** The prototype as a Compose item: StaticLayouts built off the main thread, one node, one draw. */

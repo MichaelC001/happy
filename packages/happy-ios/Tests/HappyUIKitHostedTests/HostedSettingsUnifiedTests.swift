@@ -149,8 +149,11 @@ final class HostedSettingsUnifiedTests: XCTestCase {
             SettingsIndex.aboutRows.map(\.id),
             ["sign-out"],
         ])
-        // What home's search knows is what the page shows, in its order.
-        XCTAssertEqual(SettingsIndex.happyAccount.map(\.id), Array(settings.shownRowIDs.dropFirst().dropLast().joined()))
+        // What home's search knows is what the page shows, in its order,
+        // with Data and Storage's Connection after Data and Storage.
+        var page = Array(settings.shownRowIDs.dropFirst().dropLast().joined())
+        page.insert(SettingsIndex.connection.id, at: try XCTUnwrap(page.firstIndex(of: SettingsIndex.dataStorage.id)) + 1)
+        XCTAssertEqual(SettingsIndex.happyAccount.map(\.id), page)
         for gone in Self.removed { XCTAssertNil(settings.shownRow(gone), "\(gone) is still on the page") }
         // Signing it out is its row's hold too, as Manage Accounts did.
         XCTAssertEqual(settings.shownRow("account:\(id)")?.menu.map(\.title), [Strings.signOut])

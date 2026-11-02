@@ -13,6 +13,8 @@ public actor BrowserProxy {
     }
     public nonisolated let username = UUID().uuidString
     public nonisolated let password = UUID().uuidString
+    /// Why tunnels to each host were refused, for the screen to say.
+    public nonisolated let refusals = BrowserRefusals()
     private let client: AgentClient
     private let scope: Scope
     private let upstream: BrowserConnectionPool
@@ -69,9 +71,9 @@ public actor BrowserProxy {
         connection.start(queue: queue)
         let id = UUID()
         let authorization = "Basic " + Data("\(username):\(password)".utf8).base64EncodedString()
-        let client = client, scope = scope, upstream = upstream
+        let client = client, scope = scope, upstream = upstream, refusals = refusals
         let task = Task { [weak self] in
-            do { try await Self.serve(stream, client: client, scope: scope, authorization: authorization, upstream: upstream) }
+            do { try await Self.serve(stream, client: client, scope: scope, authorization: authorization, upstream: upstream, refusals: refusals) }
             catch { /* A cancelled tab or connection ends only its own stream. */ }
             await stream.close()
             await self?.finished(id)
@@ -81,8 +83,9 @@ public actor BrowserProxy {
 
     private func finished(_ id: UUID) { jobs[id] = nil }
 
-    private nonisolated static func serve(_ local: NetworkBrowserStream, client: AgentClient, scope: Scope, authorization: String, upstream: BrowserConnectionPool) async throws {
+    private nonisolated static func serve(_ local: NetworkBrowserStream, client: AgentClient, scope: Scope, authorization: String, upstream: BrowserConnectionPool, refusals: BrowserRefusals) async throws {
         var opaqueTunnel = false
+        var target: BrowserPolicy.Authority?
         do {
             let (head, rest) = try await BrowserRelay.head(local)
             guard head.value("proxy-authorization") == authorization else {
@@ -93,6 +96,7 @@ public actor BrowserProxy {
             guard parts.count == 3, parts[0] == "CONNECT", parts[2] == "HTTP/1.1",
                   let url = URL(string: "http://\(parts[1])"), url.path.isEmpty, url.query == nil,
                   let authority = BrowserPolicy.Authority(url: url) else { throw BrowserError.forbidden }
+            target = authority
             switch scope {
             case .artifact(let id, let version, let allowed, _) where allowed == authority:
                 try await local.write(Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8))
@@ -157,6 +161,7 @@ public actor BrowserProxy {
                 // Never append another HTTP response to a partial body, SSE
                 // stream, or an established opaque TLS/WebSocket tunnel.
                 if case BrowserProxyFailure.responseStarted = error {} else if !opaqueTunnel {
+                    if let target { refusals.record(BrowserProxyRefusal(status: failure.status, code: failure.code), for: target) }
                     try? await local.write(failure.data)
                 }
             }
@@ -173,14 +178,21 @@ public actor BrowserProxy {
         let (request, body) = try await BrowserRelay.requestBody(head, initial: initialBody, stream: local)
         let parts = request.line.split(separator: " ")
         let api = parts.count == 3 && parts[1].hasPrefix("/api/") && request.value("upgrade") == nil
-        let translated = try request.artifactRequest(artifactID: id, version: version, credential: client.token, keepAlive: api)
+        _ = try request.artifactRequest(artifactID: id, version: version, credential: client.token, keepAlive: api)
+        let start = ConnectionMetrics.uptime()
+        let metrics = client.metrics
         let lease: BrowserConnectionPool.Lease
         do { lease = try await upstream.take(reusing: api) }
         catch is CancellationError { throw CancellationError() }
-        catch { throw BrowserProxyFailure.upstream(error) }
+        catch {
+            metrics?.request(.browser, status: nil, duration: ConnectionMetrics.uptime() - start)
+            throw BrowserProxyFailure.upstream(error)
+        }
         let remote = lease.stream
         var responseStarted = false
+        var answered = false
         do {
+            let translated = try request.artifactRequest(artifactID: id, version: version, credential: client.token, keepAlive: api, authority: remote.authority)
             try await remote.write(translated.data)
             if !body.isEmpty { try await remote.write(body) }
             // Responses are never buffered: status, duplicates, chunk framing,
@@ -195,6 +207,8 @@ public actor BrowserProxy {
                 try await writeResponse(response.data, to: local)
                 (response, bytes) = try await BrowserRelay.head(remote, initial: bytes)
             }
+            metrics?.request(.browser, status: Int(response.line.split(separator: " ").dropFirst().first ?? ""), duration: ConnectionMetrics.uptime() - start)
+            answered = true
             if response.line.split(separator: " ").dropFirst().first == "101" {
                 responseStarted = true
                 try await writeResponse(response.artifactResponse().data, to: local)
@@ -234,6 +248,7 @@ public actor BrowserProxy {
             }
         } catch {
             await upstream.release(lease, reusable: false)
+            if !answered, !(error is CancellationError) { metrics?.request(.browser, status: nil, duration: ConnectionMetrics.uptime() - start) }
             if error is CancellationError { throw error }
             if case BrowserProxyFailure.responseStarted = error { throw error }
             let failure = BrowserProxyFailure.upstream(error)

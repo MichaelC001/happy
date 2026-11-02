@@ -1,6 +1,7 @@
 package com.slopus.happy.agent
 
 import com.slopus.happy.connection.ByteSource
+import com.slopus.happy.connection.RequestCategory
 import com.slopus.happy.connection.Transport
 import com.slopus.happy.connection.TransportResponse
 import com.slopus.happy.connection.TransportStream
@@ -109,13 +110,13 @@ object Wire {
  * [frames] (chunked, as the daemon writes them).
  */
 class FakeAgent(var bootstrap: JsonObject = Wire.bootstrap(), var name: String = "Studio") : Transport {
-    val calls = mutableListOf<String>()
-    val streamCursors = mutableListOf<String?>()
+    val calls = java.util.concurrent.CopyOnWriteArrayList<String>()
+    val streamCursors = java.util.concurrent.CopyOnWriteArrayList<String?>()
     var frames = Channel<String>(Channel.UNLIMITED)
     var revoked = false
     var resources = mutableMapOf<String, JsonObject>()
 
-    override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>): TransportResponse {
+    override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>, category: RequestCategory): TransportResponse {
         calls += "$method $path"
         if (revoked) return TransportResponse(401, body = "{\"code\":\"unauthorized\"}".toByteArray())
         fun ok(text: String) = TransportResponse(200, mapOf("content-type" to "application/json"), text.toByteArray())

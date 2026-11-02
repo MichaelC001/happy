@@ -493,6 +493,441 @@ Benchmark additions:
   GPU and deadline to `files/chat-frames.txt`.
 - The `parts` line under each case.
 
+## Phase 3, precomputed text rows: results
+
+Answers, people's messages, collaborators' messages and opened thoughts are now
+laid out where the rows are built, as Telegram's `MessageObject.generateLayout` is.
+The row draws what it is given and measures nothing.
+
+- **The typesetter** (`ui/conversation/Typesetter.kt`, one per process):
+  - The conversation's lane calls `prepare` with every row set it publishes. It lays
+    out the newest two screens of rows then and there, and the rest on the
+    typesetter's own lane (`Dispatchers.Default.limitedParallelism(1)`).
+  - A streaming block's words are laid out in `LiveText.update`, before its row
+    reads them. Its settled paragraphs are reused by block identity, so a delta lays
+    out only the paragraph that grew.
+  - It keeps 1,200 rows, keyed by row key, with the words, geometry (column, density,
+    font scale, direction) and palette they were made for.
+- **What a layout is** (`Prose.kt`):
+  - Compose's own `TextMeasurer`, one per thread with a shared font resolver. A drawn
+    row is therefore pixel for pixel MarkdownView, which the tests check.
+  - Paragraphs, headers, inline code, lists, rules and the collaborator's label are
+    pieces at fixed places in *segments*. Code blocks, tables, options, diagrams and
+    pictures stay composables between segments.
+- **Drawn ahead.** The lane also draws each segment into an `android.graphics.Picture`
+  in the current theme's colours. Shaping glyphs for the display list was the main
+  thread's biggest new cost (`Layout.drawText` 8% of the jumps). A row now plays its
+  picture back. A row whose picture is for another theme or width draws its layouts
+  itself while the lane draws it again.
+- **A new width** (fold, rotation, a pane) makes every layout stale. Rows draw the old
+  one scaled to the new width. The lane lays them out again, the rows on screen first,
+  and the rows swap to the new layout when it is ready. Nothing is laid out on the main
+  thread.
+- **Unchanged behaviour:**
+  - Links: a tap opens them through the proxied browser, a long press shows the menu.
+  - Semantics: each segment's texts are its `Text`, and its links are custom actions,
+    so `onNodeWithText` finds them.
+  - Long press: it puts that one answer back in today's `SelectionContainer` with the
+    word selected. Once nothing is selected the answer is drawn again.
+  - Light/dark, font scale and RTL, and the streaming reveal, which masks the drawn
+    layouts.
+- **Checks.** `ProseThread` counts every layout built on the main thread, and throws
+  under `strict` in tests. The benchmark prints the count for each case. It was 0 in
+  every case.
+
+Tests (`ProseRowsTest`, Robolectric, native graphics):
+- Pixel parity with `AgentMessage` in light, dark, RTL and font scale 1.6.
+- Pixel parity of the drawn-ahead playback in light and dark.
+- Bubble and collaborator parity.
+- Semantics and link actions; link tap, long press and off-link.
+- Long-press selection and the return to drawing.
+- Cache keys, invalidation and part reuse.
+- A width change with strict main thread.
+- A whole chat opened and scrolled to its oldest row with strict main thread.
+- Streaming through the builder with strict main thread.
+
+### Emulator (Pixel 7 AVD, API 35, 60 Hz, `-e chat recorded`, 702 rows)
+
+The host was shared and loaded (load average 40–110), so before and after were
+interleaved, 3 × 2 runs each.
+
+| | before (main) | after |
+|---|---|---|
+| `proto_rows_current`, 60 jumps to fresh rows | 1.76–2.08 ms a jump (one 3.88 outlier) | **1.30–1.57 ms a jump** |
+| the same, without the drawn-ahead pictures | | 2.18–2.75 ms a jump |
+| `conversation_open`, main cpu median | 17 / 41 ms | 16 / 17 ms |
+| `conversation_scroll` | p50 17.9 / 29.7 ms. Missed 2.3 / 8.5% | p50 17.5 / 17.1 ms. Missed 2.2 / 1.8% |
+| `conversation_stream` | 3.58 / 4.55 ms an update | 3.68 / 4.17 ms an update |
+| the lane | | first screens 20–29 ms cpu; all 702 rows laid out and drawn in 330–550 ms, +9 MB heap |
+
+Main-thread profile of the jumps (simpleperf, 4 kHz, main thread only):
+- Before: `TextAnnotatedStringNode.measure` 12.5%, `SelectableTextAnnotatedStringNode` 6%,
+  `measureLazyList` 50%.
+- After, before the pictures were added: `measureLazyList` 32%. The text measure was gone,
+  but `AndroidParagraph.paint` was 8% (glyph shaping as the display list records), which
+  the pictures removed.
+
+`proto_compose_prose` (200 answers through `ConversationRowView`) is the
+prototype-doc comparison: open median 6–10 ms of main thread, against
+`proto_compose_current`'s 27.
+
+### Fold (Galaxy Z Fold7, inner screen, 120 Hz, dark), 2 × interleaved
+
+| | before (main, fe1ad56f6's base) | after |
+|---|---|---|
+| `conversation_open`, main cpu median | 104 / 99 ms | **96 / 83 ms** |
+| `conversation_scroll` | 3,211 / 3,061 frames. p99 24.5 / 21.3 ms. Missed 3.1 / 3.2%. ui max 39 / 34 ms | 3,100 / 3,001 frames. p99 **17.1 / 18.0 ms**. Missed 2.8 / 3.0%. ui max 18 / 19 ms |
+| `proto_rows_current`, fresh-row jumps | p90 29.6 / 28.2 ms. **Janky 25.7 / 23.7%**. 4.36 / 4.56 ms of main a jump | p90 19.9 / 20.7 ms. **Janky 13.1 / 16.3%**. 4.11 / 3.96 ms a jump |
+| `conversation_stream`, main an update | 16.2 / 16.3 ms | 17.4 / 17.3 ms |
+| prose laid out on the main thread | | 0 in every case |
+| the lane | | first screens 20–30 ms cpu. All 702 rows in 520–650 ms, +9.5 MB heap |
+
+The open is 8–16% cheaper on the Fold, not the 40% asked for. Profiling the open (the
+emulator at the Fold's size) shows why:
+- Today's text measure, `SelectionContainer` and `MarkdownView` (about 25% of the open's
+  main thread) are gone.
+- What remains is composing and measuring the rest of the screen: the glass bar's
+  layout 20%, the composer 4–5%, tool rows' `Text` 2%, and the subcomposition of every
+  row (`LazyColumn` 11%).
+
+A further cut needs the tool rows drawn the same way, and the screen's chrome composed
+before the transcript.
+
+`proto_compose_prose` on the Fold: open median 28–29 ms, jumps 0.96 ms of main, scroll
+missed 0.4–0.7%, stream 5.3 ms an update.
+
+## Phase 4, motion: results
+
+Telegram's list motion, on its curve: 250 ms, cubic-bezier(0.199, 0.011, 0.279, 0.910)
+(`TranscriptMotionSpec`, `ui/conversation/TranscriptMotion.kt`).
+
+- **Insert** (`ChatListItemAnimator`).
+  - When a row arrives at the newest end and the reader is there, the rows already shown
+    move up for it. The list's layer is drawn the new rows' height lower and eases to 0,
+    so no row is laid out or placed again for it.
+  - Each new row fades from 0 and grows from 0.9 in its own layer. Its start waits
+    `(1 − bottom / listHeight) × 100` ms, so the lowest row goes first.
+  - Reading older history, nothing moves. More than 8 rows at once (a sync catching up)
+    just appear, and so does everything with Reduce Motion.
+  - A streaming answer comes in through its reveal, which already grows it from nothing.
+- **The sent message's flight** (`TextMessageEnterTransition`).
+  - Applies to a text of 10 lines or fewer with nothing attached, sent at the newest end.
+  - The composer hands over its words as laid out and where they were. The row hides
+    until they land. Over the screen, the bubble and the words move from the field to
+    the row's words over 250 ms on the curve. The bubble is opaque by 40%.
+  - When the bubble breaks the lines differently from the field, the field's words
+    cross-fade into the bubble's picture, which the lane drew ahead.
+  - Every frame of the flight draws two pictures and a rounded rect, and shapes no
+    text.
+- **The jump button** (`ChatActivitySideControlsButtonsLayout`).
+  - Shown more than 100 dp from the newest message, and hidden inside it.
+  - It moves over 280 ms decelerating: fading, growing from 0.7, rising 80 dp.
+  - With Reduce Motion it just appears.
+
+Tests:
+- `TranscriptMotionTest`: the curve's values; the row above moving up between frames
+  and settling; nothing moving while reading older; the flight's start, middle and
+  landed frames, with the bubble drawn in its place after; a long message not flying.
+- `ConversationJumpTest`: the 100 dp threshold and the 280 ms rise.
+
+Fold recordings of `conversation_motion -e drive on` (two sends, each answered 1.2 s
+later; away from the newest and back; the jump button): `fold-motion-dark.mp4` and
+`fold-motion-light.mp4`. Frames over the whole recording: p50 5.4 ms, p99 17–23 ms,
+janky 0.7–0.8%. Streaming with phase 4 against main at the same commit, interleaved
+twice: 17.5–18.0 vs 17.6–17.9 ms of main an update, so no change.
+
+## Phase 2, the glass's cost: results
+
+Measured 2026-10-31 on the Fold (120 Hz, dark, `-e chat recorded`), non-debuggable
+chatbench. "Before" is main at ca1a18607/c458fa14e~1; "after" is c458fa14e plus the
+RenderThread shimmer and band sharing. Runs interleaved, ranges over 2–4 runs each.
+
+| | before | after |
+|---|---|---|
+| **IME**, open and close × 4 | total p50 7.8–8.2 ms, GPU p50 3.3–3.4. Missed 37–46%. With `-e glass off`: 20% | total p50 5.6–6.4 ms, GPU p50 1.3. **Missed 18–26%**, janky 0–0.5%: the same as glass off |
+| **scroll**, 8 + 8 flings | total p50 / p90 / p99 = 10.4–10.6 / 12.9–13.9 / 17.7–22.1 ms. Missed 2.5–3.7% | **9.2–9.3 / 10.9–11.1 / 13.6–14.6 ms**. Missed 2.7–3.2%, janky 0.1–0.2% |
+| **working, nothing streaming** (`conversation_working`, 5 s) | main 1.8 ms a frame, 120 frames a second: 210–256 ms of main a second | **main 0 ms**. The RenderThread draws the shimmer and the dot at 60 Hz, 6.3 ms total p50 |
+| **stream**, 120 updates | main 16.1–17.7 ms an update, of which 127–256 ms a second the working bar | 15.4–16.0 ms an update, none of it the bar |
+
+Legacy ChatList (no glass) scrolls at 4.6 ms p50; the conversation with `-e glass off` at
+5.8. Targets missed: the keyboard is not under 3%, and scroll is 9.2 ms, not near 4.7.
+
+**Where the glass's GPU time went: the prefilter.** A trace of an IME frame had the bar's
+full-size Gaussian prefilter (sigma 4 px over a 1968 × 572 layer) as most of the glass's
+GPU. It is now three bilinear halvings to the 1/8 copy (`GlassLayers.record`): every
+full-size pixel reaches the small copy, so it does the prefilter's job.
+- Pixels: before vs after, light and dark, the bar and feather differ by at most 2 of 255
+  and the body and the dock by at most 1. The status-bar band differs where the clock and
+  the icons do.
+- Steadiness (`glass_steps`, research/telegram-glass.md's method, 40 steps of 1 px):
+  coefficient of variation per band 0.2–0.4 before and after. Dark, mean D 0.03/0.08/0.07
+  before and 0.04/0.10/0.07 after for title/foot/feather, all under 0.2 of 255.
+- Capturing straight into the half copy (one layer fewer) measured the same on the Fold,
+  but it doubled the steps' CV to 1.2–1.4, so the full-size capture stays.
+
+**The keyboard doesn't re-blur.** `KeyboardLift.travel` tells the transcript's
+`GlassSource` where the keyboard is, where it started and where it ends. The bar, which the
+list slides under, blurs the band the whole travel passes under once, as the animation
+starts, and only moves that blur each frame (`GlassTravel`, `blurOf`). The dock and the
+composer ride with the list and never re-blurred. During the animation the GPU's p50 went
+from 3.3 to 1.3 ms, glass off's figure.
+
+**Bands are shared.** Glasses over one source keep their blurred bands on it
+(`GlassSource.bands`). A glass whose band lies inside another's draws from that, and two
+that overlap (the composer's pill over the dock's fade) blur one band round both.
+
+**The bar is one layer.** The bar's glass (blur, tint, feather mask) is recorded into an
+offscreen layer of its own. A caret, a pressed button or the shimmer over it composites
+that as it is. The feather's mask no longer needs a saveLayer per frame.
+
+**The working bar costs the main thread nothing.** Two steps:
+1. c458fa14e: the shimmer and the dot draw from one clock that writes no snapshot state.
+   Each tick invalidates only its nodes' draws, at most 60 times a second. Main went from
+   about 2 ms a frame at 120 Hz to 1.2 ms a frame at 60 Hz (127 ms a second). Every tick
+   is still a whole main-thread frame (Choreographer, Compose's frame, a traversal, draw).
+2. In the conversation's bar the title's and status's sweep and the dot's pulse are now
+   AnimatedVectorDrawables (`res/drawable/shimmer_sweep.xml`, `status_dot_pulse.xml`, the
+   same numbers) in a View of their own (`RenderThreadMotion.kt`). The RenderThread runs
+   them with no main-thread frame at all, as it runs the platform's spinner. The text is
+   still laid out and recorded by Compose, and the View draws that recording with the
+   band over it (SrcAtop in a layer). Lists' shimmers keep the clock: they come and go
+   with scrolling. Robolectric, Reduce Motion and API < 29 take the clock's path.
+
+`ConversationWorkingTest` runs 30 frames of a working bar and finds no state written,
+nothing composed, and the bar's pixels changing.
+
+**What still misses on the keyboard.** The glass is out of it: glass on and glass off now
+miss the same share. What is left:
+- The animation's frames come every 16.7 ms against FrameMetrics' 8.3 ms deadline (see
+  phase 1). Their p50 is 5.6–6.4 ms, so the share flips with a millisecond either way.
+  The ones that miss are ui 4–6 ms plus RenderThread 2–3 ms. The ui is
+  `insets_animation` (0.3–1.5 ms, the platform dispatching insets to the View tree),
+  `measureAndLayout` (0.8–1.5 ms) and `onPositionedCallbacks` (0.3–0.5 ms, the glass's
+  and the composer's `onGloballyPositioned` running as everything is placed again each
+  frame).
+- The frame the keyboard settles in (7–12 ms of ui).
+- Caret-blink frames, below.
+
+Under 3% needs the IME frames' main thread under about 3 ms. The next steps are moving
+the glass's and the composer's position reads out of `onGloballyPositioned` (positions
+read in draw), and placing the riding layers without a layout pass (a translation set from
+the insets callback, as AdjustPanLayoutHelper does on a View). Neither is the glass's.
+
+**Caret-blink frames.** Isolated frames 500 ms apart with 7–8 ms of GPU, glass on or off.
+A trace has them drawing only the caret: about 0.6 ms of RenderThread and a handful of
+ops, at a GPU frequency of 342–443 MHz. The GPU has clocked down between blinks and takes
+the frame at that speed. It is not work we can remove; since the bar is its own layer, a
+blink no longer re-runs any of the glass. They count as missed only because 7–8 ms plus
+the wait passes 8.3 ms. Holding the GPU up for a caret would cost power to win a
+statistic.
+
+**Scroll.** RenderThread is 4.6 ms a frame against legacy's 1.3. About 0.6 ms of that is
+recording the 16 glass layers. About 2.4 ms is flushing them: four blurs of about 1968 ×
+330 at full size and their halvings. GPU p90 went 6.4 → 4.4 ms and the tail flattened
+(p99 18–22 → 14 ms). The p50's remaining gap to the glass-off 5.8 ms is that flush. The
+next step is Telegram's: draw the capture at the band's size into one merged node per
+frame rather than one per glass (the bar's 1968 × 333, the fade's and the pill's), or
+blur the bands at half size.
+
+Pictures and video in the task's `.context/glass-cost/`:
+- `before-conversation-{light,dark}.png` and `after-conversation-{light,dark}.png`, the
+  same screen from `glass_steps`.
+- `fold-keyboard-dark.mp4`: `conversation_ime` with the after build.
+- `working-bar-renderthread-strip-emulator.png`: four frames of the RenderThread sweep and
+  pulse.
+
+Benchmark additions:
+- `conversation_working`: the working screen for 5 s, nothing streaming.
+- `glass_steps`: the 1 px steadiness measure, with the first and last screenshots in
+  `files/glass-steps-*.png`.
+
+## Phase 5: the refresh rate, the keyboard and one glass capture, as Telegram does them
+
+Measured 2026-11-01 on the Fold (120 Hz, dark, `-e chat recorded`) and the Nothing Phone
+(A065), non-debuggable chatbench, before and after interleaved.
+
+### The refresh rate (3f943b758)
+
+`MaxRefreshRate` sets the window's `preferredRefreshRate` to the display's highest rate at
+its current resolution, as `AndroidUtilities.setPreferredMaxRefreshRate` does
+(`messenger/AndroidUtilities.java:2815`). Telegram's version takes the highest of
+`Display.getSupportedRefreshRates()` and sets it from `LaunchActivity.onConfigurationChanged`
+(`:7247`). We do the same, and also:
+- as the window is created;
+- on every display change, such as a fold or a resolution chosen in Settings;
+- only among modes at the current resolution, so the request never asks for a resolution
+  change.
+
+It is no `preferredDisplayModeId`, Telegram sets none either.
+
+**Battery.** It is Telegram's request exactly: a preferred base rate for the window while it
+is shown, not a minimum.
+- The system's own policy still lowers the rate where it would: Samsung's idle and content
+  heuristics, battery saver, a low-rate video.
+- Nothing is asked for once the window is gone.
+
+**Effect.**
+- The Nothing Phone ran us at 90 Hz without a request: the system's default app vote was
+  `APP_REQUEST_BASE_MODE_REFRESH_RATE` 90 with a render range capped at 90. With the request
+  the vote is 120 and SurfaceFlinger's `activeMode` is 120 Hz.
+- The Fold was at 120 already. `dumpsys window` now shows `preferredRefreshRate=120.00001`
+  on MainActivity.
+
+| Nothing Phone, `conversation_scroll` | 90 Hz (no request) | 120 Hz |
+|---|---|---|
+| frames in the same flings | 1,761 | 3,382 |
+| total p50 / p90 / p99 | 9.5 / 11.0 / 16.9 ms | 8.3 / 9.7 / 13.7 ms |
+| missed | 0.8% | 1.1% |
+| with `-e glass off` | | 4.7 / 6.0 / 8.9 ms |
+
+Settings push and back on the Nothing Phone at 120 Hz (qz88's 12-iteration macrobenchmark,
+main a45d230d5): CPU p50 / p90 / p99 7.13 / 8.47 / 18.29 ms, FrameTimeline overrun p99
+18.22 ms. Tap to first movement is a median 67 ms warm, against 79 ms at 90 Hz.
+
+### The keyboard (d464acbde)
+
+This is AdjustPanLayoutHelper's inset-animator path (`ui/ActionBar/AdjustPanLayoutHelper.java:413-438`):
+- A `WindowInsetsAnimation.Callback` with `DISPATCH_MODE_STOP`, and an insets listener,
+  sit on the Compose view's parent (`KeyboardMotion`, one per window). They are held while
+  a screen that rides the keyboard is STARTED.
+- `onProgress` writes the keyboard's height and nothing else. What rides it (the
+  transcript, the dock, the dock's fade, the jump button, new work's panel, the legacy
+  chat's content) is translated in draw (`riding`: a layer, a translation, a layer), so an
+  IME frame draws two layers again.
+- The layout takes the keyboard once: as a show ends, as a hide starts.
+- Because the animation stops at the parent, Compose's own `WindowInsets` see only its end
+  states. No `insets_animation` reaches the Compose tree and nothing measures for it.
+- Below Android 11: Telegram's 250 ms on cubic-bezier(0.199, 0.011, 0.279, 0.910), from
+  where the keyboard is to where the window says it will be (its pre-draw path).
+- The glass bar adds the transcript's translation to where it is over it, so it stays put
+  while the list rides under it, and still blurs the whole travel once (`GlassTravel`).
+- The composer's popup anchors and the legacy chat's jump-button inset read coordinates
+  when they are needed, not in `onGloballyPositioned`.
+- The legacy chat lost its `imePadding()`, and its scrim no longer reads the IME.
+
+`KeyboardFrameTest` drives the platform's IME animation through the decor view, as the
+system dispatches it. On every frame, in the conversation and the legacy chat:
+- the Compose owner has no measure, placement or positioned callback pending;
+- nothing composes.
+
+The layout lands above the keyboard once it is up. With `riding` as a placement offset
+instead, all three tests fail.
+
+| Fold, `conversation_ime`, 3 rounds | before (3f943b758) | after |
+|---|---|---|
+| main thread a frame | 3.75–4.00 ms | **2.40–2.70 ms** |
+| ui p50 / p90 | 2.2–2.6 / 4.8–5.0 ms | 1.3–2.0 / 2.7–2.8 ms |
+| missed | 20.9–24.1% | 10.4–13.8% |
+| missed frames that were the animation's own | 27–31 a run | 7–8 a run |
+
+| Nothing Phone (120 Hz), `conversation_ime` | before | after (2 runs) |
+|---|---|---|
+| main thread a frame | 4.03 ms | 2.56–2.78 ms |
+| ui p50 / p90 | 2.6 / 3.3 ms | 1.6 / 2.3 ms |
+| missed | 4.4% | 3.9–6.5% |
+
+The animation's frames now take 2.0–2.9 ms of ui. The misses left in a run:
+- 10–15 caret-blink frames: the GPU clocked down between blinks (phase 2).
+- About 5 frames: the two layout frames a show or hide still has, its start and its
+  settle, ui 8–12 ms.
+
+**Why the keyboard ran at 60 Hz in the benchmark.** The case opened and closed the keyboard
+with `WindowInsetsController` and no finger on the screen. Samsung's scheduler only boosts
+for touch (`touchTimer` 300 ms, `touchControlTimer` 3 s in SurfaceFlinger's policy). Without
+a touch, its content heuristic settles at 60 Hz even though our layer's vote in SurfaceFlinger
+is 120 Hz. The display reports `frameRateCategoryRate {normal=60, high=90}` and no ARR support.
+
+Two requests during the animation changed nothing (17.0 ms between frames, 0–1 of about
+165 frames at 120 Hz):
+- `View.setRequestedFrameRate(REQUESTED_FRAME_RATE_CATEGORY_HIGH)` on the Compose view;
+- an explicit 120.
+
+The window's own surface has no public `setFrameRate`. Samsung does not honour an app's
+request here, so nothing was landed for it.
+
+With `-e open tap` the case opens the keyboard as a person does, with a tap on the composer,
+and closes it with Back:
+- Every show runs at 120 Hz: 43 of 44 frames 8.5 ms apart.
+- A hide by Back, a key and not a touch, runs at 60 Hz unless it falls in the last tap's
+  boost.
+
+Over the run, 181 of 252 moving frames came at 120 Hz. Total p50 is 4.0 ms, ui p50 0.9 ms,
+and 6.4–9.1% missed against the 8.3 ms deadline, which is now the real one for the shows.
+
+**The "missed" figure for the keyboard.** For frames that come at 60 Hz (every hide, and every
+open with no touch), FrameMetrics' deadline is still the 120 Hz 8.3 ms. "Missed" counts frames
+that are on time for the rate they are shown at, so read it with the frame interval line the
+benchmark now prints.
+
+### One glass capture (this change)
+
+Telegram's list draws the children under its glass rects into one capture
+(`RecyclerListView.capture`/`captureChildren`, `:3138`/`:3169`). The blur takes its source
+parts from that capture (`DownscaleScrollableNoiseSuppressor`). Ours now does the same
+(`GlassAtlas`, `ui/components/Glass.kt`):
+- The glasses over a source say which band of it each needs. Bands that overlap become one:
+  the composer's pill and the dock's fade.
+- The bands are drawn one under the other into one full-size capture. Each is the source
+  clipped to its band, so only what lies under the glass is drawn again.
+- The capture is halved twice, and each band halves its part once more to an eighth and
+  blurs it there.
+- Every band starts on a multiple of 8 px, so no 2×2 average reaches across two bands.
+- A frame where the content moves renders one capture and two halvings, whatever the number
+  of glasses. Before, it rendered a capture and three halvings per glass: 16 layers on the
+  conversation, 6 now.
+- The bar alone stretches its band over a keyboard's travel. The dock and the pill ride with
+  the list and keep theirs.
+
+**Same pixels.** `glass_steps`'s screenshots before and after, Fold:
+- Light and dark, the bar and feather differ by at most 1 of 255, and the body and the dock
+  by 0.
+- In dark the status bar differs only where the clock and the icons do.
+
+`GlassMergedCaptureTest` checks, light and dark, that each glass shows from the merged
+capture exactly the pixels it shows from a capture of its band alone. With bands placed off
+the 8 px grid, it fails.
+
+**Steadiness** (`glass_steps`, 40 steps of 1 px, D mean / CV):
+
+| | before | after |
+|---|---|---|
+| dark: title, foot, feather | 0.035 / 0.37, 0.095 / 0.33, 0.068 / 0.38 | 0.036 / 0.37, 0.095 / 0.33, 0.067 / 0.39 |
+| light: title, foot, feather | 0.045 / 0.23, 0.085 / 0.22, 0.044 / 0.31 | 0.045 / 0.22, 0.084 / 0.21, 0.044 / 0.31 |
+
+| Fold | before (d464acbde) | after |
+|---|---|---|
+| `conversation_scroll`, total p50 / p90 / p99 | 9.2 / 11.0 / 14.0–14.1 ms | **8.7–8.8 / 10.1–10.8 / 12.9–13.4 ms** |
+| scroll, RenderThread / GPU p50 | 4.2–4.3 / 3.1 ms | 4.0–4.1 / 2.9 ms |
+| scroll, missed | 3.0–3.5% | 2.9–3.2% |
+| `conversation_ime -e open tap`, total p50 / p99 | 4.0 / 16.3 ms | 4.0 / 14.7 ms |
+| `conversation_stream`, total p50, missed | 8.8 ms, 0.1% | 8.7 ms, 0.7% |
+| glass off, scroll | | 5.3 / 6.9 / 10.6 ms |
+| legacy list, scroll | | 4.6 / 7.1 / 14.2 ms |
+
+**The target was not reached.** Scroll is 8.7 ms, not near glass off's 5.3. The merged capture
+saves about 0.2 ms of RenderThread and 0.2 ms of GPU; the rest of the gap is rendering the
+full-size capture itself. Its text is rasterised again, about 1968 × 330 for the bar and a
+band as large for the dock, with the halvings and the two blurs. The capture stays full size
+because drawing it at 1/8, as Telegram does, puts text on the eighth's grid and makes it jump
+under the glass (research/telegram-glass.md). A capture straight to half size measured the
+same on the Fold and doubled the CV (phase 2). Getting much closer to glass off needs less to
+render each frame:
+- Telegram's hash gating, so a band isn't rendered again while its rows are only translated:
+  the capture follows the scroll offset instead.
+- Or dock bands drawn from the bar's capture where the content is the same.
+
+Neither is done here.
+
+Benchmark additions:
+- `-e open tap`: the IME case opens with a tap and closes with Back.
+- `-e rate system`: leaves the window at the system's choice.
+- A `display:` line with the refresh rate and the window's request.
+- A `frame interval while moving` line.
+
+Recordings and pictures in the task's `.context/telegram-ime-glass/`:
+- `fold-keyboard-dark.mp4` and `fold-keyboard-strip.png`;
+- `glass/{before,after}-{dark,light}-first.png`.
+
 ## Running the benchmark
 
 ```sh
@@ -522,10 +957,11 @@ adb -s <device> shell cat /sdcard/Android/data/com.slopus.happy.chatbench/files/
   on the daemon, write `{"runs":[…]}`, then run `tools/bench/scramble-chat.py recording.json out.json.gz`.
 - **Cases:**
   - `conversation_open`, `conversation_scroll`, `conversation_stream`,
-    `conversation_older`, `conversation_ime`
+    `conversation_older`, `conversation_ime`, `conversation_working`, `glass_steps`
+  - `conversation_motion` (`-e drive on` sends, scrolls and jumps on its own, for recordings)
   - `legacy_scroll`
   - `proto_compose_current`, `proto_compose_canvas`, `proto_recycler_canvas`,
-    `proto_rows_current`
+    `proto_rows_current`, `proto_compose_prose`
   - `proto_compose_glass`, `proto_recycler_glass`
 
   Run them one at a time; each takes 10–60 s.

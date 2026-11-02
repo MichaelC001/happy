@@ -1,16 +1,16 @@
 #if canImport(UIKit)
 import HappyCore
 import HappyLayout
+import HappyStore
 import HappyWire
 import UIKit
 
 /// What the chat screen decides on the main thread and hands to the rows'
-/// derivation: the list's width and layout, and what the reader opened,
+/// derivation: the list's width, and what the reader opened,
 /// picked or is waiting on. All of it is small, and copied whole.
 struct ChatRowsView: Equatable, Sendable {
     var width: CGFloat = 0
     var maxContentWidth: CGFloat = .greatestFiniteMagnitude
-    var tablet = false
     /// The list's text size and the screen's words: every row is planned
     /// in them.
     var text = ChatRowText.designed
@@ -75,6 +75,10 @@ struct ChatRowsApplied: Sendable {
     var graceEnd: Int64?
     var pins = 0
     var ticks = 0
+    /// The time each of this device's sends first showed, by row: the
+    /// server's echo carries its own `createdAt`, which may be a minute on
+    /// from the outbox's ("12:59" to "1:00") and would reflow the bubble.
+    var times: [String: Int64] = [:]
 }
 
 /// The rows and their geometry, planned off the main thread, with their
@@ -87,15 +91,16 @@ struct ChatListUpdate: Sendable {
     var footer: ChatRowPlan?
     var changeset: RowChangeset
     var pinning: String?
+    /// The agent is at work: its newest words may still be arriving.
+    var streaming = false
 }
 
 /// One chat update for the main thread. Every optional is nil when its
 /// part of the screen keeps what it shows.
 struct ChatRowsUpdate: Sendable {
-    /// What the list was planned for; another width, layout or text size
+    /// What the list was planned for; another width or text size
     /// is refused.
     var width: CGFloat
-    var tablet: Bool
     var text: TextEnvironment?
     var list: ChatListUpdate?
     var facts: ChatSnapshotFacts?
@@ -127,7 +132,7 @@ enum ChatRows {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         var state = applied
         var update = ChatRowsUpdate(
-            width: view.width, tablet: view.tablet, text: view.text.environment, graceEnd: applied.graceEnd, now: now,
+            width: view.width, text: view.text.environment, graceEnd: applied.graceEnd, now: now,
             grows: applied.window.grows, reachesOldest: false, measured: 0
         )
         // A grace tick always answers, so the screen sets its next timer
@@ -161,13 +166,18 @@ enum ChatRows {
             root: session.metadata?["path"]?.stringValue,
             flavor: flavor,
             showLineNumbers: session.settings.bool("showLineNumbersInToolViews"),
-            tablet: view.tablet,
             permissionListMaxHeight: view.permissionListMaxHeight,
             text: view.text,
             render: input.render
         )
         var graceEnd: Int64?
         var forms: [String: ChatQuestionForm] = [:]
+        // A send's row is its local id from the outbox to the echo and on.
+        var times: [String: Int64] = [:]
+        for case .userText(let message) in snapshot.messages where message.localId != nil {
+            times[message.id] = applied.times[message.id] ?? message.createdAt
+        }
+        state.times = times
         let result = ChatRowsDerivation.derive(
             messages: snapshot.messages,
             window: state.window,
@@ -179,7 +189,7 @@ enum ChatRows {
             planner: planner,
             applied: applied.rows,
             makeRows: { items, groups in
-                rows(items, groups: groups, delivery: snapshot.delivery, agentState: session.agentState, view: view, style: style, now: now, graceEnd: &graceEnd, forms: &forms)
+                rows(items, groups: groups, delivery: snapshot.delivery, agentState: session.agentState, receipts: SessionMetadata.sendsMessageReceipts(session.metadata), times: times, view: view, style: style, now: now, graceEnd: &graceEnd, forms: &forms)
             },
             id: \.id,
             recolour: input.recolour
@@ -224,8 +234,11 @@ enum ChatRows {
         if !result.changeset.isEmpty || footer != nil || model != applied.model || pinning != nil {
             update.list = ChatListUpdate(
                 ids: result.rows.ids, plans: result.rows.plans, model: model, footer: footer,
-                changeset: result.changeset, pinning: pinning
+                changeset: result.changeset, pinning: pinning, streaming: session.thinking
             )
+            // The newest of the agent's words may be streaming: where they
+            // are is worked out here, off the main thread.
+            result.rows.plans.first(where: \.revealable)?.warmReveal()
             state.rows = result.rows
             state.model = model
             changed = true
@@ -235,23 +248,32 @@ enum ChatRows {
 
     /// One input per shown row, newest first. Collects the question forms
     /// in the window and the next time a waiting message's status is due.
+    /// `receipts`: the agent says when it takes a message in
+    /// (`SessionMetadata.sendsMessageReceipts`).
     static func rows(
         _ items: [ChatListItem],
         groups: ChatWorkGroupState,
         delivery deliveries: [String: OutboxDelivery],
         agentState: JSONValue?,
+        receipts: Bool = false,
+        times: [String: Int64] = [:],
         view: ChatRowsView,
         style: ChatRowStyle,
         now: Int64,
         graceEnd: inout Int64?,
         forms: inout [String: ChatQuestionForm]
     ) -> [ChatRowInput] {
-        items.filter { ChatRowRenderer.isShown($0, style: style) }.map { item in
+        let shown = items.filter { ChatRowRenderer.isShown($0, style: style) }
+        // Without receipts, the agent answering is the sign it took a message.
+        let newestAnswer = shown.firstIndex { if case .message(.userText) = $0 { false } else { true } }
+        return shown.enumerated().map { index, item in
             var delivery: OutboxDelivery?
             var userStatus: UserMessageStatus?
+            var outgoing: MessageDelivery?
             if case .message(.userText(let message)) = item {
                 if let localId = message.localId { delivery = deliveries[localId] }
                 userStatus = ChatRowRenderer.userStatus(message, delivery: delivery, now: now)
+                outgoing = ChatRowRenderer.outgoing(message, delivery: delivery, receipts: receipts, answered: newestAnswer.map { $0 < index } ?? false)
                 if let end = UserMessageStatus.graceEnds(
                     pending: message.pending, undelivered: delivery != nil, queuedWhileBusy: message.meta?.queuedWhileBusy == true,
                     createdAt: message.createdAt, now: now
@@ -283,7 +305,7 @@ enum ChatRows {
             }
             return ChatRowInput(
                 item: item, delivery: delivery, expanded: expanded, permissionBusy: busy, question: question, diffExpanded: diffs,
-                userStatus: userStatus, copied: copied, mermaid: view.mermaidHeights[item.id] ?? [:], style: style
+                userStatus: userStatus, outgoing: outgoing, time: outgoing == nil ? nil : times[item.id], copied: copied, mermaid: view.mermaidHeights[item.id] ?? [:], style: style
             )
         }
     }

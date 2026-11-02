@@ -23,13 +23,18 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.draw.drawWithContent
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.ComposeNavigator
+import androidx.navigation.compose.ComposeNavigatorDestinationBuilder
+import androidx.navigation.get
 import androidx.compose.foundation.background
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.Color
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavGraph
@@ -37,6 +42,8 @@ import androidx.navigation.NavHostController
 import androidx.navigationevent.NavigationEventDispatcher
 import androidx.navigationevent.NavigationEventTransitionState
 import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
+import com.slopus.happy.BuildConfig
+import com.slopus.happy.diagnostics.traced
 import com.slopus.happy.ui.components.rememberReduceMotion
 import kotlin.math.roundToInt
 
@@ -98,7 +105,11 @@ class NavMotion(
             return NavMotion(
                 enter = {
                     dims.top(targetState)
-                    slideIntoContainer(SlideDirection.Start, spec(easing, fromFirstFrame = true))
+                    slideIntoContainer(SlideDirection.Start, spec(easing, fromFirstFrame = true, firstMovement = firstMovement(targetState))) { initial ->
+                        dims.initialPlacement?.invoke(targetState.id, initial)
+                        dims.placement?.expect(initialState.id, targetState.id, initial)
+                        initial
+                    }
                 },
                 exit = {
                     dims.beneath(initialState, spec(easing, fromFirstFrame = true))
@@ -114,14 +125,25 @@ class NavMotion(
 
         private fun parallax(fullSlide: Int) = (fullSlide * PARALLAX).roundToInt()
 
-        private fun <T> spec(easing: Easing, fromFirstFrame: Boolean): FiniteAnimationSpec<T> =
-            tween<T>(DURATION_MILLIS, easing = easing).let { if (fromFirstFrame) FromFirstFrame(it) else it }
+        private fun <T> spec(easing: Easing, fromFirstFrame: Boolean, firstMovement: (() -> Unit)? = null): FiniteAnimationSpec<T> =
+            tween<T>(DURATION_MILLIS, easing = easing).let { if (fromFirstFrame) FromFirstFrame(it, firstMovement) else it }
+
+        /** Bench only: join this sample's doFrame to FrameTimeline, not merely its composition. */
+        private fun firstMovement(entry: NavBackStackEntry): (() -> Unit)? =
+            if (BuildConfig.BUILD_TYPE == "bench" || BuildConfig.BUILD_TYPE.endsWith("Bench")) {
+                { traced("Happy:navFirstMove:${entry.id}") {} }
+            } else null
 
         private fun pop(easing: Easing, fromFirstFrame: Boolean, dims: PageDims): Pair<NavScope.() -> EnterTransition, NavScope.() -> ExitTransition> =
             Pair(
                 {
                     dims.beneath(targetState, spec(easing, fromFirstFrame))
-                    slideIntoContainer(SlideDirection.End, spec(easing, fromFirstFrame), ::parallax)
+                    slideIntoContainer(SlideDirection.End, spec(easing, fromFirstFrame, firstMovement(targetState))) { full ->
+                        parallax(full).also { initial ->
+                            dims.initialPlacement?.invoke(targetState.id, initial)
+                            dims.placement?.expect(initialState.id, targetState.id, initial)
+                        }
+                    }
                 },
                 {
                     dims.top(initialState)
@@ -139,6 +161,9 @@ class NavMotion(
 @Stable
 class PageDims {
     private val beneath = HashMap<String, FiniteAnimationSpec<Float>>()
+    internal var placement: NavPlacementTrace? =
+        if (BuildConfig.BUILD_TYPE == "bench" || BuildConfig.BUILD_TYPE.endsWith("Bench")) NavPlacementTrace() else null
+    internal var initialPlacement: ((String, Int) -> Unit)? = null
 
     internal fun beneath(entry: NavBackStackEntry, spec: FiniteAnimationSpec<Float>) {
         beneath[entry.id] = spec
@@ -158,8 +183,20 @@ val LocalPageDims = staticCompositionLocalOf<PageDims?> { null }
  * A destination whose page wears the dim while another moves over it
  * ([DimmedPage]): every NavHost destination of the app is one.
  */
-inline fun <reified T : Any> NavGraphBuilder.page(noinline content: @Composable AnimatedContentScope.(NavBackStackEntry) -> Unit) {
-    composable<T> { entry -> DimmedPage(entry) { content(entry) } }
+inline fun <reified T : Any> NavGraphBuilder.page(noinline content: @Composable (NavBackStackEntry) -> Unit) {
+    if (this is RetainedGraphBuilder) {
+        val destination = ComposeNavigatorDestinationBuilder(provider[ComposeNavigator::class], T::class, emptyMap()) { entry ->
+            RetainedPageDestination(entry)
+        }.build()
+        pages[destination.id] = content
+        addDestination(destination)
+    } else composable<T> { entry -> DimmedPage(entry) { content(entry) } }
+}
+
+@PublishedApi
+@Composable
+internal fun AnimatedContentScope.RetainedPageDestination(entry: NavBackStackEntry) {
+    RetainedPageAnchor(entry, checkNotNull(LocalRetainedPages.current))
 }
 
 /**
@@ -170,9 +207,13 @@ inline fun <reified T : Any> NavGraphBuilder.page(noinline content: @Composable 
 fun AnimatedContentScope.DimmedPage(entry: NavBackStackEntry, content: @Composable () -> Unit) {
     val dims = LocalPageDims.current
     if (dims == null) return content()
+    val placement = dims.placement
+    if (placement != null) DisposableEffect(entry.id, placement) {
+        onDispose { placement.forget(entry.id) }
+    }
     val covered = transition.animateFloat(transitionSpec = { dims.spec(entry) ?: snap() }, label = "dim") { if (it == EnterExitState.Visible) 0f else 1f }
     Box(
-        Modifier.drawWithContent {
+        Modifier.then(if (placement != null) Modifier.onGloballyPositioned { placement.page(entry.id, it) } else Modifier).drawWithContent {
             drawContent()
             val dim = if (dims.spec(entry) != null) covered.value * NavMotion.DIM else 0f
             if (dim > 0f) drawRect(Color.Black, alpha = dim)
@@ -189,12 +230,20 @@ fun AnimatedContentScope.DimmedPage(entry: NavBackStackEntry, content: @Composab
  * push would seem to jump. The first sample is taken as one frame in.
  * Duration-based specs only; never for seeking, whose fraction is the time.
  */
-internal class FromFirstFrame<T>(private val spec: DurationBasedAnimationSpec<T>) : FiniteAnimationSpec<T> {
+internal class FromFirstFrame<T>(
+    private val spec: DurationBasedAnimationSpec<T>,
+    private val onFirstMovement: (() -> Unit)? = null,
+) : FiniteAnimationSpec<T> {
     override fun <V : AnimationVector> vectorize(converter: TwoWayConverter<T, V>): VectorizedFiniteAnimationSpec<V> =
-        Vectorized(spec.vectorize(converter))
+        Vectorized(spec.vectorize(converter), converter, onFirstMovement)
 
-    private class Vectorized<V : AnimationVector>(private val spec: VectorizedDurationBasedAnimationSpec<V>) : VectorizedFiniteAnimationSpec<V> {
+    private class Vectorized<T, V : AnimationVector>(
+        private val spec: VectorizedDurationBasedAnimationSpec<V>,
+        private val converter: TwoWayConverter<T, V>,
+        private val onFirstMovement: (() -> Unit)?,
+    ) : VectorizedFiniteAnimationSpec<V> {
         private var start = -1L
+        private var reportedMovement = false
 
         private fun time(playTimeNanos: Long, sampling: Boolean): Long {
             if (playTimeNanos <= 0L) return 0L
@@ -202,8 +251,16 @@ internal class FromFirstFrame<T>(private val spec: DurationBasedAnimationSpec<T>
             return (playTimeNanos - start.coerceAtLeast(0L)).coerceAtLeast(0L)
         }
 
-        override fun getValueFromNanos(playTimeNanos: Long, initialValue: V, targetValue: V, initialVelocity: V): V =
-            spec.getValueFromNanos(time(playTimeNanos, sampling = true), initialValue, targetValue, initialVelocity)
+        override fun getValueFromNanos(playTimeNanos: Long, initialValue: V, targetValue: V, initialVelocity: V): V {
+            val value = spec.getValueFromNanos(time(playTimeNanos, sampling = true), initialValue, targetValue, initialVelocity)
+            // Compare the applied value: IntOffset rounds a subpixel vector, which
+            // must not be reported as a moved page while it still sits offscreen.
+            if (onFirstMovement != null && !reportedMovement && converter.convertFromVector(value) != converter.convertFromVector(initialValue)) {
+                reportedMovement = true
+                onFirstMovement()
+            }
+            return value
+        }
 
         override fun getVelocityFromNanos(playTimeNanos: Long, initialValue: V, targetValue: V, initialVelocity: V): V =
             spec.getVelocityFromNanos(time(playTimeNanos, sampling = false), initialValue, targetValue, initialVelocity)

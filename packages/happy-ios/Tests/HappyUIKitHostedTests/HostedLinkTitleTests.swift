@@ -162,7 +162,9 @@ final class HostedLinkTitleTests: XCTestCase {
             let statusOpacity = CGFloat(status?.opacity ?? -1)
             let rising = (status?.transform.m42 ?? 0) as CGFloat
             let lifting = (title?.transform.m42 ?? 0) as CGFloat
-            let glass = try XCTUnwrap(switcher.subviews.first { $0.accessibilityIdentifier == "account-switcher-glass" })
+            // The bar's glass is round the switcher's container in the bar,
+            // which the bar lays out in the same animation.
+            let glass = try XCTUnwrap(switcher.superview, "the switcher isn't in the bar")
             let glassWidth = glass.layer.presentation()?.bounds.width ?? -1
             lines.append("\(name) +\(ms)ms: title opacity \(titleOpacity) dy \(lifting), status opacity \(statusOpacity) dy \(rising), glass width \(glassWidth) on its way to \(glass.bounds.width)")
             XCTAssertEqual(try header(navigation, switcher, items: items), resting, "\(name) +\(ms)ms: the header moved")
@@ -450,10 +452,10 @@ final class HostedLinkTitleTests: XCTestCase {
         XCTAssertNil(Strings.HeaderStatus.title(.online))
     }
 
-    /// An iPad's shell: the switcher over the sidebar says the same, the
-    /// sidebar and the bar holding still.
+    /// An iPad's split view: home is the sidebar, and its switcher says the
+    /// same, the sidebar and the bar holding still.
     func testTheTabletSidebarsTitleSaysTheLinkToo() async throws {
-        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "a tablet's shell")
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "an iPad's split view")
         NetworkPath.shared.force(true)
         let (controller, account) = try await legacyAccount()
         let feed = Task { for await _ in account.homeFeed.snapshots() {} }
@@ -463,14 +465,13 @@ final class HostedLinkTitleTests: XCTestCase {
         let home = LegacyHomeViewController(context: context, session: account)
         let navigation = UINavigationController(rootViewController: home)
         AppCoordinator.applyAppearance(to: navigation.navigationBar)
-        let shell = TabletShellViewController(context: context, detail: navigation)
+        let shell = ShellViewController(context: context, phone: navigation, splits: true)
         let window = hostedKeyWindow(in: try await hostedActiveScene(), root: shell)
         defer { window.isHidden = true }
         window.overrideUserInterfaceStyle = .light
-        // As AppCoordinator says once home is the root: the sidebar comes.
-        shell.rootDidChange()
         shell.view.layoutIfNeeded()
-        try await until("beside the sidebar") { home.traitCollection.isTabletLayout && shell.children.contains { $0 is TabletSidebarViewController } }
+        try await until("in the sidebar") { shell.isExpanded && home.navigationController !== navigation && home.view.window != nil }
+        let bar = try XCTUnwrap(home.navigationController)
         let link = LegacyLink.link(for: account)
         try await Task.sleep(for: .milliseconds(300))
         link.receive(status: .connected)
@@ -478,8 +479,8 @@ final class HostedLinkTitleTests: XCTestCase {
         let switcher = try XCTUnwrap(home.navigationItem.leftBarButtonItem?.customView as? AccountSwitcherButton)
         try await until("live: the name", 3) { home.headerState == .online && self.idle(switcher) }
         try await Task.sleep(for: .milliseconds(500))
-        let resting = try header(navigation, switcher, items: [])
-        let sidebar = try XCTUnwrap(shell.children.first { $0 is TabletSidebarViewController }?.view, "no sidebar")
+        let resting = try header(bar, switcher, items: [])
+        let sidebar = try XCTUnwrap(home.view, "no sidebar")
         let sidebarFrame = sidebar.convert(sidebar.bounds, to: window)
         try await captureBoth(window, "tablet-1-live")
         let steps: [(String, () -> Void, String?)] = [
@@ -491,7 +492,7 @@ final class HostedLinkTitleTests: XCTestCase {
         for (name, change, words) in steps {
             change()
             try await until(name, 3) { self.shows(switcher) == words && (words != nil || switcher.titleLaneView.alpha == 1) && self.idle(switcher) }
-            XCTAssertEqual(try header(navigation, switcher, items: []), resting, "\(name): the bar moved")
+            XCTAssertEqual(try header(bar, switcher, items: []), resting, "\(name): the bar moved")
             XCTAssertEqual(sidebar.convert(sidebar.bounds, to: window), sidebarFrame, "\(name): the sidebar moved")
             try await captureBoth(window, name)
         }

@@ -202,7 +202,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         reveal = nil
         view.layoutIfNeeded()
         if let y = settingsLayout.revealOffset(card: card, row: index, viewport: scroll.bounds.height, insets: LayoutInsets(scroll.adjustedContentInset)) {
-            scroll.setContentOffset(CGPoint(x: 0, y: y), animated: true)
+            scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: y), animated: true)
         }
         cards[card].flash(index)
     }
@@ -332,7 +332,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
                 if let change { change() } else { self.rebuild() }
                 self.view.layoutIfNeeded()
                 let offset = self.settingsLayout.keptOffset(self.scroll.contentOffset.y, viewport: self.scroll.bounds.height, insets: LayoutInsets(self.scroll.adjustedContentInset))
-                if offset != self.scroll.contentOffset.y { self.scroll.setContentOffset(CGPoint(x: 0, y: offset), animated: false) }
+                if offset != self.scroll.contentOffset.y { self.scroll.setContentOffset(CGPoint(x: self.scroll.contentOffset.x, y: offset), animated: false) }
             }
         }
         guard view.window != nil else { return apply() }
@@ -510,7 +510,8 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         case .language: activeSession.map { SettingsLanguageViewController(session: $0) }
         case .dataStorage:
             // The shown profile's media: a computer's library, or the active account's.
-            DataStorageViewController(library: shown.flatMap { $0.isAgentConnection ? MediaLibrary.agent($0.id) : nil } ?? activeSession?.media)
+            DataStorageViewController(library: shown.flatMap { $0.isAgentConnection ? MediaLibrary.agent($0.id) : nil } ?? activeSession?.media,
+                                      connection: { [weak self] in self?.connectionPage() })
         }
     }
 
@@ -640,10 +641,10 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        let width = view.bounds.width
         let searching = query != nil
         // Under the bar, whose row is in the safe area: the cards scroll under it.
         scroll.frame = view.bounds
+        let width = scroll.readableColumn(width: view.bounds.width)
         let specs = SettingsCardView.specs(rows, width: width)
         let picture = shown == nil ? nil : agentButton.intrinsicContentSize.width
         let layout = SettingsLayout(width: width, nameHeight: ceil(name.font.lineHeight), subtitleHeight: ceil(subtitle.font.lineHeight), cards: specs, footers: SettingsCardView.footers(rows, width: width), searching: searching, showsStrip: false, picture: picture)
@@ -692,6 +693,19 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
     }
 
     // MARK: Actions
+
+    /// How the shown profile reaches its computer or server, and the
+    /// last ten minutes over it, for Data and Storage's Connection row: a
+    /// computer's any time, a Happy account's once it is the active one
+    /// (only it has a session).
+    private func connectionPage() -> UIViewController? {
+        guard let profile = shown else { return nil }
+        if profile.isAgentConnection {
+            guard context.account.agentConnections.metrics(for: profile.id) != nil else { return nil }
+            return ConnectionViewController(context: context, source: .agent(id: profile.id))
+        }
+        return activeSession.map { ConnectionViewController(context: context, source: .legacy($0)) }
+    }
 
     /// The person's own name and picture on the computer shown.
     private func openProfile() {
@@ -778,26 +792,31 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
             // A legacy account's key is the only way back: the warning says
             // so. One made for a computer has no key to bring it back.
             let account = context.account.accounts.first { $0.id == id }
+            // The last one: the first screen follows the confirm, its
+            // gradient ready by then.
+            if context.account.accounts.count == 1 { GrainGradientView.prepare() }
             let detail = account.map { direct ? Strings.removeDetail : $0.isLegacy ? Strings.SettingsAccount.logoutConfirm : Strings.AccountSwitcher.signOutMadeForComputer($0.shownName) } ?? Strings.removeDetail
             guard await Alerts.confirm(direct ? Strings.disconnectTitle : Strings.signOutTitle, detail, confirmTitle: direct ? Strings.disconnect : Strings.signOut, destructive: true, on: self) else { return }
-            await signOut(id, direct: direct)
+            signOut(id, direct: direct)
         }
     }
 
-    /// Once confirmed: the account goes, and a computer's session with it,
-    /// only if it really went. A Happy account forgets nothing, since
-    /// `Session.forget` also clears caches shared by every account.
-    func signOut(_ id: String, direct: Bool) async {
+    /// Once confirmed, at once: the account leaves the card, and the next
+    /// one opens if it was the one open (`AccountController.beginSignOut`);
+    /// what is slow goes on behind. A computer's session goes with it. A
+    /// Happy account forgets nothing here, since `Session.forget` also
+    /// clears caches shared by every account.
+    func signOut(_ id: String, direct: Bool) {
         do {
-            try await context.account.signOut(accountID: id)
-            // Off its page first, so nothing here still watches its session.
-            if shownID == id { shownID = nil }
-            reload()
-            if direct { Session.forget(id) }
-            Haptics.play(.putAway)
+            try context.account.beginSignOut(accountID: id)
         } catch {
-            Alerts.show(Strings.couldNotRemove, error.localizedDescription, on: self)
+            return Alerts.show(Strings.couldNotRemove, error.localizedDescription, on: self)
         }
+        // Off its page first, so nothing here still watches its session.
+        if shownID == id { shownID = nil }
+        reload()
+        if direct { Session.forget(id) }
+        Haptics.play(.putAway)
     }
 }
 #endif

@@ -3,6 +3,11 @@ package com.slopus.happy.ui.conversation
 import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.offset
 import androidx.compose.ui.layout.SubcomposeLayout
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.TextLayoutResult
 import com.slopus.happy.ui.components.rememberHoistedTextFieldState
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import android.net.Uri
@@ -22,7 +27,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.CircularProgressIndicator
+import com.slopus.happy.ui.components.PageProgressIndicator as CircularProgressIndicator
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.FilledIconButton
@@ -51,7 +56,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -114,6 +118,8 @@ object ConversationComposerSpec {
     val openCorner = 28.dp
     val margin = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
     val fieldPadding = 16.dp
+    /** Above and below the field's words. */
+    val fieldVertical = 12.dp
     val primary = 36.dp
     const val MAX_LINES = 8
 }
@@ -158,6 +164,8 @@ internal fun ConversationComposer(
     pictures: ImagePicker? = rememberComposerImages(enabled = true),
     /** Raised to take the keyboard into the composer (Return in new work's name). */
     focusAsks: Int = 0,
+    /** Where a sent message's words fly from ([SendFlight]). */
+    flight: SendFlight? = null,
 ) {
     RecomposeProbe.mark(ConversationScreenTags.PROBE_COMPOSER)
     val colors = HappyTheme.colors
@@ -175,19 +183,38 @@ internal fun ConversationComposer(
     var picker by rememberSaveable { mutableStateOf<ModePicker?>(null) }
     var moreCenterY by remember { mutableIntStateOf(0) }
     var modelCenterY by remember { mutableIntStateOf(0) }
-    // Where + and the model label sit, kept out of the snapshot as they move (the dock rides the
-    // keyboard each frame) and given to the popups as one opens, so moving never recomposes this.
-    val anchors = remember { IntArray(2) }
+    // Where + and the model label are, read as a popup opens: nothing runs as they move (the dock
+    // rides the keyboard, settles, scrolls with a growing draft).
+    val anchors = remember { arrayOfNulls<LayoutCoordinates>(2) }
+    fun anchor(i: Int) = anchors[i]?.takeIf { it.isAttached }?.boundsInWindow()?.center?.y?.toInt() ?: 0
     fun openPicker(which: ModePicker) {
         attaching = false
         menu = false
-        modelCenterY = anchors[1]
+        modelCenterY = anchor(1)
         picker = which
+    }
+
+    val reduceMotion = rememberReduceMotion()
+    val density = LocalDensity.current
+    // The field's words as last laid out, and where the field is: what a sent message flies from.
+    val fieldLayout = remember { arrayOfNulls<() -> TextLayoutResult?>(1) }
+    val fieldAt = remember { arrayOfNulls<LayoutCoordinates>(1) }
+
+    /** Sends [sent]'s words flying from the field, as laid out and where they are, if they all show in it. */
+    fun fly(sent: String) {
+        val layout = fieldLayout[0]?.invoke() ?: return
+        val at = fieldAt[0]?.takeIf { it.isAttached } ?: return
+        val inset = with(density) { ConversationComposerSpec.fieldVertical.toPx() }
+        if (layout.size.height > at.size.height - 2 * inset + 1) return
+        flight?.launch(sent, layout, at.positionInRoot() + Offset(0f, inset), density, colors.text)
     }
 
     // The draft and what waits go together; new work keeps them until it is made.
     fun submit(extra: List<AttachmentPreview> = emptyList()) {
+        val sent = text
+        val alone = attached.isEmpty() && extra.isEmpty()
         if (onSend(text, attached + extra)) {
+            if (alone && !reduceMotion) fly(sent)
             pictures?.clear()
             onSent()
         } else if (extra.isNotEmpty()) {
@@ -207,7 +234,6 @@ internal fun ConversationComposer(
     }
 
     val open = focused || text.isNotEmpty() || attached.isNotEmpty()
-    val reduceMotion = rememberReduceMotion()
     val corner by animateDpAsState(
         if (open) ConversationComposerSpec.openCorner else ConversationComposerSpec.restCorner,
         if (reduceMotion) snap() else spring(stiffness = 700f),
@@ -237,9 +263,9 @@ internal fun ConversationComposer(
             }
             ComposerLayout(open, compact, if (compact || !open) minimumCompact else minimumActions) {
                 Box(Modifier.layoutId(Slot.MORE)) {
-                    IconButton(onClick = { picker = null; moreCenterY = anchors[0]; if (showCount) menu = true else attaching = true }, modifier = Modifier.testTag(ConversationComposerTags.MORE)
+                    IconButton(onClick = { picker = null; moreCenterY = anchor(0); if (showCount) menu = true else attaching = true }, modifier = Modifier.testTag(ConversationComposerTags.MORE)
                         .semantics { contentDescription = moreLabel }
-                        .onGloballyPositioned { anchors[0] = it.boundsInWindow().center.y.toInt() }) {
+                        .onPlaced { anchors[0] = it }) {
                         BadgedBox(badge = {
                             if (showCount) Badge(containerColor = colors.text, contentColor = colors.surface) {
                                 Text(attached.size.toString(), Modifier.testTag(ConversationComposerTags.COUNT).clearAndSetSemantics {})
@@ -255,8 +281,9 @@ internal fun ConversationComposer(
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.text),
                     cursorBrush = SolidColor(colors.text),
                     lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = ConversationComposerSpec.MAX_LINES),
+                    onTextLayout = { result -> fieldLayout[0] = result },
                     decorator = { inner ->
-                        Box(Modifier.padding(vertical = 12.dp)) {
+                        Box(Modifier.padding(vertical = ConversationComposerSpec.fieldVertical)) {
                             if (field.text.isEmpty()) {
                                 Text(
                                     stringResource(R.string.common_message),
@@ -272,6 +299,7 @@ internal fun ConversationComposer(
                         .layoutId(Slot.FIELD)
                         .focusRequester(focus)
                         .onFocusChanged { focused = it.isFocused }
+                        .onPlaced { fieldAt[0] = it }
                         .testTag(ConversationComposerTags.INPUT),
                 )
                 if (open) {
@@ -279,7 +307,7 @@ internal fun ConversationComposer(
                         catalog = state.catalog,
                         mode = state.mode,
                         onOpen = { openPicker(ModePicker.Model) },
-                        modifier = Modifier.layoutId(Slot.LABEL).onGloballyPositioned { anchors[1] = it.boundsInWindow().center.y.toInt() },
+                        modifier = Modifier.layoutId(Slot.LABEL).onPlaced { anchors[1] = it },
                     )
                 }
                 val sendLabel = stringResource(if (primary == PrimaryAction.Stop) R.string.conversation_stop else R.string.conversation_send)

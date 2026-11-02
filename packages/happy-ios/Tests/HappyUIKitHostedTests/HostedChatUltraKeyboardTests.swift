@@ -19,9 +19,9 @@ private struct NoSockets: WebSocketConnector {
     }
 }
 
-/// The chat's keyboard: under the floating dock the list takes it from
-/// UltraView's keyboard integration (`ChatUltraKeyboard`); docked, it keeps
-/// following the layout guide.
+/// The chat's keyboard: the list takes it from UltraView's
+/// keyboard integration (`ChatUltraKeyboard`), under the floating dock and
+/// docked alike.
 ///
 /// A finger driving the keyboard needs the system's keyboard host, which a
 /// test can't supply; `ChatScrollUITests` drives it on a phone. Here the
@@ -42,10 +42,14 @@ final class HostedChatUltraKeyboardTests: XCTestCase {
         var chat: LegacyChatViewController
         var list: ChatListView
         var dock: ChatDockView
+        /// The split shell the chat is in, when it is the iPad's.
+        var shell: ShellViewController?
     }
 
-    /// The long fixture chat, pushed over a root screen, with its rows in.
-    private func chat() async throws -> Chat {
+    /// The long fixture chat, pushed over a root screen, with its rows in:
+    /// on a bare stack, or `inShell` as the app opens it, in the split
+    /// shell's main panel beside the sidebar.
+    private func chat(inShell: Bool = false) async throws -> Chat {
         let controller = AccountController(
             serverConfig: ServerConfig(storage: InMemoryKeyValueStore()),
             clientID: "ios/test",
@@ -61,9 +65,26 @@ final class HostedChatUltraKeyboardTests: XCTestCase {
         let scene = try await hostedActiveScene()
         let hostWindow = scene.keyWindow
         let chat = LegacyChatViewController(context: context, session: account, sessionId: FixtureScenarios.prefix + FixtureScenario.long.rawValue)
-        let navigation = UINavigationController(rootViewController: UIViewController())
+        let root = UIViewController()
+        var navigation = UINavigationController(rootViewController: root)
         navigation.pushViewController(chat, animated: false)
-        let window = hostedKeyWindow(in: scene, root: navigation)
+        var shell: ShellViewController?
+        let window: UIWindow
+        if inShell {
+            let phone = UINavigationController()
+            let split = ShellViewController(context: context, phone: phone)
+            window = hostedKeyWindow(in: scene, root: split)
+            split.view.layoutIfNeeded()
+            // The split splits only under home, as the app's does.
+            split.setStack([LegacyHomeViewController(context: context, session: account), chat], animated: false)
+            navigation = split.main
+            shell = split
+        } else {
+            // A phone's stack, as the shell's is below 768: on an iPad the
+            // regular width would dock the list.
+            navigation.traitOverrides.horizontalSizeClass = .compact
+            window = hostedKeyWindow(in: scene, root: navigation)
+        }
         addTeardownBlock { @MainActor in
             window.isHidden = true
             hostWindow?.makeKey()
@@ -76,7 +97,7 @@ final class HostedChatUltraKeyboardTests: XCTestCase {
         let drawn = try await until { list.plans.count > 20 && list.isDisplayReady }
         XCTAssertTrue(drawn, "the fixture's rows never landed")
         chat.view.layoutIfNeeded()
-        return Chat(controller: controller, navigation: navigation, chat: chat, list: list, dock: dock)
+        return Chat(controller: controller, navigation: navigation, chat: chat, list: list, dock: dock, shell: shell)
     }
 
     private func until(seconds: Double = 5, _ condition: () -> Bool) async throws -> Bool {
@@ -154,6 +175,28 @@ final class HostedChatUltraKeyboardTests: XCTestCase {
         post(UIResponder.keyboardWillChangeFrameNotification, up: false, in: window)
     }
 
+    /// The keyboard read off the guide at rest covers nothing. The guide
+    /// rests on the safe area, which a turn or a resized window changes,
+    /// and the dock rests on the new one.
+    func testAKeyboardReadAtRestFollowsANewSafeArea() async throws {
+        let test = try await chat()
+        let keyboard = try XCTUnwrap(test.chat.ultraKeyboard)
+        test.chat.additionalSafeAreaInsets.bottom = 40
+        test.navigation.pushViewController(UIViewController(), animated: false)
+        let stopped = try await until { !keyboard.isActive }
+        XCTAssertTrue(stopped)
+        test.navigation.popViewController(animated: false)
+        let started = try await until { keyboard.isActive }
+        XCTAssertTrue(started, "appearing reads the guide afresh")
+        test.chat.view.layoutIfNeeded()
+        XCTAssertEqual(test.dock.frame.maxY, resting(test.chat), accuracy: 0.5)
+        XCTAssertEqual(keyboard.height, 0, "the guide at rest covers nothing")
+
+        test.chat.additionalSafeAreaInsets.bottom = 0
+        test.chat.view.layoutIfNeeded()
+        XCTAssertEqual(test.dock.frame.maxY, resting(test.chat), accuracy: 0.5, "the dock rests on the new safe area")
+    }
+
     /// What rides the dock and moves on the list's keyboard motion.
     private func riders(_ test: Chat) throws -> [UIView] {
         [test.dock, try XCTUnwrap(subview(ChatScrollButton.self, in: test.chat.view)),
@@ -200,35 +243,67 @@ final class HostedChatUltraKeyboardTests: XCTestCase {
         XCTAssertEqual(animating(riders), [])
     }
 
-    /// Docked, the list's frame follows the keyboard, which UltraView
-    /// can't carry yet: UltraList keeps the layout guide there, and gets
-    /// UltraView's keyboard back once the dock floats again.
-    func testTheDockedLayoutKeepsTheLayoutGuideOnUltraList() async throws {
-        let test = try await chat()
+    /// In the iPad's main panel, keyboard frames move the dock and newest
+    /// inset while the list keeps its frame. Narrowing the shell keeps the
+    /// same keyboard integration under the floating dock.
+    func testTheDockedLayoutMovesTheListsInsetWithUltraViewsKeyboard() async throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "an iPad's split view")
+        let test = try await chat(inShell: true)
+        let shell = try XCTUnwrap(test.shell)
         let window = try XCTUnwrap(test.chat.view.window)
-        let floating = try XCTUnwrap(test.chat.ultraKeyboard)
+        let wide = window.bounds.width
+        try XCTSkipUnless(wide >= 768, "the split shell needs at least 768 points")
+        func resize(_ width: CGFloat) {
+            window.frame = CGRect(x: 0, y: 0, width: width, height: window.bounds.height)
+            window.layoutIfNeeded()
+        }
 
-        test.navigation.traitOverrides.isTabletLayout = true
+        // Narrow: one stack, the chat on top, the dock floating.
+        resize(700)
+        let narrow = try await until {
+            window.layoutIfNeeded()
+            return !shell.isExpanded && shell.phone.topViewController === test.chat && test.chat.ultraKeyboard?.isActive == true
+        }
+        XCTAssertTrue(narrow, "a narrow window floats the dock on UltraView's keyboard")
+        let backdrop = try XCTUnwrap(subview(ChatScrimView.self, in: test.chat.view))
+
+        // Wide: the chat in the main panel, docked under the bar.
+        resize(wide)
         let docked = try await until {
-            test.chat.view.layoutIfNeeded()
-            return test.chat.ultraKeyboard == nil
+            window.layoutIfNeeded()
+            return shell.isExpanded && shell.main.viewControllers.contains(test.chat) && test.chat.ultraKeyboard?.isActive == true
         }
-        XCTAssertTrue(docked, "no UltraView keyboard under a docked layout")
-        XCTAssertFalse(floating.isActive)
-        let dock = test.dock.frame
-        post(UIResponder.keyboardWillChangeFrameNotification, up: true, in: window)
-        test.chat.view.setNeedsLayout()
-        test.chat.view.layoutIfNeeded()
-        XCTAssertEqual(test.dock.frame, dock, "a posted frame doesn't move the guide's dock")
-        post(UIResponder.keyboardWillChangeFrameNotification, up: false, in: window)
+        XCTAssertTrue(docked, "the docked main panel keeps UltraView's keyboard")
+        XCTAssertFalse(test.chat.navigationItem.hidesBackButton, "the main panel keeps the phone's back button")
+        XCTAssertTrue(test.chat.navigationItem.titleView is ChatHeaderView, "and its glass title")
+        XCTAssertNotNil(test.chat.ultraKeyboard)
+        let height = test.chat.view.bounds.height
+        let list = test.list.frame
+        XCTAssertEqual(list.maxY, test.dock.frame.minY, accuracy: 0.5, "at rest the list stops at the dock")
 
-        test.navigation.traitOverrides.isTabletLayout = false
+        post(UIResponder.keyboardWillChangeFrameNotification, up: true, in: window)
+        XCTAssertEqual(test.dock.frame.maxY, height - keyboardHeight, accuracy: 0.5, "the dock sits on the keyboard")
+        XCTAssertEqual(test.list.frame, list, "the list's frame stays where the dock rests")
+        XCTAssertEqual(test.list.contentInsets.top, list.maxY - test.dock.frame.minY + LegacyChatScreenLayout.Metrics.newerEdgeExtra, accuracy: 0.5)
+        XCTAssertFalse(backdrop.isHidden)
+        XCTAssertEqual(backdrop.frame.minY, test.dock.frame.minY, accuracy: 0.5, "the backdrop starts at the dock")
+        XCTAssertEqual(backdrop.frame.maxY, height, accuracy: 0.5)
+        XCTAssertFalse(test.dock.layer.animationKeys()?.isEmpty ?? true, "the dock moves on the list's motion")
+
+        post(UIResponder.keyboardWillChangeFrameNotification, up: false, in: window)
+        post(UIResponder.keyboardDidHideNotification, up: false, in: window)
+        let down = try await until { abs(self.resting(test.chat) - test.dock.frame.maxY) < 0.5 }
+        XCTAssertTrue(down, "the dock is back on the safe area, at \(test.dock.frame.maxY)")
+        XCTAssertEqual(test.list.frame, list)
+        XCTAssertEqual(test.list.contentInsets.top, LegacyChatScreenLayout.Metrics.newerEdgeExtra, accuracy: 0.5)
+
+        resize(700)
         let back = try await until {
-            test.chat.view.layoutIfNeeded()
-            return test.chat.ultraKeyboard?.isActive == true
+            window.layoutIfNeeded()
+            return !shell.isExpanded && test.chat.ultraKeyboard?.isActive == true
         }
-        XCTAssertTrue(back, "the floating dock has UltraView's keyboard again")
-        XCTAssertFalse(test.chat.ultraKeyboard === floating)
+        XCTAssertTrue(back, "the floating dock keeps UltraView's keyboard")
+        XCTAssertEqual(test.list.frame.minY, 0, accuracy: 0.5, "the list runs under the bar again")
     }
 
     /// A keyboard frame puts UltraList's dock on the keyboard, and the

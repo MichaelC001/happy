@@ -400,16 +400,16 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        let width = view.bounds.width
         // Set again only when it changed: a scroll view given its frame,
         // even the same one, while pulled past an end snaps its offset
         // back, and the stretch jags under the finger as a working
         // conversation lays this screen out again and again.
         if scroll.frame != view.bounds { scroll.frame = view.bounds }
+        let width = scroll.readableColumn(width: view.bounds.width)
         let side = SessionDetailLayout.Metrics.side
         let cardWidth = max(0, width - 2 * side)
         let familyHeight: CGFloat? = family.isEmpty ? nil : SidebarLayout.layout(
-            SidebarView.layoutRows(family), width: cardWidth, top: Self.treePadding, bottom: Self.treePadding, scale: traitCollection.displayScale
+            SidebarView.layoutRows(family, scale: traitCollection.displayScale), width: cardWidth, top: Self.treePadding, bottom: Self.treePadding, scale: traitCollection.displayScale
         ).contentHeight
         let workCount = (detail?.running.count ?? 0) + (detail?.terminals.count ?? 0)
         let settled = detail?.completed.count ?? 0

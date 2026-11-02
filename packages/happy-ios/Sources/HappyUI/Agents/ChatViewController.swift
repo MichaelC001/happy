@@ -20,7 +20,7 @@ import UniformTypeIdentifiers
 /// Previewing, it is what a hold on the row shows over the sidebar, as
 /// Telegram previews a chat: the newest messages under the name in a
 /// capsule, nothing to type in or tap, and nothing marked read.
-final class ChatViewController: UIViewController, ComposeHosting {
+final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed {
     typealias Intro = IntroView.Mark
 
     private let session: Session
@@ -95,6 +95,12 @@ final class ChatViewController: UIViewController, ComposeHosting {
     /// from a drag's start until they say where it went.
     private var keyboardTop = CGFloat.greatestFiniteMagnitude
     private var fingerOnKeyboard = false
+    /// The keyboard as the transcript's list has it while the screen is
+    /// shown (`ChatUltraKeyboard`, as the sessions' chat has): a finger
+    /// dragging the transcript down carries it, and every show and hide
+    /// moves the list's inset on the keyboard's spring, which the card and
+    /// what rides it follow. None in a preview.
+    private(set) var ultraKeyboard: ChatUltraKeyboard?
 
     private var chat = ChatSnapshot()
     private var following: Task<Void, Never>?
@@ -246,10 +252,9 @@ final class ChatViewController: UIViewController, ComposeHosting {
             view.addSubview(transcriptHeaderScrim)
         }
         // Back, the title, and Compose alone, a glass circle as Back is:
-        // the permission mode is on the detail the title opens.
-        navigationItem.rightBarButtonItems = HeaderBar.trailing([
-            .compose: HeaderBar.composeItem { [weak self] in self?.compose() },
-        ])
+        // the permission mode is on the detail the title opens. New work
+        // has Back alone until its first send.
+        showHeader(animated: false)
         card.configuration.showsAdd = true
         card.configuration.showsExpand = true
         card.configuration.addAccessibilityLabel = Strings.addPicture
@@ -295,6 +300,16 @@ final class ChatViewController: UIViewController, ComposeHosting {
         ])
 
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChange(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        // Made after the screen's own observer, so a notification has set
+        // where the keyboard rests before the list's keyboard moves.
+        if !previewing {
+            ultraKeyboard = ChatUltraKeyboard(
+                list: ultra.list, view: view,
+                accessoryHeight: { [weak self] in self?.heightAboveKeyboard ?? 0 },
+                hasInput: { [weak self] in self?.ownsKeyboard ?? false },
+                changed: { [weak self] change in self?.followUltraKeyboard(change) }
+            )
+        }
 
         // The rows hear their own taps and presses; this one only ends a
         // rename.
@@ -352,6 +367,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
         // went unheard: down, unless it is still this composer's.
         fingerOnKeyboard = false
         if !ownsKeyboard { keyboardTop = .greatestFiniteMagnitude }
+        ultraKeyboard?.activate()
         // Back from a screen over this one, or a swipe back let go of.
         updateBar(animated: animated)
         let conversation = conversation
@@ -363,15 +379,17 @@ final class ChatViewController: UIViewController, ComposeHosting {
         tellReadsNewest(moving: false)
     }
 
-    /// In the window as the push starts: new work's keyboard comes up now,
-    /// with the push, as Messages' compose does, not after it.
+    /// In the window as the push starts: new work's keyboard comes up with
+    /// the push, as Messages' compose does, not after it.
     override func viewIsAppearing(_ animated: Bool) {
         super.viewIsAppearing(animated)
         if previewing { return }
         #if DEBUG
         composeTrace?.event("isAppearing window=\(view.window != nil)")
         #endif
-        takeOpeningFocus()
+        // Pushed with the keyboard already coming (`KeyboardPush`), the
+        // composer takes it once the push is over, not inside it.
+        if !keyboardPushed { takeOpeningFocus() }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -379,18 +397,25 @@ final class ChatViewController: UIViewController, ComposeHosting {
         #if DEBUG
         composeTrace?.appeared()
         #endif
+        // In its window now, which a later layout may not follow.
+        ultraKeyboard?.refresh()
         guard !previewing, let navigationController else { return }
         _ = navigationController
-        // New work: the keyboard comes up now if it couldn't with the push.
+        // New work: the keyboard comes up now if it couldn't with the push,
+        // or the composer takes it from the push's stand-in.
         takeOpeningFocus()
+        keyboardPushed = false
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        MessageLiftOverlay.putBack(from: self)
         #if DEBUG
         probe?.observePop()
         composeTrace?.event("willDisappear interactive=\(transitionCoordinator?.isInteractive == true)")
         #endif
+        // A finger or a release holding the keyboard lets it go at once.
+        if ultraKeyboard?.isDriving == true { ultraKeyboard?.dismissImmediately() }
         // Leaving keeps a name being typed, as a tap away does.
         titleView.finishEditing()
         picker?.close(animated: false)
@@ -411,7 +436,15 @@ final class ChatViewController: UIViewController, ComposeHosting {
         Task { await conversation.setVisible(false) }
         usageWatch?.invalidate()
         usageWatch = nil
+        // Covered or gone: the keyboard isn't this screen's to follow, and
+        // nothing its motion carried keeps moving.
+        if let keyboard = ultraKeyboard, keyboard.isActive {
+            keyboard.deactivate()
+            landKeyboardRiders()
+        }
         if isMovingFromParent || navigationController == nil {
+            ultraKeyboard?.invalidate()
+            ultraKeyboard = nil
             following?.cancel()
             made?.cancel()
             #if DEBUG
@@ -434,6 +467,9 @@ final class ChatViewController: UIViewController, ComposeHosting {
     }
 
     // MARK: Detail
+
+    /// The conversation shown: empty for new work until the daemon made it.
+    var shownAgentId: String { media.agentId }
 
     /// The conversation's detail, over it: its numbers, its family and its
     /// activity, and its rename. New work has none until the daemon made it.
@@ -470,13 +506,34 @@ final class ChatViewController: UIViewController, ComposeHosting {
         let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
         let curve = (note.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? NSNumber)?.uintValue ?? 7
         let local = view.convert(end, from: screen.coordinateSpace)
-        let top = local.minY >= view.bounds.maxY || local.isEmpty ? CGFloat.greatestFiniteMagnitude : local.minY
+        // An undocked keyboard (an iPad's floating or split one) covers
+        // nothing, as the layout guide reads it with
+        // `followsUndockedKeyboard` off.
+        let docked = local.maxY >= view.bounds.maxY - 1
+        let top = !docked || local.minY >= view.bounds.maxY || local.isEmpty ? CGFloat.greatestFiniteMagnitude : local.minY
         keyboardTop = top
         fingerOnKeyboard = false
         guard duration > 0 else {
             updateBar(animated: false)
             return view.setNeedsLayout()
         }
+        if ultraKeyboard?.isActive == true {
+            // The list's keyboard hears this next and lays the screen out
+            // on its own motion (`followUltraKeyboard`). Sideways, the bar
+            // goes or comes back in the keyboard's time.
+            UIView.animate(withDuration: duration, delay: 0, options: [UIView.AnimationOptions(rawValue: curve << 16), .beginFromCurrentState, .allowUserInteraction]) {
+                self.updateBar(animated: false)
+            }
+            return
+        }
+        // UltraList moves only on its own transitions, never inside a UIView
+        // animation: the transcript's inset goes on the keyboard's spring,
+        // started in the same transaction as the card's, so the newest row
+        // rides the card. Rows a finger or a fling holds stay where they are.
+        let list = ultra.list
+        let held = list.isTracking || list.isDragging || list.isDecelerating
+        insetMotion = ChatUltraKeyboard.Change(transition: .keyboard(duration), compensates: !held)
+        defer { insetMotion = nil }
         UIView.animate(withDuration: duration, delay: 0, options: [UIView.AnimationOptions(rawValue: curve << 16), .beginFromCurrentState, .allowUserInteraction]) {
             // The bar goes or comes back in the keyboard's time, so the
             // transcript moves once.
@@ -484,6 +541,68 @@ final class ChatViewController: UIViewController, ComposeHosting {
             self.view.setNeedsLayout()
             self.view.layoutIfNeeded()
         }
+    }
+
+    /// The move the screen is being laid out in (the keyboard's, the card
+    /// growing): the transcript takes its inset on it, so its rows go with
+    /// the card. UltraList never moves inside a UIView animation.
+    private var insetMotion: ChatUltraKeyboard.Change?
+
+    /// The inset's move for a layout inside a UIView animation of
+    /// `duration` on its default curve. Rows a finger or a fling holds stay
+    /// where they are.
+    private func insetMotion(easingIn duration: TimeInterval) -> ChatUltraKeyboard.Change {
+        let list = ultra.list
+        return ChatUltraKeyboard.Change(transition: .easeInOut(duration), compensates: !(list.isTracking || list.isDragging || list.isDecelerating))
+    }
+
+    /// How far above the keyboard's top the card reaches, the gap under it
+    /// included: what UltraView's keyboard controller carries on the
+    /// keyboard as a finger drags it.
+    private var heightAboveKeyboard: CGFloat {
+        max(0, view.bounds.maxY - (ultraKeyboard?.height ?? 0) - card.frame.minY)
+    }
+
+    /// What rides the keyboard: placed from its top, so carried with it.
+    private var keyboardRiders: [UIView] { [card, meter, jump, composerScrim] + (newWorkPanel.map { [$0] } ?? []) }
+
+    /// The list's keyboard moved: the screen takes its new layout at once,
+    /// the list's inset moving on `change`, and what rides the keyboard is
+    /// carried there from where it is drawn now, on the motion the inset
+    /// just started (UltraView's `applyViewportMotion`), as the sessions'
+    /// chat carries its dock. The scrim reaches from the card to the
+    /// bottom, so its height moves too.
+    private func followUltraKeyboard(_ change: ChatUltraKeyboard.Change) {
+        guard isViewLoaded, view.window != nil else { return }
+        let list = ultra.list
+        let riders = keyboardRiders
+        let drawn = riders.map { $0.layer.presentation()?.frame ?? $0.frame }
+        let scrimHeight = composerScrim.layer.presentation()?.bounds.height ?? composerScrim.bounds.height
+        let insets = list.viewportInsets
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        insetMotion = change
+        UIView.performWithoutAnimation {
+            view.setNeedsLayout()
+            view.layoutIfNeeded()
+        }
+        insetMotion = nil
+        let moved = list.viewportInsets != insets
+        if moved || change.finishes {
+            for (rider, old) in zip(riders, drawn) {
+                list.applyViewportMotion(to: rider.layer, keyPath: "position.y", displacement: moved ? Double(old.midY - rider.frame.midY) : 0)
+            }
+            list.applyViewportMotion(to: composerScrim.layer, keyPath: "bounds.size.height", displacement: moved ? Double(scrimHeight - composerScrim.bounds.height) : 0)
+        }
+        CATransaction.commit()
+    }
+
+    /// The screen has gone or the keyboard is done with: nothing the list's
+    /// motion carried keeps moving.
+    private func landKeyboardRiders() {
+        let list = ultra.list
+        for rider in keyboardRiders { list.applyViewportMotion(to: rider.layer, keyPath: "position.y", displacement: 0) }
+        list.applyViewportMotion(to: composerScrim.layer, keyPath: "bounds.size.height", displacement: 0)
     }
 
     // MARK: The bar sideways
@@ -498,7 +617,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
     private var compacts: Bool {
         var safeArea = LayoutInsets(view.safeAreaInsets)
         if let barSafeTop { safeArea.top = barSafeTop }
-        return ChatScreenLayout.compacts(size: view.bounds.size, safeArea: safeArea, keyboardTop: keyboardTop, meter: gauge != nil) { [card] width in
+        return ChatScreenLayout.compacts(size: view.bounds.size, safeArea: safeArea, keyboardTop: keyboardTop, meter: gauge != nil, maxContentWidth: ContentWidth.maxWidth) { [card] width in
             card.restingHeight(fitting: width)
         }
     }
@@ -554,6 +673,20 @@ final class ChatViewController: UIViewController, ComposeHosting {
         #endif
     }
 
+    /// Pushed by `KeyboardPush`: the keyboard comes up with the push, held
+    /// by a stand-in until the push is over.
+    private var keyboardPushed = false
+
+    func keyboardPushWillStart(keyboardUp: Bool) {
+        keyboardPushed = true
+        // Laid out with the keyboard down; its notification, heard once
+        // the screen is in the window, carries the card up with it.
+        if !keyboardUp { ultraKeyboard?.startsDown = true }
+    }
+
+    /// Already heard: this screen's observers come after the push's.
+    func keyboardPushStarted(_ keyboard: Notification) {}
+
     /// The keyboard is this screen's: the composer's or the name's.
     private var ownsKeyboard: Bool {
         card.textView.isFirstResponder || newWorkPanel?.name.isFirstResponder == true
@@ -579,6 +712,19 @@ final class ChatViewController: UIViewController, ComposeHosting {
         // never goes down in between.
         if newWorkPanel.name.isFirstResponder { card.focus() }
         newWorkPanel.dismiss()
+        showHeader(animated: true)
+    }
+
+    /// Compose, at the bar's right.
+    private lazy var composeItems = HeaderBar.trailing([
+        .compose: HeaderBar.composeItem { [weak self] in self?.compose() },
+    ])
+
+    /// New work's header is Back alone until its first send
+    /// (`ConversationHeader`); every other conversation's has its name and
+    /// Compose.
+    private func showHeader(animated: Bool) {
+        ConversationHeader.show(newTask == nil || newWorkPanelGone, title: header, items: composeItems, on: navigationItem, animated: animated)
     }
 
     /// Nothing typed or picked.
@@ -602,8 +748,8 @@ final class ChatViewController: UIViewController, ComposeHosting {
                 card.focus()
                 return
             }
-            card.blur()
-            ComposeNavigation.replace(self, with: NewWork.chat(session, task: task))
+            // The keyboard, up or not, goes to the new screen with its push.
+            ComposeNavigation.replace(self, with: NewWork.chat(session, task: task), traits: card.textView, keyboardUp: ownsKeyboard)
         }
     }
 
@@ -1033,7 +1179,17 @@ final class ChatViewController: UIViewController, ComposeHosting {
         let toggles = plan.toggles.map { name in
             [UIAccessibilityCustomAction(name: name) { [weak self] _ in self?.toggle(id); return true }]
         }
-        row.accessibilityCustomActions = toggles
+        // A long press's actions: Copy, and Select Text on its own screen.
+        let selects = plan.selection.map { selection in
+            [
+                UIAccessibilityCustomAction(name: Strings.Chat.copy) { _ in UIPasteboard.general.string = selection.whole; return true },
+                UIAccessibilityCustomAction(name: Strings.TextSelection.title) { [weak self] _ in
+                    self?.navigationController?.pushViewController(TextSelectionViewController(text: selection.whole), animated: true)
+                    return true
+                },
+            ]
+        }
+        row.accessibilityCustomActions = (toggles ?? []) + (selects ?? [])
         let cardsHosted: [UIView] = plan.proposals.compactMap { proposalViews["\(id)#\($0.artifactId)"] }.filter { $0.superview === row }
         for card in cardsHosted { row.bringSubviewToFront(card) }
         // A row with media reads as its message, then each picture or
@@ -1114,10 +1270,16 @@ final class ChatViewController: UIViewController, ComposeHosting {
         // card keeps its shape through a drag and changes once it settles.
         let compact = compacts
         card.configuration.compact = compact
+        let guideTop = keyboardTracker.frame.minY
+        ultraKeyboard?.prepareLayout(guideTop: guideTop)
         let screen = ChatScreenLayout(
             size: view.bounds.size, safeArea: LayoutInsets(view.safeAreaInsets),
-            keyboardTop: fingerOnKeyboard ? keyboardTracker.frame.minY : keyboardTop,
-            meter: ChatScreenLayout.showsMeter(hasGauge: gauge != nil, compact: compact)
+            // The list's keyboard, while the screen is shown: where it put
+            // the keyboard, or the guide under the system's own dismissal.
+            keyboardTop: ultraKeyboard.flatMap { $0.isActive ? $0.keyboardTop(guideTop: guideTop) : nil }
+                ?? (fingerOnKeyboard ? guideTop : keyboardTop),
+            meter: ChatScreenLayout.showsMeter(hasGauge: gauge != nil, compact: compact),
+            maxContentWidth: ContentWidth.maxWidth
         ) { [card] width in card.height(fitting: width) }
         transcriptHeaderScrim.setLayoutFrame(screen.headerScrim)
         card.setLayoutFrame(screen.card)
@@ -1131,9 +1293,11 @@ final class ChatViewController: UIViewController, ComposeHosting {
         // The transcript starts under the navigation bar and scrolls under
         // it. The list is inverted: its top edge is the composer's edge.
         if ultra.frame != view.bounds { ultra.frame = view.bounds }
-        ultra.setViewport(size: view.bounds.size, insets: UIEdgeInsets(top: screen.listBottom, left: 0, bottom: view.safeAreaInsets.top, right: 0))
+        ultra.setViewport(size: view.bounds.size, insets: UIEdgeInsets(top: screen.listBottom, left: 0, bottom: view.safeAreaInsets.top, right: 0),
+                          keyboard: insetMotion)
         layoutTranscript()
         updateHeaderEdge()
+        ultraKeyboard?.refresh()
     }
 
     // MARK: Preview
@@ -1203,7 +1367,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
         }
         let folds = foldMoved && view.window != nil
         foldMoved = false
-        ultra.apply(settled + waiting, intro: opening, animated: wasTaken, moves: folds)
+        ultra.apply(settled + waiting, intro: opening, animated: wasTaken, moves: folds, streaming: chat.working, queued: waiting.count)
         updateJump()
     }
 
@@ -1284,10 +1448,8 @@ final class ChatViewController: UIViewController, ComposeHosting {
     }
 
     /// A send follows the transcript the person is actually reading.
-    var sendFollowsNewest: Bool {
-        let distance = ultra.distanceFromNewest
-        return SendFollow.Send(following: followsNewest, distanceFromEnd: distance).follows
-    }
+    /// A send now would fly in from the composer (`SendFollow`).
+    var sendFlies: Bool { ChatSendFlight.flies(distance: ultra.distanceFromNewest) }
 
     private func send() {
         guard !acceptingSend else { return }
@@ -1310,12 +1472,17 @@ final class ChatViewController: UIViewController, ComposeHosting {
         }
         acceptingSend = true
         Haptics.play(.send)
-        // A reader at or near the end follows it there; one reading further
-        // up stays where they are. The transcript is never lifted.
+        // Telegram's send: the reader is carried to the end; at the end
+        // the message flies in from the composer, from history it arrives
+        // with the scroll. The transcript is never lifted.
         let id = ClientID.make()
-        if sendFollowsNewest {
+        if sendFlies {
+            ultra.flight = ChatSendFlight(source: ChatSendFlight.source(from: card, in: view), host: view, message: id)
             followsNewest = true
             ultra.follow()
+        } else {
+            followsNewest = true
+            ultra.scrollToNewest(animated: !UIAccessibility.isReduceMotionEnabled)
         }
         let conversation = conversation
         let store = session.store
@@ -1590,6 +1757,9 @@ extension ChatViewController: AgentInputCardDelegate {
 
     func agentInputCardDidInvalidateHeight(_ card: AgentInputCardView) {
         if card.animatesHeightChange {
+            // The newest row rises with the card's top, not ahead of it.
+            insetMotion = insetMotion(easingIn: 0.2)
+            defer { insetMotion = nil }
             UIView.animate(withDuration: 0.2) { self.view.setNeedsLayout(); self.view.layoutIfNeeded() }
         } else {
             view.setNeedsLayout()
@@ -1862,6 +2032,22 @@ extension ChatViewController: AgentChatTranscriptHost {
     }
 
     func transcriptHeld(_ action: ChatRowAction, in view: UIView, frame: CGRect, at point: CGPoint) {
+        // A message lifts, Telegram's way, with Copy and Select.
+        if !previewing, let plan = (view as? ChatPlanView)?.plan, let selection = plan.selection, let window = view.window {
+            switch action {
+            case .copyMenu, .markdownSelectable:
+                let transcript = ultra
+                let source = MessageLiftSource(
+                    plan: plan, selection: selection,
+                    canvas: { [weak transcript] in transcript?.canvas(forPlan: plan.id) },
+                    setLifted: { [weak transcript] lifted in transcript?.liftedId = lifted ? plan.id : nil },
+                    host: self
+                )
+                if MessageLiftOverlay.present(source, in: window) != nil { return }
+            default:
+                break
+            }
+        }
         hold(action)
     }
 }

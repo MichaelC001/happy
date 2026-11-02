@@ -4,7 +4,7 @@ import com.slopus.happy.ui.connection.openAgentSettingsRow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import com.slopus.happy.ui.voice.LocalVoiceController
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -17,7 +17,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
-import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.rememberNavController
 import com.slopus.happy.AppGraph
 import com.slopus.happy.R
@@ -91,7 +90,7 @@ import kotlinx.serialization.Serializable
  * new account: home and Settings follow [AppGraph.openAccount].
  */
 @Composable
-fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
+fun HappyApp(graph: AppGraph, onNavigationReady: (NavHostController) -> Unit = {}, onDarkThemeChange: (Boolean) -> Unit = {}) {
     val theme by graph.localSettings.themePreference.collectAsStateWithLifecycle()
     val language by graph.language.language.collectAsStateWithLifecycle()
     val settings by graph.settings.settings.collectAsStateWithLifecycle()
@@ -100,7 +99,8 @@ fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
     // Avatar.tsx reads the avatar settings everywhere: the chat header and Settings as well as Home.
     LocalizedContent(language.locale) { HappyTheme(preference = theme) { ProvideAvatarSettings(settings) { CompositionLocalProvider(LocalVoiceController provides graph.voice, LocalAnimatedAvatars provides animatedAvatars) {
         val dark = HappyTheme.colors.dark
-        LaunchedEffect(dark) { onDarkThemeChange(dark) }
+        // In the frame that composes it, before that frame is drawn: the window's colour is the theme's from the first frame.
+        SideEffect { onDarkThemeChange(dark) }
 
         val open by graph.openAccount.collectAsStateWithLifecycle()
         val agent = (open as? OpenAccount.Agent)?.id
@@ -119,6 +119,7 @@ fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
         key(stack) {
             val nav = rememberNavController()
             shown[0] = nav
+            SideEffect { onNavigationReady(nav) }
             val openSession = { id: String -> nav.navigate(SessionRoute(id)) }
             val troubleshoot = { nav.navigate(TroubleshootRoute) }
             val connectAgent = remember(nav) { { code: String -> nav.connectAgent(graph, code) } }
@@ -133,37 +134,26 @@ fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
                 TabletShell(graph, nav, signedIn = signedIn, onOpenSession = openSession, onTroubleshoot = troubleshoot) {
                     val start: Any = if (open == OpenAccount.None) StartRoute else HomeRoute
                     val motion = rememberNavMotion()
-                    CompositionLocalProvider(LocalPageDims provides motion.dims) {
-                    NavHost(
-                        navController = nav,
-                        startDestination = start,
-                        modifier = Modifier.backdrop(nav),
-                        enterTransition = motion.enter,
-                        exitTransition = motion.exit,
-                        popEnterTransition = motion.popEnter,
-                        popExitTransition = motion.popExit,
-                        predictivePopEnterTransition = motion.predictivePopEnter,
-                        predictivePopExitTransition = motion.predictivePopExit,
-                    ) {
+                    RetainedNavHost(nav, start, motion, modifier = Modifier.backdrop(nav)) {
                         page<StartRoute> { Start(graph, nav, add) }
-                        // The open account's home; under Settings it changes with a switch made there.
                         page<HomeRoute> {
-                            key(open.key) {
-                                when (val account = open) {
-                                    is OpenAccount.Agent -> AgentHome(
-                                        graph,
-                                        account.id,
-                                        onOpenConversation = { agentId -> nav.openConversation(account.id, agentId) },
-                                        onCompose = { nav.composeConversation(account.id) },
-                                        onSettings = { nav.navigate(SettingsRoute()) },
-                                        onSettingsRow = { row -> nav.openAgentSettingsRow(account.id, row) },
-                                        onOpenArtifacts = { nav.navigate(AgentArtifactsRoute(account.id)) },
-                                        onOpenSurface = { nav.navigate(AgentSurfaceRoute(account.id, it.id, it.type, it.name)) },
-                                    )
-                                    is OpenAccount.Happy -> LegacyHome(graph, nav, onOpenSession = openSession, onTroubleshoot = troubleshoot)
-                                    OpenAccount.None -> Unit
-                                }
+                        // A switch made in Settings changes the covered home too.
+                        key(open.key) {
+                            when (val account = open) {
+                                is OpenAccount.Agent -> AgentHome(
+                                    graph,
+                                    account.id,
+                                    onOpenConversation = { agentId -> nav.openConversation(account.id, agentId) },
+                                    onCompose = { nav.composeConversation(account.id) },
+                                    onSettings = { nav.navigate(SettingsRoute()) },
+                                    onSettingsRow = { row -> nav.openAgentSettingsRow(account.id, row) },
+                                    onOpenArtifacts = { nav.navigate(AgentArtifactsRoute(account.id)) },
+                                    onOpenSurface = { nav.navigate(AgentSurfaceRoute(account.id, it.id, it.type, it.name)) },
+                                )
+                                is OpenAccount.Happy -> LegacyHome(graph, nav, onOpenSession = openSession, onTroubleshoot = troubleshoot)
+                                OpenAccount.None -> Unit
                             }
+                        }
                         }
                         // The open account's Settings, of either kind; a switch made here changes it in place.
                         page<SettingsRoute> { entry ->
@@ -180,7 +170,6 @@ fun HappyApp(graph: AppGraph, onDarkThemeChange: (Boolean) -> Unit = {}) {
                         agentConnectionRoutes(graph, nav)
                         agentHomeRoutes(graph, nav)
                         conversationRoutes(graph, nav)
-                    }
                     }
                 }
                 }
@@ -231,7 +220,8 @@ private fun rememberLinks(graph: AppGraph, nav: NavHostController, agent: String
     val context = LocalContext.current
     if (agent == null) {
         val system = LocalUriHandler.current
-        return remember(system) { LinkOpener.legacy(context, system) }
+        val dark = HappyTheme.colors.dark
+        return remember(system, dark) { LinkOpener.legacy(context, system, dark) }
     }
     val computer = computerName(graph, agent)
     return remember(nav, agent, computer) { LinkOpener.agent(context, computer) { url -> nav.navigate(BrowserRoute(agent, url)) } }

@@ -60,13 +60,17 @@ public struct ChatScreenLayout: Equatable, Sendable {
     ///
     /// With a `meter`, its row takes the 8 under the card and 12 more, so
     /// the card stands 20 above the keyboard and the bar 8 under the card.
-    public init(size: CGSize, safeArea: LayoutInsets, keyboardTop: CGFloat, meter: Bool = false, cardHeight: (CGFloat) -> CGFloat) {
+    ///
+    /// The card keeps to the transcript's column, `maxContentWidth` wide
+    /// and centred (`ChatColumn`), so on a wide iPad window the two line up.
+    public init(size: CGSize, safeArea: LayoutInsets, keyboardTop: CGFloat, meter: Bool = false, maxContentWidth: CGFloat = .greatestFiniteMagnitude, cardHeight: (CGFloat) -> CGFloat) {
         typealias M = Metrics
-        let width = max(0, size.width - 2 * M.paddingH)
+        let column = ChatColumn(rowWidth: size.width, maxContentWidth: maxContentWidth)
+        let width = max(0, column.width - 2 * M.paddingH)
         let height = cardHeight(width)
         let foot = min(keyboardTop, size.height - safeArea.bottom)
         let below = meter ? ContextMeterLayout.Metrics.height : M.paddingBottom
-        card = CGRect(x: M.paddingH, y: foot - below - height, width: width, height: height)
+        card = CGRect(x: column.x + M.paddingH, y: foot - below - height, width: width, height: height)
         self.meter = meter ? CGRect(
             x: card.maxX - ContextMeterLayout.Metrics.trailingInset - ContextMeterLayout.Metrics.width,
             y: card.maxY,
@@ -88,8 +92,8 @@ public struct ChatScreenLayout: Equatable, Sendable {
     /// Whether the card goes compact, decided from `restingCardHeight`: the
     /// full card's height with one line of text at a width. Never from the
     /// card as it is, so going compact (or typing) can't undo itself.
-    public static func compacts(size: CGSize, safeArea: LayoutInsets, keyboardTop: CGFloat, meter: Bool = false, restingCardHeight: (CGFloat) -> CGFloat) -> Bool {
-        ChatScreenLayout(size: size, safeArea: safeArea, keyboardTop: keyboardTop, meter: meter, cardHeight: restingCardHeight).viewport < compactBelow
+    public static func compacts(size: CGSize, safeArea: LayoutInsets, keyboardTop: CGFloat, meter: Bool = false, maxContentWidth: CGFloat = .greatestFiniteMagnitude, restingCardHeight: (CGFloat) -> CGFloat) -> Bool {
+        ChatScreenLayout(size: size, safeArea: safeArea, keyboardTop: keyboardTop, meter: meter, maxContentWidth: maxContentWidth, cardHeight: restingCardHeight).viewport < compactBelow
     }
 
     /// Whether the meter's row shows: whenever there is a meter, except
@@ -212,22 +216,23 @@ public struct ChatChunks: Equatable, Sendable {
 /// room under it (Message.tsx's `sendLift`, `SEND_LIFT_TOP`). That was
 /// ported here and taken out again: on a phone, where that share is a
 /// couple of turns, it reads as the transcript jumping away on send.
+///
+/// Every send carries the reader to the end, as Telegram's does, from
+/// wherever they were reading.
 public struct SendFollow: Equatable, Sendable {
     public enum Metrics {
-        /// `SEND_FOLLOW_THRESHOLD`: a send made this close to the end
-        /// carries the reader to it.
-        public static let follow: CGFloat = 80
+        /// Telegram's `shouldAnimateMessageTransition`: only a send made
+        /// closer than this to the end flies in from the composer.
+        public static let flight: CGFloat = 20
     }
 
-    /// Whether the send carries the reader to the end: only one already
-    /// there, or within `Metrics.follow` of it. A reader up in history
-    /// stays exactly where they are. Whether the agent is working makes
-    /// no difference now that no send is lifted.
+    /// Whether the send flies in from the composer: only one made at the
+    /// end. One made up in history arrives with the scroll down to it.
     public struct Send: Equatable, Sendable {
-        public var follows: Bool
+        public var flies: Bool
 
-        public init(following: Bool, distanceFromEnd: CGFloat) {
-            follows = following || distanceFromEnd <= Metrics.follow
+        public init(distanceFromEnd: CGFloat) {
+            flies = distanceFromEnd < Metrics.flight
         }
     }
 }
@@ -298,6 +303,10 @@ public struct MessageLayout: Equatable, Sendable {
     /// The pictures the person sent, under the bubble at the right.
     public var pictures: [CGRect]
     public var status: CGRect?
+    /// The time and the delivery mark (`MessageStatusLayout`'s box): in
+    /// the bubble at its foot, or on pictures sent alone in `deliveryPill`.
+    public var delivery: CGRect? = nil
+    public var deliveryPill: CGRect? = nil
 
     /// The first Markdown run, for an agent message that is only text.
     public var markdown: MarkdownLayout? {
@@ -376,7 +385,10 @@ public struct MessageLayout: Equatable, Sendable {
     /// `showsStatus` keeps a line under the bubble for a refusal. `text` is
     /// nil for pictures sent alone; `pictures` are drawn as desktop draws a
     /// message's photos: justified, against the right, at most four.
-    public static func user(width: CGFloat, maxContentWidth: CGFloat = .greatestFiniteMagnitude, text: Measurable?, fold: Fold? = nil, pictures: [MediaFlow.Image] = [], showsStatus: Bool) -> MessageLayout {
+    /// `delivery` is the time and mark to place at the bubble's foot, with
+    /// `trailing` measuring the text's last line (its width, at a width);
+    /// with no text, it goes on the last picture.
+    public static func user(width: CGFloat, maxContentWidth: CGFloat = .greatestFiniteMagnitude, text: Measurable?, fold: Fold? = nil, pictures: [MediaFlow.Image] = [], showsStatus: Bool, delivery: MessageStatusLayout? = nil, trailing: Measurable? = nil) -> MessageLayout {
         typealias M = Metrics
         let column = ChatColumn(rowWidth: width, maxContentWidth: maxContentWidth)
         let inner = max(0, column.width - 2 * M.marginH)
@@ -387,6 +399,8 @@ public struct MessageLayout: Equatable, Sendable {
         var textFrame: CGRect?
         var cut = false
         var foldControl: CGRect?
+        var deliveryFrame: CGRect?
+        var deliveryPill: CGRect?
         if let text {
             let measure = max(0, maxBubble - 2 * M.bubblePaddingH)
             var textSize = text.size(fitting: measure)
@@ -405,12 +419,21 @@ public struct MessageLayout: Equatable, Sendable {
                     contentWidth = max(textSize.width, control.width)
                 }
             }
-            let contentHeight = textSize.height + (controlSize.map { M.foldGap + $0.height } ?? 0)
-            let bubbleWidth = contentWidth + 2 * M.bubblePaddingH
-            let frame = CGRect(x: right - bubbleWidth, y: bottom, width: bubbleWidth, height: contentHeight + 2 * M.bubblePaddingV)
+            var content = CGSize(width: contentWidth, height: textSize.height + (controlSize.map { M.foldGap + $0.height } ?? 0))
+            var placedDelivery: CGRect?
+            if let delivery {
+                // The last line is Show full's when the text folds.
+                let last = controlSize?.width ?? trailing?.size(fitting: textSize.width).width
+                let placement = delivery.place(text: content, trailing: last, available: measure)
+                content = placement.content
+                placedDelivery = placement.frame
+            }
+            let bubbleWidth = content.width + 2 * M.bubblePaddingH
+            let frame = CGRect(x: right - bubbleWidth, y: bottom, width: bubbleWidth, height: content.height + 2 * M.bubblePaddingV)
             bubble = frame
             let placed = CGRect(x: frame.minX + M.bubblePaddingH, y: frame.minY + M.bubblePaddingV, width: textSize.width, height: textSize.height)
             textFrame = placed
+            deliveryFrame = placedDelivery?.offsetBy(dx: placed.minX, dy: placed.minY)
             if let controlSize {
                 foldControl = CGRect(x: placed.minX, y: placed.maxY + M.foldGap, width: controlSize.width, height: controlSize.height)
             }
@@ -425,6 +448,11 @@ public struct MessageLayout: Equatable, Sendable {
             // The photos hug the right edge as the bubble does.
             pictureFrames = media.frames.map { $0.offsetBy(dx: right - measure, dy: bottom) }
             bottom += media.size.height
+            if bubble == nil, let delivery, let last = pictureFrames.last {
+                let pill = delivery.pill(over: last)
+                deliveryPill = pill.pill
+                deliveryFrame = pill.frame
+            }
         }
         var status: CGRect?
         if showsStatus {
@@ -433,7 +461,8 @@ public struct MessageLayout: Equatable, Sendable {
         }
         return MessageLayout(
             size: CGSize(width: max(0, width), height: bottom + M.marginV),
-            parts: [], bubble: bubble, text: textFrame, cut: cut, foldControl: foldControl, pictures: pictureFrames, status: status
+            parts: [], bubble: bubble, text: textFrame, cut: cut, foldControl: foldControl, pictures: pictureFrames, status: status,
+            delivery: deliveryFrame, deliveryPill: deliveryPill
         )
     }
 }

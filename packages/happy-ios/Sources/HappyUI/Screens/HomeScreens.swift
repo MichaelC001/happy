@@ -17,6 +17,8 @@ import UIKit
 /// Every state has home's bar: the account switcher at the left, its name
 /// giving way to the link's status while the account isn't live
 /// (`AccountSwitcher.link`), and the filter menu and settings at the right.
+/// As the iPad's sidebar (`SidebarColumnTrait`) settings and compose are
+/// the sidebar's own bar at its foot instead (`SidebarBottomBar`).
 ///
 /// Nothing is typed here: compose in the bar (`compose()`) opens an empty
 /// chat, whose first send starts the session (`LegacyComposeStart`). It is
@@ -42,6 +44,8 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     /// The home filter's choice, as last derived.
     private var grouping: SessionListGrouping = .flat
     private var content: UIViewController?
+    /// The session the main panel beside home shows, on an iPad.
+    private var shownSessionId: String?
     private var preparesArchives = false
     private var switcher: AccountSwitcher?
     /// The list's room under the bar and above the toolbar, as home last
@@ -49,6 +53,14 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     private var room: HomeListRoom?
     /// On top of the stack, neither coming nor going.
     private var standing = false
+    /// Settings and compose at the foot, as the iPad's sidebar has them.
+    private(set) lazy var bottomBar = SidebarBottomBar(
+        composeTitle: Strings.Tablet.newSession,
+        onSettings: { [weak self] in self?.openSettings() },
+        onCompose: { [weak self] in self?.compose() }
+    )
+    /// The list whose foot the bottom bar shades.
+    private weak var barFollows: UIScrollView?
 
     public init(context: AppContext, session: AccountSession) {
         self.context = context
@@ -63,7 +75,14 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(Palette.groupedBackground)
+        // No ground as the iPad's sidebar, where the system's sidebar shows.
+        applyGround()
+        registerForTraitChanges([SidebarColumnTrait.self]) { (self: Self, _) in
+            self.applyGround()
+            self.updateNavigation(animated: false)
+        }
+        bottomBar.isHidden = true
+        view.addSubview(bottomBar)
         minimalBackButton()
         switcher = AccountSwitcher(context: context, controller: self)
         let pipeline = ApplyPipeline<HomeDerivation.Input, HomeDerivation.Applied, HomeUpdate>(
@@ -88,8 +107,6 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         pipeline.followDrafts(session.homeFeed, into: \.draftSessionIds)
         self.pipeline = pipeline
         observation = pipeline.observation
-        // Tablet (HappyUI/Tablet): the shell flips this with the window's width.
-        registerForTraitChanges([TabletLayoutTrait.self]) { (self: Self, _) in self.updateNavigation(animated: false) }
         // The link as home's title says it, and as this account's chats do.
         linkWatch = LegacyLink.link(for: session).watch { [weak self] in self?.headerState = $0 }
         networkWatch = NetworkPath.shared.watch { [weak self] satisfied in
@@ -120,12 +137,15 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         NotificationCenter.default.addObserver(self, selector: #selector(clockChanged), name: UIApplication.significantTimeChangeNotification, object: nil)
     }
 
+    private func applyGround() {
+        view.backgroundColor = traitCollection.isSidebarColumn ? .clear : UIColor(Palette.groupedBackground)
+    }
+
     /// Something can be started from compose: a computer is linked and,
     /// where a computer is a home of its own, one is reachable. The bar
     /// shows compose only then.
     var canCompose: Bool {
-        guard !traitCollection.isTabletLayout else { return false }
-        return switch state {
+        switch state {
         case nil, .link?: false
         case .offline?: !Preference(variant: context.variant).isAvailable
         default: true
@@ -183,7 +203,14 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         switcher?.layout()
-        let room = HomeListRoom(size: view.bounds.size, safeArea: LayoutInsets(view.safeAreaInsets), control: nil, standing: standing, kept: room)
+        var control: CGRect?
+        if !bottomBar.isHidden {
+            let bar = bottomBar.layout(size: view.bounds.size, safeArea: LayoutInsets(view.safeAreaInsets))
+            bottomBar.apply(bar, in: view.bounds)
+            control = bar.bar
+        }
+        followList()
+        let room = HomeListRoom(size: view.bounds.size, safeArea: LayoutInsets(view.safeAreaInsets), control: control, standing: standing, kept: room)
         self.room = room
         applyInsets(room.insets)
     }
@@ -202,7 +229,7 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     }
 
     private func prepareArchivesIfNeeded() {
-        let wanted = state?.kind == .list && !traitCollection.isTabletLayout
+        let wanted = state?.kind == .list
         guard wanted != preparesArchives else { return }
         preparesArchives = wanted
         pipeline?.update { $0.preparesArchives = wanted }
@@ -274,6 +301,7 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
 
     private func makeList(_ model: HomeListModel, changeset: RowChangeset) -> SessionListViewController {
         let controller = SessionListViewController(context: context, session: session)
+        controller.selectedSessionId = shownSessionId
         // ProjectRow's `+` (ProjectHomeList.tsx `createWorkspace`): the
         // draft moves to the project, asking for a new workspace, and an
         // empty chat opens on it.
@@ -314,24 +342,39 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     private func updateNavigation(animated: Bool) {
         guard let state else { return }
         let floating = true
-        // Tablet (HappyUI/Tablet): beside the sidebar the index route draws
-        // nothing, nor its header and dock (MainView.tsx `isTablet`).
-        let blank = floating && traitCollection.isTabletLayout
-        content?.view.isHidden = blank
         if floating {
-            // Beside the sidebar home draws nothing, but the bar is over
-            // the sidebar too: the switcher stays, or a tablet has no way
-            // to the accounts at all.
+            let sidebar = traitCollection.isSidebarColumn
             navigationItem.leftBarButtonItem = switcher?.barItem
-            let items: [HeaderBar.Trailing: UIBarButtonItem] = [.filter: filterItem, .settings: settingsItem]
+            let items: [HeaderBar.Trailing: UIBarButtonItem] = sidebar ? [.filter: filterItem] : [.filter: filterItem, .settings: settingsItem]
+            bottomBar.isHidden = !sidebar
+            bottomBar.showsCompose = canCompose
             // The same items each time: a button rebuilt under a finger
             // drops its tap, and home updates with every connection change.
-            let toolbar = canCompose ? composeItems : nil
+            let toolbar = canCompose && !sidebar ? composeItems : nil
             if toolbarItems != toolbar { toolbarItems = toolbar }
-            navigationItem.rightBarButtonItems = blank ? nil : HeaderBar.trailing(items)
+            navigationItem.rightBarButtonItems = HeaderBar.trailing(items)
             if navigationController?.topViewController === self { HomeToolbar.show(for: self, animated: animated) }
         }
         view.setNeedsLayout()
+    }
+
+    /// The bottom bar shades the foot of the list on show, the first
+    /// scroll view in it (UltraList's own, which a toolbar finds too).
+    private func followList() {
+        let list = bottomBar.isHidden ? nil : content.flatMap { Self.firstScrollView(in: $0.view) }
+        guard list !== barFollows else { return }
+        barFollows = list
+        bottomBar.follow(list)
+    }
+
+    private static func firstScrollView(in view: UIView) -> UIScrollView? {
+        var queue = [view]
+        while !queue.isEmpty {
+            let next = queue.removeFirst()
+            if let scroll = next as? UIScrollView { return scroll }
+            queue.append(contentsOf: next.subviews)
+        }
+        return nil
     }
 
     /// MainView.tsx `HeaderRight`: the grouping choice and a way to the
@@ -410,7 +453,17 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         guard canCompose, let navigation = navigationController, navigation.topViewController === self,
               navigation.transitionCoordinator == nil else { return }
         let chat = LegacyChatViewController(context: context, session: session, sessionId: ComposeChat.makeId())
-        navigation.pushViewController(chat, animated: true)
+        // The keyboard first, then the push in its frame (`KeyboardPush`).
+        KeyboardPush.push(chat, on: navigation)
+    }
+}
+
+extension LegacyHomeViewController: MainPanelFollowing {
+    /// Beside the main panel, the chat it shows keeps its row selected
+    /// (SessionsList.tsx `selectedSessionId`).
+    func mainPanelDidShow(_ root: UIViewController?) {
+        shownSessionId = root.flatMap(TabletRoutes.route(of:))?.sessionId
+        (content as? SessionListViewController)?.selectedSessionId = shownSessionId
     }
 }
 

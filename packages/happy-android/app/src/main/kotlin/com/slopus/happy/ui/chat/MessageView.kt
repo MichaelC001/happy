@@ -16,7 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.CircularProgressIndicator
+import com.slopus.happy.ui.components.PageProgressIndicator as CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -187,6 +187,8 @@ fun UserMessage(
     callbacks: MessageCallbacks,
     modifier: Modifier = Modifier,
     attachments: (@Composable () -> Unit)? = null,
+    /** Draws the bubble's words instead of [MarkdownView]: a conversation's laid-out row ([com.slopus.happy.ui.conversation.ProseColumn]). */
+    body: (@Composable (List<com.slopus.happy.chat.markdown.MarkdownBlock>) -> Unit)? = null,
 ) {
     val message = row.message
     val colors = HappyTheme.colors
@@ -219,7 +221,7 @@ fun UserMessage(
                 .border(hairline, bubble.border, bubbleShape)
                 .padding(horizontal = MessageSpec.bubblePaddingHorizontal, vertical = MessageSpec.bubblePaddingVertical),
         ) {
-            MarkdownView(blocks, onOptionPress = callbacks.onOptionPress)
+            if (body != null) body(blocks) else MarkdownView(blocks, onOptionPress = callbacks.onOptionPress)
         }
     }
 

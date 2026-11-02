@@ -551,8 +551,13 @@ private enum StartTestError: Error, LocalizedError {
 
 private actor FakeSender: ChatSending {
     var sent: [(OutgoingMessage, String)] = []
+    var initialModes: SessionAgentModesPatch?
+    var modesAtSend: [SessionAgentModesPatch?] = []
+
+    func saveInitialModes(_ patch: SessionAgentModesPatch) { initialModes = patch }
 
     func send(_ message: OutgoingMessage, sessionId: String) async throws -> String {
+        modesAtSend.append(initialModes)
         sent.append((message, sessionId))
         return "local-\(sent.count)"
     }
@@ -658,13 +663,17 @@ final class SessionStarterTests: XCTestCase {
     private var phases: [NewSessionStartPhase?] = []
     private lazy var requests = SpawnRequests()
 
-    private func makeStarter(spawnRequests: SpawnRequests? = nil, ops: FakeOps? = nil) -> SessionStarter {
+    private func makeStarter(spawnRequests: SpawnRequests? = nil, ops: FakeOps? = nil, failInitialModes: Bool = false) -> SessionStarter {
         let recorder = self.recorder
         let starter = SessionStarter(environment: .init(
             ops: ops ?? self.ops,
             sessionOps: sessionOps,
             sender: sender,
             metadataTransport: FakeTransport(),
+            saveInitialModes: { [sender] _, patch in
+                if failInitialModes { throw StartTestError.notSynced }
+                await sender.saveInitialModes(patch)
+            },
             refreshSessions: { await recorder.refreshed() },
             paintBotFace: { try await recorder.paint($0) },
             attachmentPlan: { [pictures, planGate] message, _ in
@@ -747,6 +756,8 @@ final class SessionStarterTests: XCTestCase {
         let sent = await sender.sent
         XCTAssertEqual(sent.first?.0, OutgoingMessage(text: "Fix the build", source: .newSession))
         XCTAssertEqual(sent.first?.1, "s1")
+        let modesAtSend = await sender.modesAtSend
+        XCTAssertEqual(modesAtSend.first ?? nil, modes.first?.1, "creation picks must be saved before encoding the first message")
         XCTAssertTrue(presenter.errors.isEmpty)
     }
 
@@ -756,6 +767,17 @@ final class SessionStarterTests: XCTestCase {
         let options = await ops.spawned
         XCTAssertEqual(options.first?.permissionMode, "default")
         XCTAssertEqual(options.first?.modelMode, "gpt-6.1-sol")
+    }
+
+    func testInitialModeSaveFailureKeepsTheFirstMessageUnsent() async {
+        await ops.script([.success(sessionId: "s1")])
+        let starter = makeStarter(failInitialModes: true)
+        let result = await starter.start(launch(agent: .codex, model: "gpt-6.1-sol"), isCurrentTarget: { true })
+        XCTAssertNil(result)
+        let sent = await sender.sent
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertFalse(presenter.errors.isEmpty)
+        XCTAssertFalse(starter.isStarting)
     }
 
     func testANewWorktreeIsCreatedFirst() async {
@@ -1476,10 +1498,10 @@ final class NewSessionChoicesTests: XCTestCase {
         let bot = try NewSessionLaunch.resolve(
             draft: NewSessionDraft(input: "", selectedMachineId: "m1"),
             pickedAgent: nil, bot: (name: " Captain ", faceSeed: "abc"), machines: machines, sessions: sessions,
-            agentDefaultOverrides: [:], prompt: "ignored", attachments: []
+            agentDefaultOverrides: [:], prompt: " Plan the release ", attachments: []
         ).get()
         XCTAssertEqual(bot.target, .bot(name: "Captain"))
-        XCTAssertEqual(bot.prompt, "")
+        XCTAssertEqual(bot.prompt, "Plan the release", "an empty chat's first send is the bot's first message")
         XCTAssertEqual(bot.signature.bot?.name, "Captain")
         XCTAssertEqual(bot.bot, NewSessionLaunch.Bot(name: "Captain", faceSeed: "abc"), "the start knows the face to put on")
         XCTAssertNil(workspace.bot)
@@ -1598,8 +1620,11 @@ final class NewSessionChoicesTests: XCTestCase {
         XCTAssertEqual(draft.pickedAgentType, .codex)
         XCTAssertEqual(draft.permissionMode, defaults.permissionMode)
         XCTAssertEqual(draft.modelMode, defaults.modelMode)
+        XCTAssertEqual(draft.effortLevel, defaults.effortLevel)
         composer.selectAgent("vim")
         XCTAssertEqual(composer.drafts.draft.agentType, .codex)
+        composer.drafts.selectAgent(.rig, picked: true, defaults: AgentDefaults.Config(permissionMode: "default", modelMode: "default", effortLevel: nil))
+        XCTAssertNil(composer.drafts.draft.effortLevel, "a harness with no effort default must clear the previous harness's effort")
     }
 
     @MainActor
@@ -1970,5 +1995,389 @@ extension NewSessionChoicesTests {
         unable.update(snapshot: unable.snapshot)
         await unable.waitForIdle()
         XCTAssertFalse(unable.drafts.createsTask)
+    }
+
+    // MARK: Session | Bot | Task in a legacy empty chat
+
+    private static let chipTitles = ComposerChipSet.Titles(permission: "Permission", codexPermission: "Codex permission", geminiPermission: "Gemini permission", model: "Model", effort: "Effort")
+
+    @MainActor
+    private static func starter(ops: FakeOps, sender: FakeSender) -> SessionStarter {
+        SessionStarter(environment: .init(
+            ops: ops,
+            sessionOps: FakeSessionOps(),
+            sender: sender,
+            metadataTransport: FakeTransport(),
+            saveInitialModes: { _, _ in },
+            refreshSessions: {},
+            paintBotFace: { Data("png:\($0)".utf8) },
+            attachmentPlan: { message, _ in
+                AttachmentSendPlan(accepted: message.attachments, rejected: [], shouldShowUnsupportedAlert: false, shouldSendText: true)
+            },
+            spawnRequests: SpawnRequests(),
+            sleep: { _ in }
+        ))
+    }
+
+    /// A task or a bot is Happy Agent's, so picking one moves the harness
+    /// there: the model, permission and effort the chips then offer are
+    /// Happy Agent's, and what is picked in them reaches the spawn, with the
+    /// composer's text as the first message.
+    @MainActor
+    func testATaskOrABotTakesHappyAgentsPicksToTheSpawnAndItsFirstMessage() async throws {
+        let machines = [machine("m1"), rigMachine("rig1", sibling: "m1", bots: true, tasks: true)]
+        let composer = await composer(NewSessionDraft(selectedMachineId: "m1", agentType: .claude, pickedAgentType: .claude), machines: machines)
+        XCTAssertEqual(composer.drafts.draft.agentType, .claude)
+        XCTAssertEqual(HomeDockKind.offered(supportsBots: composer.choices.supportsBots, supportsTasks: composer.choices.supportsTasks), [.session, .bot, .task])
+
+        composer.selectKind(.task)
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsTask)
+        XCTAssertEqual(composer.drafts.draft.agentType, .rig, "a task is Happy Agent's: the pickers follow it")
+        XCTAssertEqual(composer.drafts.draft.pickedAgentType, .rig)
+        XCTAssertEqual(composer.choices.modelOptions.map(\.key), ["codex:shared-model", "claude:shared-model"])
+        composer.selectModel("claude:shared-model")
+        composer.selectEffort("max")
+        composer.selectPermission("read_only")
+        await composer.waitForIdle()
+        let chips = ComposerChipSet(choices: composer.choices, titles: Self.chipTitles)
+        XCTAssertEqual(chips.model.selectedKey, "claude:shared-model")
+        XCTAssertEqual(chips.effort?.selectedKey, "max")
+        XCTAssertEqual(chips.permission?.selectedKey, "read_only")
+
+        let ops = FakeOps()
+        let sender = FakeSender()
+        let starter = Self.starter(ops: ops, sender: sender)
+        await ops.script([.success(sessionId: "t1"), .success(sessionId: "b1")])
+        let task = try await composer.launchTaskPrepared(prompt: " Ship it ", attachments: []).get()
+        let taskId = await starter.start(task, isCurrentTarget: { true })
+        XCTAssertEqual(taskId, "t1")
+
+        composer.selectKind(.bot)
+        composer.drafts.setBotName("Captain")
+        await composer.waitForIdle()
+        XCTAssertFalse(composer.drafts.createsTask, "a bot or a task, never both")
+        XCTAssertEqual(composer.drafts.draft.modelMode, "claude:shared-model", "already Happy Agent's: the picks stay")
+        let bot = try await composer.launchBotPrepared(prompt: "Plan the release", attachments: []).get()
+        let botId = await starter.start(bot, isCurrentTarget: { true })
+        XCTAssertEqual(botId, "b1")
+
+        let spawned = await ops.spawned
+        XCTAssertEqual(spawned.map(\.machineId), ["rig1", "rig1"])
+        XCTAssertEqual(spawned.map(\.agent), ["rig", "rig"])
+        XCTAssertEqual(spawned.map(\.providerId), ["claude", "claude"])
+        XCTAssertEqual(spawned.map(\.modelId), ["shared-model", "shared-model"])
+        XCTAssertEqual(spawned.map(\.permissionMode), ["read_only", "read_only"])
+        XCTAssertEqual(spawned.map(\.effort), ["max", "max"])
+        XCTAssertEqual(spawned.map(\.happyAgentTarget), [
+            .object(["kind": .string("task")]),
+            .object(["kind": .string("bot"), "name": .string("Captain")]),
+        ])
+        let payload = try MachineActions.spawnPayload(spawned[0])
+        XCTAssertEqual(payload["agentConfiguration"]?["providerId"], .string("claude"))
+        XCTAssertEqual(payload["agentConfiguration"]?["modelId"], .string("shared-model"))
+        let sent = await sender.sent
+        XCTAssertEqual(sent.map(\.0.text), ["Ship it", "Plan the release"])
+        XCTAssertEqual(sent.map(\.1), ["t1", "b1"])
+
+        composer.selectKind(.session)
+        await composer.waitForIdle()
+        XCTAssertFalse(composer.drafts.createsBot)
+        XCTAssertFalse(composer.drafts.createsTask)
+        XCTAssertEqual(composer.drafts.draft.agentType, .rig, "back to Session, the harness stays until another is picked")
+        let dock = try await composer.launchBotPrepared().get()
+        XCTAssertEqual(dock.prompt, "", "home's dock still makes a bot from its name alone")
+    }
+
+    /// A computer picked for a session whose Happy Agent can't make a task
+    /// drops the task and moves the harness to one it runs. Picking Task
+    /// again goes back to a computer that makes tasks: the kind is never
+    /// refused while some computer on the account makes it.
+    @MainActor
+    func testPickingAnIncapableComputerDropsTheTaskAndTaskGoesBack() async throws {
+        let machines = [
+            machine("m1"), rigMachine("rig1", sibling: "m1", bots: true, tasks: true),
+            machine("m2", name: "Mini", createdAt: 3),
+        ]
+        let composer = await composer(NewSessionDraft(selectedMachineId: "m1", agentType: .claude, pickedAgentType: .claude), machines: machines)
+        composer.selectKind(.task)
+        await composer.waitForIdle()
+        XCTAssertEqual(composer.drafts.draft.agentType, .rig)
+
+        composer.selectMachine("m2")
+        await composer.waitForIdle()
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "m2")
+        XCTAssertFalse(composer.drafts.createsTask)
+        XCTAssertEqual(HomeDockKind.offered(supportsBots: composer.choices.supportsBots, supportsTasks: composer.choices.supportsTasks), [.session], "this computer makes sessions")
+        XCTAssertEqual(HomeDockKind.offered(supportsBots: composer.choices.offersBots, supportsTasks: composer.choices.offersTasks), [.session, .bot, .task], "the account still makes both")
+        XCTAssertFalse(composer.choices.agentOptions.contains { $0.key == "rig" })
+        XCTAssertEqual(composer.drafts.draft.agentType, .claude, "a harness this computer runs")
+        guard case .failure(let refusal) = await composer.launchTaskPrepared(prompt: "x", attachments: []) else {
+            return XCTFail("a Happy CLI computer makes no task")
+        }
+        XCTAssertEqual(refusal, .happyAgentNotRunning)
+
+        composer.selectKind(.task)
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsTask)
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "m1", "back on the computer whose Happy Agent makes tasks")
+        XCTAssertEqual(composer.drafts.draft.agentType, .rig)
+        let task = try await composer.launchTaskPrepared(prompt: "x", attachments: []).get()
+        XCTAssertEqual(task.machineId, "rig1")
+    }
+
+    /// An account of Happy CLI computers alone: Bot and Task are never
+    /// offered, and asking for one changes nothing.
+    @MainActor
+    func testAnAccountWithoutHappyAgentOffersSessionOnly() async throws {
+        let machines = [machine("m1"), machine("m2", name: "Mini", createdAt: 3)]
+        let composer = await composer(NewSessionDraft(selectedMachineId: "m1", agentType: .claude, pickedAgentType: .claude), machines: machines)
+        XCTAssertEqual(HomeDockKind.offered(supportsBots: composer.choices.offersBots, supportsTasks: composer.choices.offersTasks), [.session])
+        composer.selectKind(.task)
+        composer.selectKind(.bot)
+        await composer.waitForIdle()
+        XCTAssertFalse(composer.drafts.createsTask)
+        XCTAssertFalse(composer.drafts.createsBot)
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "m1")
+        XCTAssertEqual(composer.drafts.draft.agentType, .claude)
+    }
+
+    // MARK: Bot | Task go to a Happy Agent computer
+
+    /// The account in the report: the saved draft names an old computer,
+    /// offline, Happy CLI alone, on Codex; today's computer runs Happy CLI
+    /// with Happy Agent beside it; a server runs Happy Agent alone.
+    private func reportedMachines(serverOnline: Bool = true, todayAgentOnline: Bool = true) -> [MachineRecord] {
+        var today = rigMachine("rig-mac", sibling: "cli-7", bots: true, tasks: true)
+        today.active = todayAgentOnline
+        today.createdAt = 6
+        var server = rigMachine("rig-core", sibling: nil, bots: true, tasks: true)
+        server.active = serverOnline
+        server.createdAt = 4
+        var serverMetadata = server.metadata?.objectValue ?? [:]
+        serverMetadata["host"] = .string("happy-core")
+        serverMetadata["displayName"] = nil
+        server.metadata = .object(serverMetadata)
+        return [
+            machine("old", name: "MacBook-Pro.local", active: false, createdAt: 1),
+            machine("cli-7", name: "MacBook-Pro-7.local", createdAt: 5),
+            today,
+            server,
+        ]
+    }
+
+    @MainActor
+    func testBotLeavesAnOfflineHappyCLIComputerForAnOnlineHappyAgent() async throws {
+        let composer = await composer(NewSessionDraft(selectedMachineId: "old", selectedPath: "~/happy", agentType: .codex, pickedAgentType: .codex), machines: reportedMachines())
+        XCTAssertEqual(composer.choices.offline, .computer(lastSeenAt: 1))
+        XCTAssertFalse(composer.choices.supportsBots, "the old computer has no Happy Agent")
+        XCTAssertTrue(composer.choices.offersBots)
+        XCTAssertTrue(composer.choices.offersTasks)
+
+        composer.selectKind(.bot)
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsBot)
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "cli-7", "the first online computer whose Happy Agent makes bots")
+        XCTAssertEqual(composer.drafts.draft.agentType, .rig)
+        XCTAssertEqual(composer.drafts.draft.pickedAgentType, .rig)
+        XCTAssertNil(composer.choices.offline)
+        XCTAssertEqual(composer.choices.machines(for: .bot).map(\.id), ["cli-7", "rig-core"], "only computers whose Happy Agent makes bots")
+        XCTAssertEqual(composer.choices.machines(for: .session).map(\.id), ["cli-7", "rig-core", "old"], "every computer, online first")
+        composer.drafts.setBotName("Captain")
+        let bot = try await composer.launchBotPrepared(prompt: "yo", attachments: []).get()
+        XCTAssertEqual(bot.machineId, "rig-mac")
+        XCTAssertEqual(bot.prompt, "yo")
+        XCTAssertEqual(bot.target, .bot(name: "Captain"))
+    }
+
+    /// A chosen computer that makes the kind and answers keeps it; picking
+    /// another eligible one in the picker keeps the kind and the picks.
+    @MainActor
+    func testAnEligibleChosenComputerStaysAndAnotherCanBePicked() async throws {
+        let composer = await composer(NewSessionDraft(selectedMachineId: "rig-core", agentType: .rig, pickedAgentType: .rig), machines: reportedMachines())
+        composer.selectKind(.task)
+        await composer.waitForIdle()
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "rig-core", "it makes tasks and answers")
+        composer.selectModel("claude:shared-model")
+        await composer.waitForIdle()
+
+        composer.selectMachine("cli-7")
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsTask, "another computer that makes tasks keeps the task")
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "cli-7")
+        XCTAssertEqual(composer.drafts.draft.agentType, .rig)
+        XCTAssertEqual(composer.drafts.draft.modelMode, "claude:shared-model", "the model picked stays")
+        let task = try await composer.launchTaskPrepared(prompt: "Ship it", attachments: []).get()
+        XCTAssertEqual(task.machineId, "rig-mac")
+        XCTAssertEqual(task.modelMode, "claude:shared-model")
+    }
+
+    /// Every Happy Agent that makes tasks is offline: the task still goes
+    /// to one, said offline before sending rather than refused.
+    @MainActor
+    func testWithEveryHappyAgentOfflineTheTaskStaysAndSaysSo() async throws {
+        let composer = await composer(NewSessionDraft(selectedMachineId: "old", agentType: .codex, pickedAgentType: .codex),
+                                      machines: reportedMachines(serverOnline: false, todayAgentOnline: false))
+        composer.selectKind(.task)
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsTask)
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "cli-7")
+        XCTAssertEqual(composer.choices.offline, .happyAgent, "the computer answers, its Happy Agent doesn't")
+        XCTAssertEqual(composer.choices.machines(for: .task).map(\.id), ["cli-7", "rig-core"])
+        XCTAssertFalse(composer.choices.machines(for: .task).contains { $0.isOnline(for: .task) })
+        guard case .failure(let refusal) = await composer.launchTaskPrepared(prompt: "x", attachments: []) else {
+            return XCTFail("an offline Happy Agent makes nothing")
+        }
+        XCTAssertEqual(refusal, .machineOffline)
+    }
+
+    /// The bot's computer goes (its Happy Agent stops making bots): the bot
+    /// moves to another computer that makes them instead of becoming a
+    /// session; with none left it becomes a session.
+    @MainActor
+    func testABotWhoseComputerStopsMakingBotsMovesInsteadOfDowngrading() async throws {
+        var machines = reportedMachines()
+        let composer = await composer(NewSessionDraft(selectedMachineId: "cli-7", agentType: .rig, pickedAgentType: .rig), machines: machines)
+        composer.selectKind(.bot)
+        await composer.waitForIdle()
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "cli-7")
+
+        machines[2] = rigMachine("rig-mac", sibling: "cli-7", bots: false, tasks: true)
+        composer.update(snapshot: LegacyHomeSnapshot(machines: MachinesSnapshot(synced: true, machines: machines), sessions: []))
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsBot, "still a bot")
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "rig-core")
+
+        composer.update(snapshot: LegacyHomeSnapshot(machines: MachinesSnapshot(synced: true, machines: Array(machines.prefix(3))), sessions: []))
+        await composer.waitForIdle()
+        XCTAssertFalse(composer.drafts.createsBot, "no computer makes bots: a session")
+    }
+
+    /// A big account's computers arrive late, Happy CLI's rows before Happy
+    /// Agent's: a bot picked before any are in stays a bot, waits rather
+    /// than become a session, and goes to the Happy Agent that makes bots
+    /// once it is in.
+    @MainActor
+    func testABotWaitsForItsHappyAgentWhileTheComputersArrive() async throws {
+        let machines = reportedMachines()
+        let composer = await composer(NewSessionDraft(selectedMachineId: "old", agentType: .codex, pickedAgentType: .codex), machines: [])
+        composer.update(snapshot: LegacyHomeSnapshot(machines: MachinesSnapshot(synced: false, machines: []), sessions: []))
+        await composer.waitForIdle()
+        XCTAssertFalse(composer.choices.machinesSynced)
+        XCTAssertTrue(composer.choices.awaitsComputers)
+        composer.selectKind(.bot)
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsBot, "picked before anything is in, it is a bot")
+
+        composer.update(snapshot: LegacyHomeSnapshot(machines: MachinesSnapshot(synced: false, machines: Array(machines.prefix(2))), sessions: []))
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsBot, "Happy CLI's rows alone don't make it a session")
+        XCTAssertTrue(composer.choices.awaitsComputers)
+
+        composer.update(snapshot: LegacyHomeSnapshot(machines: MachinesSnapshot(synced: true, machines: machines), sessions: []))
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsBot)
+        XCTAssertFalse(composer.choices.awaitsComputers)
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "cli-7", "today's computer, whose Happy Agent makes bots")
+        XCTAssertEqual(composer.drafts.draft.agentType, .rig)
+    }
+
+    /// A bot kept from an earlier compose names a computer whose Happy
+    /// Agent is offline: the next compose moves it to one that answers, as
+    /// picking Bot does. Picked by hand, it stays, on any screen editing
+    /// the draft; with no Happy Agent answering anywhere it stays too.
+    @MainActor
+    func testAKeptBotOnAnOfflineHappyAgentMovesUnlessPicked() async throws {
+        let drafts = NewSessionDraftStore(settings: LocalSettings(storage: InMemoryKeyValueStore()))
+        drafts.pickAgentType(.rig)
+        drafts.renameMachineId("rig-core")
+        drafts.setCreatesBot(true)
+        let snapshot = LegacyHomeSnapshot(machines: MachinesSnapshot(synced: true, machines: reportedMachines(serverOnline: false)), sessions: [])
+        let composer = NewSessionComposer(drafts: drafts, snapshot: snapshot, ops: FakeOps())
+        await composer.waitForIdle()
+        XCTAssertTrue(drafts.createsBot)
+        XCTAssertEqual(drafts.draft.selectedMachineId, "cli-7", "a Happy Agent that answers")
+        XCTAssertNil(composer.choices.offline)
+
+        composer.selectMachine("rig-core")
+        await composer.waitForIdle()
+        XCTAssertTrue(drafts.createsBot)
+        XCTAssertEqual(drafts.draft.selectedMachineId, "rig-core", "picked: it stays")
+        XCTAssertEqual(composer.choices.offline, .computer(lastSeenAt: 1), "Happy Agent alone there, so the computer is offline")
+        // Another screen on the same draft agrees.
+        let other = NewSessionComposer(drafts: drafts, snapshot: snapshot, ops: FakeOps())
+        composer.update(snapshot: snapshot)
+        await other.waitForIdle()
+        await composer.waitForIdle()
+        XCTAssertEqual(drafts.draft.selectedMachineId, "rig-core", "and stays as the account changes")
+        withExtendedLifetime(other) {}
+
+        let offline = NewSessionDraftStore(settings: LocalSettings(storage: InMemoryKeyValueStore()))
+        offline.pickAgentType(.rig)
+        offline.renameMachineId("rig-core")
+        offline.setCreatesBot(true)
+        let none = NewSessionComposer(
+            drafts: offline,
+            snapshot: LegacyHomeSnapshot(machines: MachinesSnapshot(synced: true, machines: reportedMachines(serverOnline: false, todayAgentOnline: false)), sessions: []),
+            ops: FakeOps())
+        await none.waitForIdle()
+        XCTAssertTrue(offline.createsBot)
+        XCTAssertEqual(offline.draft.selectedMachineId, "rig-core", "nowhere answers: it stays")
+    }
+
+    /// Every Happy Agent looks offline when Task is picked (the presence
+    /// kept from before, live presence not in yet): the task goes to the
+    /// first that makes tasks. When another comes online it moves there;
+    /// one the person picked doesn't.
+    @MainActor
+    func testATaskPickedWhileEveryHappyAgentLooksOfflineMovesWhenOneAnswers() async throws {
+        let composer = await composer(NewSessionDraft(selectedMachineId: "old", agentType: .codex, pickedAgentType: .codex),
+                                      machines: reportedMachines(serverOnline: false, todayAgentOnline: false))
+        composer.selectKind(.task)
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsTask)
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "cli-7")
+        XCTAssertEqual(composer.choices.offline, .happyAgent)
+        composer.selectModel("claude:shared-model")
+        await composer.waitForIdle()
+
+        composer.update(snapshot: LegacyHomeSnapshot(machines: MachinesSnapshot(synced: true, machines: reportedMachines(serverOnline: true, todayAgentOnline: false)), sessions: []))
+        await composer.waitForIdle()
+        XCTAssertTrue(composer.drafts.createsTask)
+        XCTAssertEqual(composer.drafts.draft.selectedMachineId, "rig-core", "to the Happy Agent that came online")
+        XCTAssertNil(composer.choices.offline)
+        XCTAssertEqual(composer.drafts.draft.agentType, .rig)
+        XCTAssertEqual(composer.drafts.draft.modelMode, "claude:shared-model", "the model picked stays")
+        let task = try await composer.launchTaskPrepared(prompt: "Ship it", attachments: []).get()
+        XCTAssertEqual(task.machineId, "rig-core")
+
+        // The same, with today's computer picked by hand while all were
+        // offline: it stays.
+        let picked = await self.composer(NewSessionDraft(selectedMachineId: "old", agentType: .codex, pickedAgentType: .codex),
+                                         machines: reportedMachines(serverOnline: false, todayAgentOnline: false))
+        picked.selectKind(.task)
+        picked.selectMachine("cli-7")
+        await picked.waitForIdle()
+        picked.update(snapshot: LegacyHomeSnapshot(machines: MachinesSnapshot(synced: true, machines: reportedMachines(serverOnline: true, todayAgentOnline: false)), sessions: []))
+        await picked.waitForIdle()
+        XCTAssertTrue(picked.drafts.createsTask)
+        XCTAssertEqual(picked.drafts.draft.selectedMachineId, "cli-7", "picked: it stays")
+        XCTAssertEqual(picked.choices.offline, .happyAgent)
+    }
+
+    /// The picker's statuses: online, or last seen; Happy Agent's own for a
+    /// bot or a task.
+    func testMachineTargetsSayWhatAnswers() {
+        let choices = NewSessionChoices(.init(draft: NewSessionDraft(selectedMachineId: "cli-7", agentType: .claude, pickedAgentType: .claude), machines: reportedMachines(todayAgentOnline: false), sessions: []))
+        let today = try! XCTUnwrap(choices.machines.first { $0.id == "cli-7" })
+        XCTAssertTrue(today.isOnline(for: .session))
+        XCTAssertFalse(today.isOnline(for: .bot))
+        XCTAssertEqual(today.lastSeen(for: .bot), 1)
+        XCTAssertNil(today.lastSeen(for: .session))
+        let old = try! XCTUnwrap(choices.machines.first { $0.id == "old" })
+        XCTAssertFalse(old.makes(.bot))
+        XCTAssertEqual(old.lastSeen(for: .session), 1)
+        XCTAssertEqual(choices.machines.map(\.id), ["cli-7", "rig-core", "old"], "online first")
+        XCTAssertNil(choices.offline, "a session on Claude needs Happy CLI, which answers")
     }
 }

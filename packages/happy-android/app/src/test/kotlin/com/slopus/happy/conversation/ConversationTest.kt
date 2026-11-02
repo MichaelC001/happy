@@ -42,7 +42,7 @@ private class FakeAgent {
     /** The next file writes refused with this status. */
     var refuseFiles = 0
 
-    val request: AgentRequest = { method, path, body ->
+    val request: AgentRequest = { method, path, body, _ ->
         requests += Triple(method, path, body as? JsonObject)
         gate?.await()
         val route = path.substringBefore('?')
@@ -120,6 +120,58 @@ class ConversationTest {
     ).also { it.start() }
 
     private fun event(type: String, payload: String) = ConversationSignal.Event(type, Json.parseToJsonElement(payload).jsonObject)
+
+    @Test fun `covered conversation unsubscribes and catches up once on reveal`() = runTest {
+        val agent = FakeAgent()
+        val conversation = conversation(agent)
+        advanceUntilIdle()
+        assertEquals(1, signals.subscriptionCount.value)
+        conversation.setObserving(false)
+        advanceUntilIdle()
+        assertEquals(0, signals.subscriptionCount.value)
+        val before = agent.requests.size
+        signals.emit(ConversationSignal.Resync)
+        advanceUntilIdle()
+        assertEquals(before, agent.requests.size)
+        conversation.setObserving(true)
+        conversation.setObserving(true)
+        advanceUntilIdle()
+        assertEquals(1, signals.subscriptionCount.value)
+        assertEquals(2, agent.paths("GET").count { it.endsWith("/bootstrap") })
+        assertTrue(conversation.state.value.loaded)
+        assertFalse(conversation.state.value.syncing)
+    }
+
+    @Test fun `covering during bootstrap cancels the read and reveal retries it`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val agent = FakeAgent().apply { beforeBootstrap = { gate.await() } }
+        val conversation = conversation(agent)
+        testScheduler.runCurrent()
+        assertTrue(conversation.state.value.syncing)
+        conversation.setObserving(false)
+        testScheduler.runCurrent()
+        assertFalse(conversation.state.value.syncing)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertFalse(conversation.state.value.loaded)
+        conversation.setObserving(true)
+        advanceUntilIdle()
+        assertTrue(conversation.state.value.loaded)
+        assertEquals(2, agent.paths("GET").count { it.endsWith("/bootstrap") })
+    }
+
+    @Test fun `a covered conversation still saves accepted draft writes`() = runTest {
+        val agent = FakeAgent()
+        val conversation = conversation(agent)
+        advanceUntilIdle()
+        conversation.setObserving(false)
+        advanceUntilIdle()
+        conversation.setDraft("kept while covered")
+        advanceUntilIdle()
+        assertTrue(agent.paths("PUT").any { it.endsWith("/draft") })
+        assertEquals("kept while covered", conversation.state.value.draft)
+        assertEquals(0, signals.subscriptionCount.value)
+    }
 
     @Test fun `initial history and reconnect stay syncing until bootstrap completes or fails`() = runTest {
         val agent = FakeAgent()
@@ -436,7 +488,7 @@ class ConversationTest {
         val gate = CompletableDeferred<Unit>()
         val request = agent.request
         val chat = Conversation(
-            api = ConversationApi { method, path, body -> if (path == "/v0/tasks") gate.await(); request(method, path, body) },
+            api = ConversationApi { method, path, body, category -> if (path == "/v0/tasks") gate.await(); request(method, path, body, category) },
             signals = signals,
             scope = CoroutineScope(StandardTestDispatcher(testScheduler) + SupervisorJob().also { jobs += it }),
             agentId = "a9",
@@ -495,8 +547,8 @@ class ConversationTest {
             {"id":"b1","name":"Old","systemKey":"chief_of_staff","status":"archived","agent":{"id":"archived"}},
             {"id":"b2","name":"Renamed","systemKey":"chief_of_staff","status":"active","agent":{"id":"chief"}}
         ]}"""
-        assertEquals("chief", ConversationApi { _, _, _ -> FakeAgent.ok(bots) }.chiefOfStaffAgentId())
-        assertNull(ConversationApi { _, _, _ -> FakeAgent.ok("""{"bots":[]}""") }.chiefOfStaffAgentId())
+        assertEquals("chief", ConversationApi { _, _, _, _ -> FakeAgent.ok(bots) }.chiefOfStaffAgentId())
+        assertNull(ConversationApi { _, _, _, _ -> FakeAgent.ok("""{"bots":[]}""") }.chiefOfStaffAgentId())
     }
 
     @Test fun `a chat that could not be read reads again on retry`() = runTest {

@@ -3,25 +3,26 @@ import HappyWire
 import Tailcat
 
 extension TailcatHTTPTransport {
-    nonisolated static func safe(path: String, credential: String, headers: [String: String]) -> Bool {
+    static func safe(path: String, credential: String, headers: [String: String]) -> Bool {
         path.hasPrefix("/") && !path.contains("\r") && !path.contains("\n") && !path.contains(" ")
             && !credential.contains("\r") && !credential.contains("\n")
             && headers.allSatisfy { !$0.key.contains("\r") && !$0.key.contains("\n") && !$0.key.contains(":") && !$0.value.contains("\r") && !$0.value.contains("\n") }
     }
 
-    /// The head must arrive within 35 seconds; the body then has no deadline
-    /// and runs until the server ends it or the consumer stops iterating.
+    /// Over the `.realtime` client. The head must arrive within 35 seconds;
+    /// the body then has no deadline and runs until the server ends it or the
+    /// consumer stops iterating.
     public func stream(path: String, credential: String, headers: [String: String]) async throws -> HTTP1Stream {
         guard Self.safe(path: path, credential: credential, headers: headers) else { throw PairingError.invalidResponse }
-        let client = try await connection()
-        let port = port
-        let stream: TailcatConnection
-        do { stream = try await client.openTCP(port: port) } catch {
-            if Self.lostTunnel(error) { await reset(client) }
+        let lease = try await lease(.realtime)
+        let stream: any BrowserStream
+        do { stream = try await flow(lease, .realtime) } catch {
+            lease?.release()
+            if Self.lostTunnel(error) { await reset(lease) }
             throw error
         }
         do {
-            var head = "GET \(path) HTTP/1.1\r\nHost: server.tailcat:\(port)\r\nAuthorization: Bearer \(credential)\r\nConnection: close\r\nAccept: text/event-stream\r\n"
+            var head = "GET \(path) HTTP/1.1\r\nHost: \(authority)\r\nAuthorization: Bearer \(credential)\r\nConnection: close\r\nAccept: text/event-stream\r\n"
             for (name, value) in headers { head += "\(name): \(value)\r\n" }
             try await stream.write(Data((head + "\r\n").utf8))
             let (responseHead, rest) = try await withThrowingTaskGroup(of: (HTTP1Head, Data).self) { group in
@@ -65,7 +66,7 @@ extension TailcatHTTPTransport {
             await stream.close()
             // No answer on a stream the tunnel opened: the far side may
             // have restarted and forgotten it.
-            if Self.lostTunnel(error) { await reset(client) }
+            if Self.lostTunnel(error) { await reset(lease) }
             throw error
         }
     }

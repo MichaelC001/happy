@@ -3,9 +3,14 @@ import Tailcat
 
 /// Backpressured bytes: each read/write finishes before the next is issued.
 public protocol BrowserStream: Sendable {
+    var authority: String { get }
     func read(maximumBytes: Int) async throws -> Data
     func write(_ data: Data) async throws
     func close() async
+}
+
+extension BrowserStream {
+    public var authority: String { "server.tailcat" }
 }
 
 extension TailcatConnection: BrowserStream {}
@@ -15,21 +20,43 @@ extension AgentTransport {
 }
 
 extension TailcatHTTPTransport {
+    /// Over a `.file` client: a page's bytes are a file's, and its many
+    /// short flows never crowd the event stream's or the queries' stack.
     public func browserConnection() async throws -> any BrowserStream {
-        try await connection().openTCP(port: port)
+        let lease = try await lease(.file)
+        do { return try await flow(lease, .file) } catch {
+            lease?.release()
+            throw error
+        }
     }
 }
 
 extension AgentClient {
+    /// The computer's recorder, when the client's transport counts.
+    var metrics: ConnectionMetrics? { (transport as? MeteredAgentTransport)?.metrics ?? (transport as? AgentEndpointTransport)?.metrics }
+
     /// Authentication is injected here and never returned to the web process.
     public func browserTunnel(workspaceID: String, target: BrowserPolicy.Authority) async throws -> any BrowserStream {
         guard BrowserPolicy.validID(workspaceID) else { throw BrowserError.forbidden }
-        let stream = try await transport.browserConnection()
+        let start = ConnectionMetrics.uptime()
+        let stream: any BrowserStream
+        do { stream = try await transport.browserConnection() } catch {
+            if !(error is CancellationError) { metrics?.request(.browser, status: nil, duration: ConnectionMetrics.uptime() - start) }
+            // No way to the computer at all is the link failing (502), as
+            // a failure inside the tunnel is, not the proxy's own (500).
+            if error is CancellationError || error is BrowserError { throw error }
+            throw BrowserProxyFailure.upstream(error)
+        }
         do {
             try await Self.connect(stream, target: "/v0/workspaces/\(workspaceID)/proxy", credential: token)
             try await Self.connect(stream, target: target.text, credential: nil)
+            metrics?.request(.browser, status: 200, duration: ConnectionMetrics.uptime() - start)
             return stream
         } catch {
+            if !(error is CancellationError) {
+                let status: Int? = if case BrowserError.upstream(let code) = error { code } else { nil }
+                metrics?.request(.browser, status: status, duration: ConnectionMetrics.uptime() - start)
+            }
             await stream.close()
             if error is CancellationError { throw error }
             if case BrowserError.upstream = error { throw error }
@@ -38,14 +65,16 @@ extension AgentClient {
     }
 
     public func artifactConnection(head: BrowserHTTPHead, artifactID: String, version: Int) async throws -> any BrowserStream {
-        let request = try head.artifactRequest(artifactID: artifactID, version: version, credential: token)
         let stream = try await transport.browserConnection()
-        do { try await stream.write(request.data); return stream }
+        do {
+            let request = try head.artifactRequest(artifactID: artifactID, version: version, credential: token, authority: stream.authority)
+            try await stream.write(request.data); return stream
+        }
         catch { await stream.close(); throw error }
     }
 
     private static func connect(_ stream: any BrowserStream, target: String, credential: String?) async throws {
-        var head = "CONNECT \(target) HTTP/1.1\r\nHost: server.tailcat\r\n"
+        var head = "CONNECT \(target) HTTP/1.1\r\nHost: \(credential == nil ? target : stream.authority)\r\n"
         if let credential { head += "Authorization: Bearer \(credential)\r\n" }
         try await stream.write(Data((head + "\r\n").utf8))
         let (response, rest) = try await BrowserRelay.head(stream)
