@@ -1,5 +1,8 @@
 package com.slopus.happy.ui.conversation
 
+import com.slopus.happy.connection.LinkState
+import com.slopus.happy.connection.networkPath
+import com.slopus.happy.ui.chat.rememberShownLinkState
 import com.slopus.happy.ui.page
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -265,6 +268,14 @@ internal fun SavedStateHandle.takePrefill(prefill: String?): String? {
 
 private const val PREFILLED = "prefilled"
 
+/** An agent connection's link as its chats' headers say it: a computer that didn't answer, or a pairing to redo, is offline. */
+internal fun AgentLinkStatus?.linkState(syncing: Boolean, network: Boolean): LinkState = when {
+    !network -> LinkState.WaitingForNetwork
+    this == null || this == AgentLinkStatus.Connected -> if (syncing) LinkState.Syncing else LinkState.Online
+    this == AgentLinkStatus.Connecting -> LinkState.Connecting
+    else -> LinkState.Offline
+}
+
 @Composable
 internal fun linkStatusText(status: AgentLinkStatus?, syncing: Boolean = false): String? = when (status) {
     null, AgentLinkStatus.Connected -> if (syncing) stringResource(R.string.status_syncing) else null
@@ -272,6 +283,7 @@ internal fun linkStatusText(status: AgentLinkStatus?, syncing: Boolean = false):
     AgentLinkStatus.Offline -> stringResource(R.string.status_offline)
     AgentLinkStatus.Revoked -> stringResource(R.string.conversation_revoked)
     AgentLinkStatus.UpdateRequired -> stringResource(R.string.conversation_update_required)
+    AgentLinkStatus.SignInRequired -> stringResource(R.string.team_server_error_sign_in_required)
 }
 
 @Composable
@@ -300,14 +312,19 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
     DisposableEffect(conversation) { onDispose { conversation.setVisible(false) } }
     // A link in this chat browses through this chat's agent's workspace (iOS's openBrowser(session:agentID:)).
     val context = LocalContext.current
+    val network by remember(context) { context.networkPath() }.collectAsStateWithLifecycle(initialValue = true)
+    val link = rememberShownLinkState(status.linkState(syncing, network))
     val computer = computerName(graph, route.connectionId)
     val links = remember(nav, computer, conversation.agentId) {
         LinkOpener.agent(context, computer) { url -> nav.navigate(BrowserRoute(route.connectionId, url, conversation.agentId)) }
     }
-    ProvideLinks(links) {
+    // A command's artwork is read and kept as the agent's other pictures are.
+    ProvideLinks(links) { androidx.compose.runtime.CompositionLocalProvider(com.slopus.happy.ui.connection.LocalAgentPictures provides session.pictures) {
         ConversationScreen(
             state = state,
-            connection = linkStatusText(status, syncing),
+            // Offline says why in words of its own; the link on its way spins (iOS 7aee3a9b8).
+            connection = if (link == LinkState.Offline) linkStatusText(status) ?: stringResource(R.string.status_offline) else null,
+            link = link,
             bubbleColor = settings.userMessageBubbleColor,
             actions = remember(conversation, nav) {
                 ConversationScreenActions(
@@ -337,6 +354,9 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
                     },
                     onVisible = conversation::setVisible,
                     onChoiceChange = holder::setChoice,
+                    onCommand = conversation::runCommand,
+                    onToggleTurn = conversation::toggleTurn,
+                    onToggleMessage = conversation::toggleMessage,
                     // The values typed into a secret go in this one request to the computer and nowhere else.
                     secrets = SecretRequestActions(
                         secrets = { ConversationApi(session.conversationRequest()).secrets() },
@@ -345,7 +365,7 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
                 )
             },
         )
-    }
+    } }
     // New work that could not be made says why; nothing was sent, and the composer keeps it all.
     val message = state.alert?.let { problemText(it) } ?: state.workFailure?.let { failure ->
         stringResource(if (failure.kind == WorkKind.Bot) R.string.new_work_bot_failed else R.string.new_work_task_failed, problemText(failure.reason))

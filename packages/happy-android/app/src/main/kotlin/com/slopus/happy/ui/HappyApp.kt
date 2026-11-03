@@ -47,6 +47,12 @@ import com.slopus.happy.ui.connection.AgentHome
 import com.slopus.happy.ui.connection.AgentSurfaceRoute
 import com.slopus.happy.ui.connect.LocalAddFlow
 import com.slopus.happy.ui.connect.LocalAgentPairing
+import com.slopus.happy.ui.connection.LocalServerSignIn
+import com.slopus.happy.ui.connection.LocalHappyLinks
+import com.slopus.happy.ui.connection.rememberHappyLinks
+import com.slopus.happy.ui.connection.signInToServer
+import com.slopus.happy.ui.connection.signInToServerAgain
+import com.slopus.happy.connection.ServerInvite
 import com.slopus.happy.ui.connect.rememberAddFlow
 import com.slopus.happy.ui.tablet.TabletShell
 import com.slopus.happy.ui.connect.connectRoutes
@@ -63,6 +69,8 @@ import com.slopus.happy.ui.conversation.composeConversation
 import com.slopus.happy.ui.conversation.conversationRoutes
 import com.slopus.happy.ui.conversation.openConversation
 import com.slopus.happy.ui.session.SessionInfoRoute
+import com.slopus.happy.ui.start.InstallDesktop
+import com.slopus.happy.ui.start.InstallDesktopRoute
 import com.slopus.happy.ui.start.Start
 import com.slopus.happy.ui.server.ServerScreen
 import com.slopus.happy.ui.settings.LocalizedContent
@@ -123,8 +131,11 @@ fun HappyApp(graph: AppGraph, onNavigationReady: (NavHostController) -> Unit = {
             val openSession = { id: String -> nav.navigate(SessionRoute(id)) }
             val troubleshoot = { nav.navigate(TroubleshootRoute) }
             val connectAgent = remember(nav) { { code: String -> nav.connectAgent(graph, code) } }
+            val signInToServer = remember(nav) { { invite: ServerInvite -> nav.signInToServer(graph, invite) } }
+            // Happy URLs (edge SSO §7): external ones only on their own installation's connection.
+            val happyLinks = rememberHappyLinks(graph, nav, agent)
             // Every scanner, signed in or out, sends happy://direct? codes here.
-            CompositionLocalProvider(LocalAgentPairing provides connectAgent) {
+            CompositionLocalProvider(LocalAgentPairing provides connectAgent, LocalServerSignIn provides signInToServer, LocalHappyLinks provides happyLinks) {
               // Add (the first screen's Connect, the account menu's Add): scan, then route the code.
               val add = rememberAddFlow(graph)
               CompositionLocalProvider(LocalAddFlow provides add) {
@@ -136,6 +147,7 @@ fun HappyApp(graph: AppGraph, onNavigationReady: (NavHostController) -> Unit = {
                     val motion = rememberNavMotion()
                     RetainedNavHost(nav, start, motion, modifier = Modifier.backdrop(nav)) {
                         page<StartRoute> { Start(graph, nav, add) }
+                        page<InstallDesktopRoute> { InstallDesktop(graph, nav, add) }
                         page<HomeRoute> {
                         // A switch made in Settings changes the covered home too.
                         key(open.key) {
@@ -149,6 +161,7 @@ fun HappyApp(graph: AppGraph, onNavigationReady: (NavHostController) -> Unit = {
                                     onSettingsRow = { row -> nav.openAgentSettingsRow(account.id, row) },
                                     onOpenArtifacts = { nav.navigate(AgentArtifactsRoute(account.id)) },
                                     onOpenSurface = { nav.navigate(AgentSurfaceRoute(account.id, it.id, it.type, it.name)) },
+                                    onSignIn = { server -> nav.signInToServerAgain(graph, server, replacing = account.id) },
                                 )
                                 is OpenAccount.Happy -> LegacyHome(graph, nav, onOpenSession = openSession, onTroubleshoot = troubleshoot)
                                 OpenAccount.None -> Unit
@@ -173,7 +186,7 @@ fun HappyApp(graph: AppGraph, onNavigationReady: (NavHostController) -> Unit = {
                     }
                 }
                 }
-                DeepLinkEffect(nav, signedIn = signedIn, onOpenSession = { id -> nav.navigate(SessionRoute(id)) })
+                DeepLinkEffect(nav, signedIn = signedIn, onOpenSession = { id -> nav.navigate(SessionRoute(id)) }, openConnection = agent, onHappyLink = happyLinks::take)
               }
             }
             PushRegistrationEffect(graph)

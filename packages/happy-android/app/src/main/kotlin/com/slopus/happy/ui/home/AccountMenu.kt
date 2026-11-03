@@ -100,7 +100,8 @@ fun rememberAccountMenu(graph: AppGraph): AccountMenu {
                     thumbhash = agent.thumbhash,
                     agent = true,
                     active = registry.activeId == agent.id,
-                    attention = agent.revoked,
+                    attention = agent.revoked || agent.signInRequired,
+                    detail = agent.server?.removePrefix("https://"),
                 )
             },
         )

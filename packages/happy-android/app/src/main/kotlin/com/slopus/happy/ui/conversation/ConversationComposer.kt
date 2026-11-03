@@ -51,6 +51,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
@@ -76,8 +77,18 @@ import com.slopus.happy.attachments.AttachAccepts
 import com.slopus.happy.ui.attach.AttachSheet
 import com.slopus.happy.ui.attach.AttachedFileTile
 import com.slopus.happy.ui.attachments.rememberComposerImages
+import com.slopus.happy.ui.attachments.PictureStripFrame
+import com.slopus.happy.ui.attach.attachButton
+import com.slopus.happy.ui.attach.rememberAttachButton
+import com.slopus.happy.ui.attachments.PictureStripState
+import com.slopus.happy.ui.attachments.PictureStripVisibility
+import com.slopus.happy.ui.attachments.pictureMotion
+import com.slopus.happy.ui.attachments.rememberPictureStrip
 import com.slopus.happy.ui.attachments.ImagePicker
 import com.slopus.happy.ui.chat.PrimaryAction
+import com.slopus.happy.ui.chat.PrimaryGlyph
+import com.slopus.happy.ui.chat.rememberShake
+import com.slopus.happy.ui.chat.shake
 import com.slopus.happy.ui.components.Alert
 import com.slopus.happy.ui.components.RecomposeProbe
 import com.slopus.happy.ui.components.AlertButton
@@ -166,19 +177,31 @@ internal fun ConversationComposer(
     focusAsks: Int = 0,
     /** Where a sent message's words fly from ([SendFlight]). */
     flight: SendFlight? = null,
+    /** Shares the caret with the command list over the composer; it sees hardware keys first. */
+    cursor: com.slopus.happy.ui.autocomplete.ComposerCursor? = null,
 ) {
     RecomposeProbe.mark(ConversationScreenTags.PROBE_COMPOSER)
     val colors = HappyTheme.colors
     val attached = pictures?.images.orEmpty()
+    val strip = rememberPictureStrip(attached)
     val hasContent = text.isNotBlank() || attached.isNotEmpty()
     val primary = primaryActionOf(hasContent, state)
+    // A stop that failed shakes the button (desktop Shaker.tsx `shakerRef`, iOS `shakePrimary`).
+    val stopShake = rememberShake()
+    val wasStopping = remember { booleanArrayOf(false) }
+    LaunchedEffect(state.stopping, state.alert) {
+        if (wasStopping[0] && !state.stopping && state.alert != null) stopShake.shake()
+        wasStopping[0] = state.stopping
+    }
     // The field's own words and selection; text set from outside puts the cursor at its end, or where focus asks.
     // Saved, so a rotation or a return from process death keeps the caret where it was.
     val (field, typed) = rememberHoistedTextFieldState(text, onTextChange)
     val focus = remember { FocusRequester() }
+    LaunchedEffect(field, cursor) { androidx.compose.runtime.snapshotFlow { field.selection }.collect { cursor?.selection = it } }
     val keyboard = LocalSoftwareKeyboardController.current
     var focused by remember { mutableStateOf(false) }
     var attaching by rememberSaveable { mutableStateOf(false) }
+    val plus = rememberAttachButton { Icon(MaterialSymbols.Add, contentDescription = null, tint = colors.text) }
     var menu by remember { mutableStateOf(false) }
     var picker by rememberSaveable { mutableStateOf<ModePicker?>(null) }
     var moreCenterY by remember { mutableIntStateOf(0) }
@@ -258,12 +281,13 @@ internal fun ConversationComposer(
                 .animateContentSize(if (reduceMotion || compact) snap() else spring(stiffness = 700f))
                 .testTag(ConversationComposerTags.PILL),
         ) {
-            if (attached.isNotEmpty() && !compact) {
-                ComposerPictures(attached, onRemove = { pictures?.remove(it) })
+            PictureStripVisibility(attached.isNotEmpty() && !compact, immediate = compact) {
+                ComposerPictures(attached, strip, onRemove = { pictures?.remove(it) })
             }
             ComposerLayout(open, compact, if (compact || !open) minimumCompact else minimumActions) {
                 Box(Modifier.layoutId(Slot.MORE)) {
                     IconButton(onClick = { picker = null; moreCenterY = anchor(0); if (showCount) menu = true else attaching = true }, modifier = Modifier.testTag(ConversationComposerTags.MORE)
+                        .attachButton(plus)
                         .semantics { contentDescription = moreLabel }
                         .onPlaced { anchors[0] = it }) {
                         BadgedBox(badge = {
@@ -286,7 +310,7 @@ internal fun ConversationComposer(
                         Box(Modifier.padding(vertical = ConversationComposerSpec.fieldVertical)) {
                             if (field.text.isEmpty()) {
                                 Text(
-                                    stringResource(R.string.common_message),
+                                    stringResource(R.string.session_input_placeholder),
                                     style = MaterialTheme.typography.bodyLarge,
                                     color = colors.textSecondary,
                                     maxLines = 1,
@@ -299,6 +323,7 @@ internal fun ConversationComposer(
                         .layoutId(Slot.FIELD)
                         .focusRequester(focus)
                         .onFocusChanged { focused = it.isFocused }
+                        .onPreviewKeyEvent { cursor?.onKey?.invoke(it) == true }
                         .onPlaced { fieldAt[0] = it }
                         .testTag(ConversationComposerTags.INPUT),
                 )
@@ -310,9 +335,8 @@ internal fun ConversationComposer(
                         modifier = Modifier.layoutId(Slot.LABEL).onPlaced { anchors[1] = it },
                     )
                 }
-                val sendLabel = stringResource(if (primary == PrimaryAction.Stop) R.string.conversation_stop else R.string.conversation_send)
                 val live = primary == PrimaryAction.Send || primary == PrimaryAction.Stop
-                Box(Modifier.layoutId(Slot.PRIMARY).padding(end = 6.dp)) {
+                Box(Modifier.layoutId(Slot.PRIMARY).padding(end = 6.dp).shake(stopShake)) {
                     FilledIconButton(
                         onClick = {
                             when (primary) {
@@ -330,14 +354,18 @@ internal fun ConversationComposer(
                         ),
                         modifier = Modifier.size(ConversationComposerSpec.primary).testTag(ConversationComposerTags.PRIMARY),
                     ) {
-                        if (state.stopping || state.newWork?.making == true) {
-                            CircularProgressIndicator(Modifier.size(16.dp), color = colors.surface, strokeWidth = 2.dp)
-                        } else {
-                            Icon(
-                                if (primary == PrimaryAction.Stop) MaterialSymbols.Stop else MaterialSymbols.ArrowUpward,
-                                sendLabel,
-                                Modifier.size(20.dp),
-                            )
+                        // Send and Stop are one button changing its glyph (iOS AgentInputPrimaryGlyphMotion).
+                        val glyph = when {
+                            state.stopping || state.newWork?.making == true -> PrimaryGlyphKind.Busy
+                            primary == PrimaryAction.Stop -> PrimaryGlyphKind.Stop
+                            else -> PrimaryGlyphKind.Send
+                        }
+                        PrimaryGlyph(glyph) { shown ->
+                            when (shown) {
+                                PrimaryGlyphKind.Busy -> CircularProgressIndicator(Modifier.size(16.dp), color = colors.surface, strokeWidth = 2.dp)
+                                PrimaryGlyphKind.Stop -> Icon(MaterialSymbols.Stop, stringResource(R.string.conversation_stop), Modifier.size(20.dp))
+                                PrimaryGlyphKind.Send -> Icon(MaterialSymbols.ArrowUpward, stringResource(R.string.conversation_send), Modifier.size(20.dp))
+                            }
                         }
                     }
                 }
@@ -353,7 +381,7 @@ internal fun ConversationComposer(
             modifier = Modifier.testTag(ConversationComposerTags.MENU),
         ) {
             LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
-                item { ComposerPictures(attached, onRemove = { pictures?.remove(it) }) }
+                item { ComposerPictures(attached, strip, onRemove = { pictures?.remove(it) }) }
                 item {
                     HappyMenuItem(
                         label = stringResource(R.string.attach_title),
@@ -372,6 +400,7 @@ internal fun ConversationComposer(
             onSend = { staged -> submit(staged) },
             onClosed = { attaching = false },
             room = AttachAccepts.Agent.maxItems - attached.size,
+            button = plus,
         )
         ConversationModePicker(picker, onClose = { picker = null }, catalog = state.catalog, mode = state.mode, onModeChange = onModeChange, anchorCenterY = modelCenterY)
         // The viewport subcomposes its content during measurement. Request
@@ -453,26 +482,35 @@ private fun ComposerViewport(minimumOpen: Dp, minimumCompact: Dp, modifier: Modi
 }
 
 @Composable
-private fun ComposerPictures(images: List<AttachmentPreview>, onRemove: (String) -> Unit) {
-    LazyRow(
-        contentPadding = PaddingValues(horizontal = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.padding(top = 12.dp).testTag(ConversationComposerTags.PICTURES),
-    ) {
-        items(images, key = { it.id }) { picture ->
-            Box(Modifier.size(64.dp)) {
-                if (picture.mimeType.startsWith("image/")) {
-                    RemoteImage(picture.uri, contentDescription = picture.name, contentScale = ContentScale.Crop, modifier = Modifier.size(64.dp).clip(MaterialTheme.shapes.medium))
-                } else {
-                    AttachedFileTile(picture.name, Modifier.size(64.dp).clip(MaterialTheme.shapes.medium))
-                }
-                FilledTonalIconButton(
-                    onClick = { onRemove(picture.id) },
-                    modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).size(24.dp).testTag(ConversationComposerTags.PICTURE_REMOVE),
-                ) {
-                    Icon(MaterialSymbols.Close, stringResource(R.string.conversation_remove_picture), Modifier.size(16.dp))
-                }
-            }
+private fun ComposerPictures(images: List<AttachmentPreview>, strip: PictureStripState, onRemove: (String) -> Unit) {
+    PictureStripFrame(strip, Modifier.fillMaxWidth().padding(top = 12.dp).testTag(ConversationComposerTags.PICTURES), thumb = { ComposerPicture(it, onRemove = {}) }) {
+        // Full width, so a picture sliding into a place freed is never cut at the row's end.
+        LazyRow(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(images, key = { it.id }) { picture -> ComposerPicture(picture, onRemove, pictureMotion(picture.id, strip)) }
         }
     }
 }
+
+@Composable
+private fun ComposerPicture(picture: AttachmentPreview, onRemove: (String) -> Unit, modifier: Modifier = Modifier) {
+    Box(modifier.size(64.dp)) {
+        if (picture.mimeType.startsWith("image/")) {
+            RemoteImage(picture.uri, contentDescription = picture.name, contentScale = ContentScale.Crop, modifier = Modifier.size(64.dp).clip(MaterialTheme.shapes.medium))
+        } else {
+            AttachedFileTile(picture.name, Modifier.size(64.dp).clip(MaterialTheme.shapes.medium))
+        }
+        FilledTonalIconButton(
+            onClick = { onRemove(picture.id) },
+            modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).size(24.dp).testTag(ConversationComposerTags.PICTURE_REMOVE),
+        ) {
+            Icon(MaterialSymbols.Close, stringResource(R.string.conversation_remove_picture), Modifier.size(16.dp))
+        }
+    }
+}
+
+/** What the primary button draws, morphing from one to the next ([PrimaryGlyph]). */
+private enum class PrimaryGlyphKind { Send, Stop, Busy }

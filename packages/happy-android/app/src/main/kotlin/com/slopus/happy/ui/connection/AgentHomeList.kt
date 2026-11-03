@@ -90,6 +90,7 @@ object AgentHomeTags {
     const val EMPTY = "agentHome.empty"
     const val OFFLINE = "agentHome.offline"
     const val BANNER = "agentHome.banner"
+    const val BANNER_ACTION = "agentHome.bannerAction"
     const val SEARCH = "agentHome.search"
     const val SETTINGS = "agentHome.settings"
     const val COMPOSE = "agentHome.compose"
@@ -241,7 +242,7 @@ internal fun FolderMarkView(mark: FolderMark, size: Dp) {
 
 /** A picture the agent serves, read once ([AgentPictures]), a rounded square over its ThumbHash. */
 @Composable
-private fun AgentPicture(path: String, thumbhash: String?, size: Dp, radius: Dp = AgentHomeSpec.tileRadius) {
+internal fun AgentPicture(path: String, thumbhash: String?, size: Dp, radius: Dp = AgentHomeSpec.tileRadius) {
     val pictures = LocalAgentPictures.current
     val bytes by produceState(pictures?.kept(path, thumbhash), pictures, path, thumbhash) {
         value = pictures?.kept(path, thumbhash) ?: try {

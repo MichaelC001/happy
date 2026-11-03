@@ -41,6 +41,11 @@ private class FakeAgent {
     val written = LinkedHashMap<String, ByteArray>()
     /** The next file writes refused with this status. */
     var refuseFiles = 0
+    /** A question's answer is refused with this status. */
+    var answerStatus: Int? = null
+    /** A slash command's invocation answers this status; accepted, with [commandsAfter] as the catalog. */
+    var commandStatus = 202
+    var commandsAfter = """[{"name":"compact","hasArguments":false,"description":"Summarize.","kind":"compaction"}]"""
 
     val request: AgentRequest = { method, path, body, _ ->
         requests += Triple(method, path, body as? JsonObject)
@@ -68,6 +73,12 @@ private class FakeAgent {
             route.endsWith("/messages") -> ok(page)
             route.endsWith("/send") && failSends > 0 -> { failSends--; TransportResponse(503, body = """{"error":"busy"}""".toByteArray()) }
             route.endsWith("/send") -> TransportResponse(sendStatus, body = """{"error":"Unknown model.","code":"invalid_request"}""".toByteArray())
+            route.endsWith("/answer") && answerStatus != null -> TransportResponse(answerStatus!!, body = """{"error":"busy"}""".toByteArray())
+            method == "POST" && "/slash-commands/" in route -> if (commandStatus == 202) {
+                TransportResponse(202, body = """{"agent":{"id":"a1","workspaceId":"w1","status":"working","title":"Fix it"},"profiles":[],"slashCommands":$commandsAfter,"command":{"name":"compact","hasArguments":false,"description":"Summarize."},"cursor":"c1"}""".toByteArray())
+            } else {
+                TransportResponse(commandStatus, body = """{"error":"The daemon's own words.","code":"conflict"}""".toByteArray())
+            }
             route == "/v0/config" -> ok(CONFIG)
             route.endsWith("/draft") -> ok("""{"draft":${(body as JsonObject).let { """{"value":${it["draft"]},"updatedAt":${it["updatedAt"]}}""" }}}""")
             else -> ok("{}")
@@ -213,7 +224,26 @@ class ConversationTest {
         // Newest first.
         assertEquals(listOf("m3:user", "m2:2", "m2:1", "m2:0", "m1:user"), state.rows.map { it.key })
         assertEquals(Delivery.Pending, (state.rows[0] as ConversationRow.User).delivery)
-        assertEquals("ls", (state.rows[2] as ConversationRow.Tool).detail)
+        assertEquals(Presentation.Command("ls", null), (state.rows[2] as ConversationRow.Tool).tool.presentation)
+    }
+
+    @Test fun `a person's message opens whole and is cut back by its key, pending or in a run`() = runTest {
+        val agent = FakeAgent()
+        agent.page = """{"runs":[{"id":"r1","status":"completed","messages":[
+            {"id":"m1","role":"user","createdAt":1,"content":[{"type":"text","text":"Hi"}],"metadata":{}}
+        ]}],"hasMore":false}"""
+        agent.bootstrap = agent.bootstrap.replace("\"pending\":[]", """"pending":[{"id":"m3","role":"user","status":"pending","createdAt":3,"content":[{"type":"text","text":"Next"}],"metadata":{}}]""")
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        fun opened() = chat.state.value.rows.filterIsInstance<ConversationRow.User>().filter { it.opened }.map { it.key }
+        assertEquals(emptyList<String>(), opened())
+        chat.toggleMessage("m1:user")
+        chat.toggleMessage("m3:user")
+        advanceUntilIdle()
+        assertEquals(listOf("m3:user", "m1:user"), opened())
+        chat.toggleMessage("m1:user")
+        advanceUntilIdle()
+        assertEquals(listOf("m3:user"), opened())
     }
 
     @Test fun `home's name is the title before anything is read, and the computer's title wins once it is`() = runTest {
@@ -608,6 +638,54 @@ class ConversationTest {
         assertEquals(Json.parseToJsonElement("""{"p1":["Postgres"]}"""), answer.third!!["answers"])
     }
 
+    @Test fun `a question waits at the end and settles answered in its turn`() = runTest {
+        val agent = FakeAgent()
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        val args = """{"questions":[{"id":"p1","header":"DB","question":"Which?","multiSelect":false,"options":[{"label":"Postgres"},{"label":"SQLite"}]}]}"""
+        signals.emit(event("run.started", """{"agentId":"a1","run":{"id":"r1","status":"running","startedAt":5},"acceptedMessageIds":[]}"""))
+        signals.emit(event("message.created", """{"agentId":"a1","runId":"r1","message":{"id":"m","role":"agent","createdAt":5,"content":[{"type":"text","text":"Picking storage."},{"type":"tool_call","id":"q1","name":"request_user_input","status":"running","arguments":$args}],"metadata":{}}}"""))
+        advanceUntilIdle()
+        // Asked, not yet read as a question: the call's row is left out rather than shown as a tool.
+        assertTrue(chat.state.value.rows.none { it is ConversationRow.Tool })
+        signals.emit(event("question.created", """{"question":{"id":"q1","agentId":"a1","status":"pending","questions":[{"id":"p1","header":"DB","question":"Which?","multiSelect":false,"options":[{"label":"Postgres"},{"label":"SQLite"}]}]}}"""))
+        advanceUntilIdle()
+        // Waiting: pinned to the end, under the work (rows are newest first).
+        val waiting = chat.state.value.rows.first() as ConversationRow.Ask
+        assertEquals(AskPhase.Pending, waiting.phase)
+        assertEquals(1, chat.state.value.rows.count { it is ConversationRow.Ask })
+        chat.answer("q1", mapOf("p1" to listOf("Postgres")))
+        advanceUntilIdle()
+        // Answered: it stays where it was asked, under the words before it, saying what was answered.
+        val rows = chat.state.value.rows.asReversed()
+        val settled = rows.single { it is ConversationRow.Ask } as ConversationRow.Ask
+        assertEquals(AskPhase.Answered, settled.phase)
+        assertEquals(mapOf("p1" to listOf("Postgres")), settled.question.answers)
+        assertEquals(waiting.key, settled.key)
+        assertEquals(rows.indexOfFirst { it is ConversationRow.Text } + 1, rows.indexOf(settled))
+        // History read again says the same from the call's result.
+        val output = "Request q1:\nWhich?\nStatus: Answered\nAnswer:\nSelected: Postgres"
+        signals.emit(event("message.updated", """{"agentId":"a1","runId":"r1","message":{"id":"m","role":"agent","createdAt":5,"content":[{"type":"text","text":"Picking storage."},{"type":"tool_call","id":"q1","name":"request_user_input","status":"completed","arguments":$args,"result":{"output":${Json.encodeToString(kotlinx.serialization.json.JsonPrimitive(output))}}}],"metadata":{}}}"""))
+        advanceUntilIdle()
+        val read = chat.state.value.rows.single { it is ConversationRow.Ask } as ConversationRow.Ask
+        assertEquals(AskPhase.Answered, read.phase)
+        assertEquals(listOf("Postgres"), read.question.answers?.get("p1"))
+    }
+
+    @Test fun `a refused answer says why and may go again`() = runTest {
+        val agent = FakeAgent()
+        agent.answerStatus = 500
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        signals.emit(event("question.created", """{"question":{"id":"q1","agentId":"a1","status":"pending","questions":[{"id":"p1","question":"Which?","options":[{"label":"Postgres"}]}]}}"""))
+        advanceUntilIdle()
+        runCatching { chat.answer("q1", mapOf("p1" to listOf("Postgres"))) }
+        advanceUntilIdle()
+        val ask = chat.state.value.rows.first() as ConversationRow.Ask
+        assertTrue(ask.phase is AskPhase.Failed)
+        assertEquals("q1", chat.state.value.question?.id)
+    }
+
     @Test fun `working line follows the agent's status`() = runTest {
         val agent = FakeAgent()
         val chat = conversation(agent)
@@ -941,6 +1019,200 @@ class ConversationTest {
         )
         assertEquals(kept, KeptConversation.parse(Json.parseToJsonElement(kept.json().toString()).jsonObject))
     }
+
+    private val catalog = """[{"name":"compact","hasArguments":false,"description":"Summarize older messages to free context space.","kind":"compaction"},""" +
+        """{"name":"code-review","hasArguments":true,"description":"Review the current changes.","kind":"skill","image":{"thumbhash":"1QcSHQRnh493V4dIh4eXh1h4kJUI"}}]"""
+
+    private fun FakeAgent.withCommands() = apply {
+        bootstrap = """{"agent":{"id":"a1","workspaceId":"w1","status":"idle","title":"Fix it"},"mode":${FakeAgent.MODE},"draft":{"value":null,"updatedAt":null},"pending":[],"slashCommands":$catalog}"""
+    }
+
+    @Test fun `the agent's slash commands come with its bootstrap and an update replaces them whole`() = runTest {
+        val chat = conversation(FakeAgent().withCommands())
+        advanceUntilIdle()
+        assertEquals(
+            listOf(
+                SlashCommand("compact", false, "Summarize older messages to free context space.", "compaction"),
+                SlashCommand("code-review", true, "Review the current changes.", "skill", image = true, thumbhash = "1QcSHQRnh493V4dIh4eXh1h4kJUI"),
+            ),
+            chat.state.value.commands,
+        )
+        signals.emit(event("agent.slash_commands.updated", """{"agentId":"a1","slashCommands":[{"name":"deploy","hasArguments":true,"description":"Ship it."}]}"""))
+        advanceUntilIdle()
+        assertEquals(listOf(SlashCommand("deploy", true, "Ship it.")), chat.state.value.commands)
+        // An update that carries no list leaves what is known.
+        signals.emit(event("agent.slash_commands.updated", """{"agentId":"a1"}"""))
+        advanceUntilIdle()
+        assertEquals(listOf("deploy"), chat.state.value.commands.map { it.name })
+    }
+
+    @Test fun `a command runs on its module under the composer's mode and is never a message`() = runTest {
+        val agent = FakeAgent().withCommands()
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        chat.setDraft("/compact")
+        assertTrue(chat.runCommand("compact", "ignored, it takes none"))
+        advanceUntilIdle()
+        val (method, path, body) = agent.requests.single { "/slash-commands/" in it.second }
+        assertEquals("POST", method)
+        assertEquals("/v0/agents/a1/slash-commands/compact", path)
+        assertEquals(setOf("mode", "mutationId"), body!!.keys)
+        assertEquals(Mode.parse(Json.parseToJsonElement(FakeAgent.MODE)), Mode.parse(body["mode"]))
+        assertTrue(agent.paths("POST").none { it.endsWith("/send") })
+        assertEquals("", chat.state.value.draft)
+        // The answer's catalog replaces the one known.
+        assertEquals(listOf("compact"), chat.state.value.commands.map { it.name })
+        assertNull(chat.state.value.alert)
+    }
+
+    @Test fun `a command's arguments go as one string when it takes them`() = runTest {
+        val agent = FakeAgent().apply {
+            bootstrap = """{"agent":{"id":"a1","workspaceId":"w1","status":"idle"},"mode":${FakeAgent.MODE},"pending":[],"slashCommands":[{"name":"deploy now","hasArguments":true,"description":"Ship."}]}"""
+        }
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        chat.runCommand("deploy now", "  to staging, quietly ")
+        advanceUntilIdle()
+        val (_, path, body) = agent.requests.single { "/slash-commands/" in it.second }
+        assertEquals("/v0/agents/a1/slash-commands/deploy%20now", path)
+        assertEquals("to staging, quietly", body!!["arguments"]!!.toString().trim('"'))
+    }
+
+    @Test fun `a command gone or busy says so in the phone's words`() = runTest {
+        val agent = FakeAgent().withCommands()
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        agent.commandStatus = 404
+        chat.runCommand("compact", null)
+        advanceUntilIdle()
+        assertEquals(Problem.CommandGone("compact"), chat.state.value.alert)
+        chat.dismissAlert()
+        agent.commandStatus = 409
+        chat.runCommand("compact", null)
+        advanceUntilIdle()
+        assertEquals(Problem.CommandBusy("compact"), chat.state.value.alert)
+        chat.dismissAlert()
+        agent.commandStatus = 400
+        chat.runCommand("compact", null)
+        advanceUntilIdle()
+        assertEquals(Problem.Said("The daemon's own words."), chat.state.value.alert)
+        chat.dismissAlert()
+        // One the phone doesn't know isn't asked for at all.
+        val asked = agent.requests.size
+        chat.runCommand("nonsense", null)
+        advanceUntilIdle()
+        assertEquals(Problem.CommandGone("nonsense"), chat.state.value.alert)
+        assertEquals(asked, agent.requests.size)
+    }
+
+    @Test fun `a skill goes as the person's message asking for read_skill first`() = runTest {
+        val agent = FakeAgent().withCommands()
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        chat.runCommand("code-review", "focus on auth")
+        advanceUntilIdle()
+        assertTrue(agent.requests.none { "/slash-commands/" in it.second })
+        val body = agent.requests.single { it.second.endsWith("/send") }.third!!
+        assertEquals("/code-review focus on auth", body["text"]!!.toString().trim('"'))
+        assertEquals(
+            Json.parseToJsonElement("""[{"type":"tool_call_request","name":"read_skill","arguments":{"name":"code-review"}}]"""),
+            body["content"],
+        )
+        chat.runCommand("code-review", "  ")
+        advanceUntilIdle()
+        assertEquals("/code-review", agent.requests.last { it.second.endsWith("/send") }.third!!["text"]!!.toString().trim('"'))
+    }
+
+    @Test fun `the commands are kept with the history and shown offline`() = runTest {
+        val store = object : ConversationKeeper {
+            var kept: JsonObject? = null
+            override fun read() = kept
+            override fun write(value: JsonObject) { kept = value }
+        }
+        val history = FakeAgent().withCommands().apply {
+            page = """{"runs":[{"id":"r1","status":"completed","messages":[{"id":"m1","role":"user","createdAt":1,"content":[{"type":"text","text":"hi"}]}]}],"hasMore":false}"""
+        }
+        val first = conversation(history, keeper = store)
+        advanceUntilIdle()
+        first.close()
+        advanceUntilIdle()
+        assertEquals(2, KeptConversation.parse(store.kept)!!.slashCommands!!.size)
+        val offline = FakeAgent().apply { beforeBootstrap = { throw AgentConnectionException(AgentConnectionException.Reason.Unavailable) } }
+        val second = conversation(offline, keeper = store)
+        advanceUntilIdle()
+        assertEquals(listOf("compact", "code-review"), second.state.value.commands.map { it.name })
+    }
+
+
+    private val endedTurn = """{"runs":[{"id":"r1","status":"completed","startedAt":1000,"endedAt":13000,"reason":"completed","messages":[
+        {"id":"m1","role":"user","createdAt":1,"content":[{"type":"text","text":"Fix it"}],"metadata":{}},
+        {"id":"m2","role":"agent","createdAt":2,"content":[
+            {"type":"reasoning","text":"Look first."},
+            {"type":"tool_call","id":"c1","name":"exec_command","status":"completed","presentation":{"type":"exec_command","command":"ls"}},
+            {"type":"tool_call","id":"c2","name":"apply_patch","status":"completed","presentation":{"type":"file_diff","files":[{"path":"src/a.ts","kind":"update","added":3,"deleted":1}]}},
+            {"type":"text","text":"Done"}
+        ],"metadata":{}}
+    ]}],"hasMore":false}"""
+
+    @Test fun `a finished turn folds its work behind its trace and says how it ended`() = runTest {
+        val agent = FakeAgent().apply { page = endedTurn }
+        val keeper = MemoryKeeper()
+        val chat = conversation(agent, keeper = keeper)
+        advanceUntilIdle()
+        // Folded: the person's words, the file it edited, the control, the answer and how it ended.
+        assertEquals(listOf("r1:status", "m2:3", "r1:trace", "m2:2", "m1:user"), chat.state.value.rows.map { it.key })
+        val ended = chat.state.value.rows[0] as ConversationRow.TurnEnd
+        assertEquals(ConversationRow.TurnEnd("r1:status", "r1", "completed", 12_000, 2, "Done"), ended)
+        assertTrue(ended.complete)
+        // Its copy is the turn's: the answer has none of its own.
+        assertFalse((chat.state.value.rows[1] as ConversationRow.Text).copies)
+        assertEquals(ConversationRow.Trace("r1:trace", "r1", false, 2), chat.state.value.rows[2])
+        val edit = (chat.state.value.rows[3] as ConversationRow.Tool).tool
+        assertEquals("apply_patch", edit.name)
+        assertTrue(edit.isResult)
+
+        // Open: every step, the control riding the first.
+        chat.toggleTurn("r1")
+        advanceUntilIdle()
+        assertEquals(listOf("r1:status", "m2:3", "m2:2", "m2:1", "m2:0", "r1:trace", "m1:user"), chat.state.value.rows.map { it.key })
+        assertTrue((chat.state.value.rows[5] as ConversationRow.Trace).open)
+        // A step right above how it ended keeps it 4 further off; here the answer is.
+        assertFalse((chat.state.value.rows[0] as ConversationRow.TurnEnd).afterStep)
+
+        chat.toggleTurn("r1")
+        advanceUntilIdle()
+        assertEquals("r1:trace", chat.state.value.rows[2].key)
+
+        // When and why it ended are kept with it.
+        val kept = KeptConversation.parse(keeper.value)!!.runs.single()
+        assertEquals(13_000L, kept.endedAt)
+        assertEquals("completed", kept.reason)
+    }
+
+    @Test fun `a turn still running is shown whole and ends when its run finishes`() = runTest {
+        val agent = FakeAgent()
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        signals.emit(event("run.started", """{"agentId":"a1","run":{"id":"r1","status":"running","startedAt":1000},"acceptedMessageIds":[]}"""))
+        signals.emit(event("message.created", """{"agentId":"a1","runId":"r1","message":{"id":"m","role":"agent","createdAt":5,"content":[{"type":"tool_call","id":"c1","name":"exec_command","status":"completed","presentation":{"type":"exec_command","command":"ls"}},{"type":"text","text":"Hi"}],"metadata":{}}}"""))
+        advanceUntilIdle()
+        assertEquals(listOf("m:1", "m:0"), chat.state.value.rows.map { it.key })
+
+        // Steered: the run ends by the boundary, which says why, and offers no copy.
+        signals.emit(event("run.boundary", """{"agentId":"a1","finishedRun":{"id":"r1","status":"completed","startedAt":1000,"endedAt":4000,"reason":"steering"},"startedRun":{"id":"r2","status":"running","startedAt":4000},"acceptedMessageIds":[]}"""))
+        advanceUntilIdle()
+        val steered = chat.state.value.rows.first { it is ConversationRow.TurnEnd } as ConversationRow.TurnEnd
+        assertEquals("steering", steered.reason)
+        assertEquals(3_000L, steered.durationMs)
+        assertFalse(steered.complete)
+
+        signals.emit(event("message.created", """{"agentId":"a1","runId":"r2","message":{"id":"n","role":"agent","createdAt":6,"content":[{"type":"text","text":"Again"}],"metadata":{}}}"""))
+        signals.emit(event("run.finished", """{"agentId":"a1","run":{"id":"r2","status":"completed","startedAt":4000,"endedAt":9000,"reason":"error"}}"""))
+        advanceUntilIdle()
+        val failed = chat.state.value.rows[0] as ConversationRow.TurnEnd
+        assertEquals(ConversationRow.TurnEnd("r2:status", "r2", "error", 5_000, 0, "Again"), failed)
+    }
+
 }
 
 private fun preview(uri: String, mimeType: String, size: Long, name: String = uri.substringAfterLast('/')) =

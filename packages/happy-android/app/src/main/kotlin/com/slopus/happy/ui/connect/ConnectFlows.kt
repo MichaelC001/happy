@@ -26,6 +26,7 @@ import com.slopus.happy.ui.components.AlertButton
 import com.slopus.happy.ui.components.HappyAlert
 import com.slopus.happy.ui.components.Prompt
 import com.slopus.happy.ui.components.PromptModal
+import com.slopus.happy.connection.ServerInvite
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -50,6 +51,13 @@ class ConnectFlow internal constructor(
     internal var messages = ScanMessages()
     internal var scanner: QrScanner = QrScanner { ScanResult.Cancelled }
     internal var connectAgent: ((String) -> Unit)? = null
+
+    /**
+     * A team server's code, from any scanner: opens that server or signs in
+     * to it (edge SSO §8). False when it can't: a new server under a path
+     * prefix.
+     */
+    internal var signInToServer: ((ServerInvite) -> Boolean)? = null
 
     /** No scanner on this device: instead of saying so, Add asks for the link. */
     internal var onUnavailable: (() -> Unit)? = null
@@ -96,7 +104,18 @@ class ConnectFlow internal constructor(
                 ConnectKind.Add -> alert = errorAlert(messages.accountSignedOut)
                 else -> alert = errorAlert(messages.accountElsewhere)
             }
-            is HappyCode.UnknownHappy, is HappyCode.NotHappy -> alert = errorAlert(messages.notHappy)
+            is HappyCode.Server -> {
+                val signIn = signInToServer
+                val invite = ServerInvite.parse(code.text)
+                when {
+                    // Only outside the app's root, which always provides it.
+                    signIn == null -> alert = errorAlert(messages.notHappy)
+                    invite == null -> alert = errorAlert(messages.serverInvalid)
+                    // Opened if connected already; else, under a path prefix, not reachable yet.
+                    !signIn(invite) -> alert = errorAlert(messages.serverAtPath)
+                }
+            }
+            is HappyCode.NotHappy, is HappyCode.UnknownHappy -> alert = errorAlert(messages.notHappy)
         }
     }
 
@@ -104,13 +123,16 @@ class ConnectFlow internal constructor(
      * connectWithUrl: a pasted link, routed by [route] exactly as the same
      * code read by the camera is, so typing a terminal link into Link New
      * Device names the screen it belongs to instead of calling it invalid.
-     * Only a link of no kind this app knows reads differently: it is
-     * "Invalid authentication URL", since nothing was scanned.
+     * Two read differently: a link of no kind this app knows is "Invalid
+     * authentication URL", since nothing was scanned, and a team server's
+     * is refused, since one is taken only from the camera.
      */
     fun connectWithUrl(url: String) {
         scope.launch {
-            when (HappyCode.classify(url)) {
-                is HappyCode.UnknownHappy, is HappyCode.NotHappy -> alert = errorAlert(messages.invalidUrl)
+            when (val code = HappyCode.classify(url)) {
+                is HappyCode.NotHappy, is HappyCode.UnknownHappy -> alert = errorAlert(messages.invalidUrl)
+                // A team server is added only from the camera (contract §8), never a pasted link.
+                is HappyCode.Server -> alert = errorAlert(messages.serverScanOnly)
                 else -> route(url)
             }
         }
@@ -146,6 +168,9 @@ internal data class ScanMessages(
     val pairingUnavailable: String = "",
     val accountSignedOut: String = "",
     val invalidUrl: String = "",
+    val serverInvalid: String = "",
+    val serverAtPath: String = "",
+    val serverScanOnly: String = "",
 ) {
     /** What a scan that couldn't run says, by [reason]. */
     fun failure(reason: ScanFailure) = when (reason) {
@@ -264,9 +289,13 @@ private fun rememberConnectFlow(
         pairingUnavailable = stringResource(R.string.scan_pairing_unavailable),
         accountSignedOut = stringResource(R.string.start_account_code),
         invalidUrl = invalid,
+        serverInvalid = stringResource(R.string.team_server_code_invalid),
+        serverAtPath = stringResource(R.string.team_server_code_path),
+        serverScanOnly = stringResource(R.string.team_server_code_scan_only),
     )
     flow.scanner = rememberQrScanner()
     flow.connectAgent = LocalAgentPairing.current
+    flow.signInToServer = com.slopus.happy.ui.connection.LocalServerSignIn.current
     val prefix = kind.prefix
     flow.process = process@{ url ->
         if (!url.startsWith(prefix)) {
