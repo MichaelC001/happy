@@ -86,16 +86,11 @@
     <string name="conversation_chief_unavailable">Can\'t open the Chief of Staff</string>
     <string name="conversation_chief_missing">There\'s no Chief of Staff on this computer.</string>
     <string name="conversation_mode_permission">Permissions</string>
-    <string name="conversation_mode_model">Model</string>
-    <string name="conversation_mode_effort">Effort</string>
     <string name="conversation_send">Send</string>
     <string name="conversation_stop">Stop</string>
     <string name="conversation_attach_picture">Add picture</string>
     <string name="conversation_remove_picture">Remove picture</string>
     <string name="conversation_composer_more">More</string>
-    <string name="conversation_mode_label">Model %1$s, effort %2$s</string>
-    <string name="conversation_mode_label_model_only">Model %1$s</string>
-    <string name="conversation_mode_permission_item">Permissions: %1$s</string>
     <string name="conversation_pictures_too_large_title">Pictures too large</string>
     <string name="conversation_pictures_too_large_message">Together these pictures are more than one message can carry. Remove some and send again.</string>
     <!-- Conversation.describe's own words, where the agent gave none. -->
@@ -113,4 +108,6 @@
     <string name="conversation_failure_context_too_long">This conversation is too long for %1$s, even after a reset.</string>
     <string name="conversation_failure_provider_disabled">%1$s is turned off. Turn it on in Settings, then retry.</string>
     <string name="conversation_failure_internal">Something went wrong: %1$s</string>
+    <string name="conversation_editor_expand">Expand</string>
+    <string name="conversation_editor_collapse">Collapse</string>
 </resources>

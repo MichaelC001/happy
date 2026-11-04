@@ -6,6 +6,7 @@ import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.assertIsDisplayed
@@ -41,7 +42,7 @@ class ComposerPopupTest {
     private val catalog = ModeCatalog(listOf(ModelChoice("claude", "Claude", "claude", "opus", "Opus", listOf("low", "high"), "high", emptyList())), mode)
     private fun screenBounds(tag: String) = rule.node(tag).fetchSemanticsNode().let { Rect(it.positionOnScreen, it.size.toSize()) }
 
-    @Test fun `floating model and permission selections keep draft focus and caret in an unmoved composer`() {
+    @Test fun `a floating effort selection keeps draft focus and caret in an unmoved composer`() {
         val draft = "keep this draft"
         val picks = mutableListOf<Mode>()
         rule.setHappyContent {
@@ -59,24 +60,30 @@ class ComposerPopupTest {
             assertEquals(pill, rule.node(ConversationComposerTags.PILL).bounds)
         }
         kept()
-        rule.node(ConversationModeTags.MODEL).performClick()
+        rule.node(ConversationModeTags.EFFORT).performClick()
         kept()
-        assertTrue(screenBounds(ConversationModeTags.PICKER).bottom > screenBounds(ConversationComposerTags.PILL).top)
+        // Over its chip, 10 above it.
+        assertEquals(screenBounds(ConversationModeTags.EFFORT).top - 10 * rule.density.density, screenBounds(ModelPickerTags.PANEL).bottom, 1f)
         rule.onNodeWithText("Low").performClick()
         kept()
-        rule.node(ConversationScreenTags.MORE).performClick()
-        kept()
-        rule.node(ConversationModeTags.PERMISSION).performClick()
-        kept()
-        rule.onNodeWithText("Read only").performClick()
-        kept()
-        assertEquals(listOf(mode.copy(effort = "low"), mode.copy(permissionMode = "read_only")), picks)
+        assertEquals(listOf(mode.copy(effort = "low")), picks)
         // [+] is the attachment sheet; the draft stays with the composer.
         rule.node(ConversationComposerTags.MORE).performClick()
         rule.waitForIdle()
         rule.node(com.slopus.happy.ui.attach.AttachTags.SHEET).assertExists()
-        rule.node(ConversationModeTags.PERMISSION).assertDoesNotExist()
         assertEquals(draft, rule.node(ConversationComposerTags.INPUT).fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+    }
+
+    /** Search's "New task with a picture" (happy-ios 7a605f6ce): new work opens with "+"'s sheet up. */
+    @Test fun `new work opened for a picture has the attachment sheet up`() {
+        rule.setHappyContent {
+            ConversationScreen(
+                ConversationState(created = false, loaded = true, mode = mode, catalog = catalog),
+                null, ConversationScreenActions(), opensAttach = true,
+            )
+        }
+        rule.waitForIdle()
+        rule.node(com.slopus.happy.ui.attach.AttachTags.SHEET).assertExists()
     }
 
     @Test fun `panels mirror with RTL and clamp to small window edges`() {
@@ -104,13 +111,17 @@ class ComposerPopupTest {
             )
         }
         rule.node(ConversationModeTags.MODEL).performClick()
-        val panel = screenBounds(ConversationModeTags.PICKER)
+        rule.waitForIdle()
+        val panel = screenBounds(ModelPickerTags.PANEL)
         assertTrue("panel within screen: $panel", panel.top >= 8f)
         assertTrue("panel within window: $panel", panel.bottom <= 1080f)
-        rule.node(ConversationModeTags.OPTIONS).performScrollToNode(hasText("Model 20"))
-        rule.onNodeWithText("Model 20").assertIsDisplayed()
-        rule.node(ConversationModeTags.OPTIONS).performScrollToNode(hasText("Low"))
+        rule.onNodeWithText("Model 20").performScrollTo().assertIsDisplayed()
+        rule.onNodeWithText("Model 20").performClick()
+        rule.waitForIdle()
+        rule.node(ModelPickerTags.PANEL).assertDoesNotExist()
+        rule.node(ConversationModeTags.EFFORT).performClick()
         rule.onNodeWithText("Low").assertIsDisplayed().performClick()
-        rule.node(ConversationModeTags.PICKER).assertDoesNotExist()
+        rule.waitForIdle()
+        rule.node(ModelPickerTags.PANEL).assertDoesNotExist()
     }
 }

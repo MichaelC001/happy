@@ -285,6 +285,21 @@ public enum SlashCommandOutcome: Equatable, Sendable {
     case notSaved
 }
 
+/// A picture still being read when its message was sent, an iCloud photo
+/// coming down: its thumbnail stands in, with its ring, until the picture
+/// itself is in (`Conversation.prepared`). `id` is the composer's for it.
+public struct PreviewAttachment: Equatable, Sendable {
+    public var id: String
+    public var thumbnail: URL
+    /// The picture's own size, so its tile has its shape from the start.
+    public var width: Int?
+    public var height: Int?
+
+    public init(id: String, thumbnail: URL, width: Int? = nil, height: Int? = nil) {
+        self.id = id; self.thumbnail = thumbnail; self.width = width; self.height = height
+    }
+}
+
 /// One conversation over the paired computer's API: its history, read by
 /// run, and the store's events applied on top (`message.*`, `run.*`,
 /// `agent.updated`), all off the main thread. Sends are drawn at once and
@@ -396,9 +411,9 @@ public actor Conversation {
     /// A task its first message makes (`NewTask`): until then nothing of it
     /// is on the computer, and everything that goes there waits for it.
     private var creation: NewTask?
-    /// Why the last send was refused before anything was drawn: the task
-    /// its first message makes could not be made.
-    public private(set) var sendRefusal: String?
+    /// Sends waiting for pictures still being read (`previews`), by ID:
+    /// drawn from the previews, delivered once `prepared` has them.
+    private var held: [String: [PreviewAttachment]] = [:]
     private var visible = false
     /// On screen, the reader at the newest message and at rest.
     private var readsNewest = false
@@ -440,8 +455,10 @@ public actor Conversation {
             snapshot.error = "Could not open this conversation on this device."; publish(); return
         }
         if let creation {
-            // A new task has nothing to read yet: it is shown at once, empty,
-            // and followed once its first message has made it.
+            // A new task has nothing to read yet: it is shown at once, with
+            // what was sent into it while it was being made (left and opened
+            // again meanwhile), and followed once it has been made.
+            await restoreConversation()
             snapshot.loaded = true
             publish()
             defaultMode = Task { [client] in try await client.defaultMode() }
@@ -666,6 +683,22 @@ public actor Conversation {
     }
 
     /// Runs older than the first one shown.
+    /// A tool call's raw `arguments` and `result` as the computer holds
+    /// them, unbounded: read with its run, which the transcript's pages
+    /// read without tool data. Nil when it isn't in a run here or can't be read.
+    public func fullToolCall(_ callId: String) async -> (arguments: JSONValue?, result: JSONValue?)? {
+        func holds(_ messageId: String) -> Bool {
+            messages[messageId]?.content.contains { block in
+                if case .toolCall(let id, _, _, _, _, _, _, _) = block { return id == callId }
+                return false
+            } ?? false
+        }
+        guard let index = runs.firstIndex(where: { $0.messageIds.contains(where: holds) }) else { return nil }
+        let before = index + 1 < runs.count ? runs[index + 1].id : nil
+        guard let block = try? await client.toolCall(agentId, id: callId, before: before) else { return nil }
+        return (block["arguments"], block["result"])
+    }
+
     public func loadOlder() async {
         guard snapshot.hasMore, heldEvents == nil, let first = runs.first?.id else { return }
         do {
@@ -854,38 +887,24 @@ public actor Conversation {
 
     // MARK: Sending
 
-    /// Draws the message and sends it. A new task's first message makes the
-    /// task first: refused, nothing is drawn, `sendRefusal` says why, and
-    /// false leaves the composer holding what it held.
+    /// Draws the message and sends it. A new task's first message is drawn
+    /// at once, before the task is made: it goes once the computer has made
+    /// it, and if the computer refuses, it stays, failed, to be retried
+    /// under the same names (`NewTask`), which never makes a second task.
+    ///
+    /// `previews` are pictures still being read, an iCloud photo coming
+    /// down: drawn from their thumbnails, each with its ring, and nothing
+    /// goes until `prepared` hands over the pictures themselves.
     @discardableResult
     public func send(id: String = ClientID.make(), text: String, pictures: [(mimeType: String, data: Data)] = [], attachments: [OutgoingAttachment] = [],
-                     toolRequest: AgentWire.ToolCallRequest? = nil) async -> Bool {
+                     previews: [PreviewAttachment] = [], toolRequest: AgentWire.ToolCallRequest? = nil) async -> Bool {
         guard !outgoing.contains(where: { $0.id == id }), messages[id] == nil else { return false }
-        sendRefusal = nil
-        if let creation {
-            do { agentId = try await creation.make() }
-            catch {
-                sendRefusal = Store.describe(error)
-                return false
-            }
-        }
         admitting.insert(id)
         defer { admitting.remove(id) }
         var inline = pictures
         var files: [QueuedFile] = []
         do {
-            let staged = try AttachmentRules.stage(attachments, messageID: id,
-                directory: persistence?.attachmentDirectory ?? temporaryAttachments)
-            var inlineBytes = inline.reduce(0) { $0 + $1.data.count }
-            for file in staged {
-                let supportedImage = ["image/jpeg", "image/png", "image/gif", "image/webp"].contains(file.mimeType)
-                if supportedImage, file.size <= AttachmentRules.maxInlineImageBytes,
-                   inlineBytes + file.size <= AttachmentRules.maxInlineImageTotalBytes {
-                    let bytes = try Data(contentsOf: file.fileURL)
-                    guard bytes.count == file.size else { throw AttachmentRules.invalid("The attachment changed while being read.") }
-                    inline.append((file.mimeType, bytes)); inlineBytes += bytes.count
-                } else { files.append(file) }
-            }
+            try stage(attachments, id: id, inline: &inline, files: &files)
         } catch {
             snapshot.error = Store.describe(error)
             publish()
@@ -893,16 +912,24 @@ public actor Conversation {
         }
         outgoingFiles[id] = files
         outgoingTools[id] = toolRequest
+        if !previews.isEmpty { held[id] = previews }
         outgoing.append((id, text, inline, false, nil))
         outgoingModes[id] = mode
         outgoingTimes[id] = Date().timeIntervalSince1970 * 1000
         guard await saveConversationNow() else {
+            held[id] = nil
             failed(id, "Could not save this message on this device. Retry when storage is available.")
             return false
         }
+        // Drawn now; it goes once the task is made and its pictures are read.
+        if creation != nil || held[id] != nil {
+            admitting.remove(id)
+            publish()
+            deliver(id)
+            return true
+        }
         if let persistence {
             do {
-                if let creation { agentId = try await creation.make() }
                 try await checkpointClaim(for: "conversation:\(agentId)").value
                 try await persistence.enqueueMessage(queuedMessage(id: id, text: text, pictures: inline))
             }
@@ -915,10 +942,67 @@ public actor Conversation {
         return true
     }
 
+    /// The pictures a held send waited for, read in full, in its previews'
+    /// order: staged as any send's are, and the message goes. Pictures that
+    /// couldn't be read are left out, and a message left with nothing is
+    /// taken back.
+    /// `attachments` by the previews' ids.
+    public func prepared(_ id: String, _ attachments: [String: OutgoingAttachment]) async {
+        guard let previews = held.removeValue(forKey: id), let index = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        let attachments = previews.compactMap { attachments[$0.id] }
+        // The previews' rings; the pictures' own start again under their keys.
+        UploadProgressBoard.shared.clear(message: id)
+        var inline = outgoing[index].pictures
+        var files = outgoingFiles[id] ?? []
+        do {
+            try stage(attachments, id: id, inline: &inline, files: &files)
+        } catch {
+            failed(id, Store.describe(error))
+            return
+        }
+        guard let index = outgoing.firstIndex(where: { $0.id == id }) else { return }
+        outgoing[index].pictures = inline
+        outgoingFiles[id] = files
+        if outgoing[index].text.isEmpty, inline.isEmpty, files.isEmpty {
+            outgoing.remove(at: index)
+            outgoingModes.removeValue(forKey: id)
+            outgoingTimes.removeValue(forKey: id)
+            outgoingTools.removeValue(forKey: id)
+            outgoingFiles.removeValue(forKey: id)
+            attachmentCleanup.insert(id)
+            publish()
+            return
+        }
+        publish()
+        deliver(id)
+    }
+
+    /// Copies `attachments` in for message `id`, after any it has: small
+    /// pictures inline, the rest as files.
+    private func stage(_ attachments: [OutgoingAttachment], id: String, inline: inout [(mimeType: String, data: Data)], files: inout [QueuedFile]) throws {
+        let staged = try AttachmentRules.stage(attachments, messageID: id,
+            directory: persistence?.attachmentDirectory ?? temporaryAttachments, first: inline.count + files.count)
+        var inlineBytes = inline.reduce(0) { $0 + $1.data.count }
+        for file in staged {
+            let supportedImage = ["image/jpeg", "image/png", "image/gif", "image/webp"].contains(file.mimeType)
+            if supportedImage, file.size <= AttachmentRules.maxInlineImageBytes,
+               inlineBytes + file.size <= AttachmentRules.maxInlineImageTotalBytes {
+                let bytes = try Data(contentsOf: file.fileURL)
+                guard bytes.count == file.size else { throw AttachmentRules.invalid("The attachment changed while being read.") }
+                inline.append((file.mimeType, bytes)); inlineBytes += bytes.count
+            } else { files.append(file) }
+        }
+    }
+
     public func retry(_ id: String) {
         guard let index = outgoing.firstIndex(where: { $0.id == id }), outgoing[index].failure != nil else { return }
         outgoing[index].failure = nil
         publish()
+        // Not made yet: the task is asked for again, under the same names.
+        if creation != nil {
+            deliver(id)
+            return
+        }
         if let persistence {
             let send = outgoing[index]
             let payload = queuedMessage(id: id, text: send.text, pictures: send.pictures)
@@ -938,6 +1022,14 @@ public actor Conversation {
     /// the computer hasn't taken yet, and sends the rest of it; one left
     /// with nothing is taken back whole.
     public func removeAttachment(_ id: String, key: String) async {
+        // A picture still being read: it is left out when the rest come.
+        if var previews = held[id], let at = previews.indices.first(where: { UploadProgressBoard.previewKey(id, $0) == key }) {
+            previews.remove(at: at)
+            held[id] = previews
+            UploadProgressBoard.shared.clear(message: id)
+            publish()
+            return
+        }
         guard let piece = UploadProgressBoard.piece(key, message: id),
               let found = outgoing.first(where: { $0.id == id }), !found.accepted else { return }
         // Nothing still sending writes the message as it was.
@@ -976,7 +1068,7 @@ public actor Conversation {
     }
 
     private func deliver(_ id: String) {
-        guard delivering[id] == nil, !admitting.contains(id) else { return }
+        guard delivering[id] == nil, !admitting.contains(id), held[id] == nil else { return }
         let client = client
         delivering[id] = Task {
             defer { delivering.removeValue(forKey: id) }
@@ -984,8 +1076,15 @@ public actor Conversation {
                 if let persistence, !(await persistence.deliveryAllowed) { return }
                 guard await saveConversationNow() else { failed(id, "Could not save this message on this device."); return }
                 // A new task: its conversation exists once the computer has
-                // made it, under the ID the computer gave it.
-                if let creation { agentId = try await creation.make() }
+                // made it, under the ID the computer gave it. Refused (after
+                // its own retries), the message shows failed, to retry.
+                if let creation {
+                    do { agentId = try await creation.make() }
+                    catch {
+                        failed(id, Store.describe(error))
+                        return
+                    }
+                }
                 if let persistence, !(await persistence.deliveryAllowed) { return }
                 guard let outgoingIndex = outgoing.firstIndex(where: { $0.id == id }) else { return }
                 let send = outgoing[outgoingIndex]
@@ -1099,7 +1198,7 @@ public actor Conversation {
         guard let persistence, snapshot.loaded || !outgoing.isEmpty else { return true }
         let window = Self.kept(runs: runs, messages: messages, pending: pending)
         let kept = KeptConversation(runs: window.runs.map { .init(id: $0.id, messageIds: $0.messageIds, time: times[$0.id]) }, messages: window.messages, pending: pending,
-            outgoing: outgoing.map { .init(id: $0.id, text: $0.text, pictures: $0.pictures.map { .init(mimeType: $0.mimeType, data: $0.data) }, accepted: $0.accepted, failure: $0.failure, mode: outgoingModes[$0.id], files: outgoingFiles[$0.id], at: outgoingTimes[$0.id],
+            outgoing: outgoing.filter({ held[$0.id] == nil }).map { .init(id: $0.id, text: $0.text, pictures: $0.pictures.map { .init(mimeType: $0.mimeType, data: $0.data) }, accepted: $0.accepted, failure: $0.failure, mode: outgoingModes[$0.id], files: outgoingFiles[$0.id], at: outgoingTimes[$0.id],
                 toolRequest: outgoingTools[$0.id]) }, mode: mode, hasMore: snapshot.hasMore || window.trimmed, slashCommands: snapshot.slashCommands)
         guard kept != lastKept || conversationWrite != nil else { return true }
         let key = "conversation:\(agentId)"
@@ -1587,6 +1686,10 @@ public actor Conversation {
                 pieces.append(.sentFile(ChatItem.SentFile(id: UploadProgressBoard.fileKey(send.id, offset), name: AttachmentRules.safeName(file.name),
                     mimeType: file.mimeType, file: file.fileURL, width: file.width, height: file.height)))
             }
+            for (offset, preview) in (held[send.id] ?? []).enumerated() {
+                pieces.append(.sentFile(ChatItem.SentFile(id: UploadProgressBoard.previewKey(send.id, offset), name: "",
+                    mimeType: "image/jpeg", file: preview.thumbnail, width: preview.width, height: preview.height)))
+            }
             items.append(ChatItem(id: send.id, role: .user, pieces: pieces, delivery: send.failure.map { .failed($0) } ?? (send.accepted ? .pending : .sending), time: outgoingTimes[send.id]))
         }
         snapshot.items = items
@@ -1725,7 +1828,8 @@ public actor Conversation {
                 let key = "\(message.id):\(index)"
                 if pictures[key] == nil { pictures[key] = Data(base64Encoded: data) }
                 if let bytes = pictures[key] { pieces.append(.picture(id: key, mimeType: mimeType, data: bytes)) }
-            case .toolCall(let id, let name, let status, let presentation, let arguments, let output):
+            case .toolCall(let id, let name, let status, let presentation, let arguments, let output, let result, let review):
+                let tool = ChatItem.Tool(name: name, status: status, presentation: presentation, callId: id, arguments: arguments, result: result, review: review)
                 if let shows = presentation.flatMap({ Self.shows($0, toolCallId: id, shown: &shown) }) {
                     // One proposal card across every version: a revision redraws its rows.
                     let showing = shows.filter { piece in
@@ -1737,7 +1841,7 @@ public actor Conversation {
                     // what it showed under it, a row of its own, so it stays
                     // when the turn folds.
                     flush(next: "\(message.id)/\(index + 1)")
-                    items.append(ChatItem(id: id, role: .tool(ChatItem.Tool(name: name, status: status, presentation: presentation)), pieces: showing, delivery: .sent))
+                    items.append(ChatItem(id: id, role: .tool(tool), pieces: showing, delivery: .sent))
                     continue
                 }
                 guard role == .agent else { continue }
@@ -1754,7 +1858,7 @@ public actor Conversation {
                     if status == "running" { continue }
                 }
                 flush(next: "\(message.id)/\(index + 1)")
-                items.append(ChatItem(id: id, role: .tool(ChatItem.Tool(name: name, status: status, presentation: presentation)), pieces: [], delivery: .sent))
+                items.append(ChatItem(id: id, role: .tool(tool), pieces: [], delivery: .sent))
             case .reasoning, .compaction, .unknown:
                 continue
             }

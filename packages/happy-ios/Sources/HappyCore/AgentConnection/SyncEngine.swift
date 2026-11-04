@@ -12,6 +12,8 @@ public struct HomeSnapshot: Equatable, Sendable {
     public var settings: [String: JSONValue] = [:]
     /// The person signed in as a team user; nil outside a team.
     public var userId: String?
+    /// The person's own picture's ThumbHash, for the faces that are theirs.
+    public var profilePhoto: String?
     public var error: String?
     /// An action the computer refused, said for a moment while it rolls back.
     public var notice: String?
@@ -35,6 +37,30 @@ public actor SyncEngine {
     public nonisolated let documents: DocumentLibrary
     /// The todo lists open on this account or with changes on their way.
     public nonisolated let todos: TodoLibrary
+    /// The person's Feed on this computer (`FeedLibrary`), followed for as
+    /// long as the account is.
+    public nonisolated let feed: FeedLibrary
+    /// The artifact catalog, tombstones included, kept on the phone and
+    /// followed for as long as the account is: the Artifacts list shows
+    /// it, and the Feed names its artifacts from it.
+    public nonisolated let artifacts: ArtifactCatalogFeed
+    /// What only the Feed names, read by ID and kept (`FeedLookups`).
+    public nonisolated let lookups: FeedLookups
+    /// The Feed's row as home lists it: nil while there is no feed.
+    private var feedRow: SidebarRows.FeedRow?
+    private var feedFollowing: Task<Void, Never>?
+    /// Everything a Feed row can name (`FeedDirectory`), as last made, and
+    /// what it is made from beside the bootstrap.
+    private var directory = FeedDirectory()
+    private var directoryListeners: [UUID: AsyncStream<FeedDirectory>.Continuation] = [:]
+    private var directoryFollowing: [Task<Void, Never>] = []
+    private var artifactItems: [ArtifactSummary] = []
+    private var found = FeedLookups.Found()
+    /// What the Feed names now: its entries, a place peeked at, Following's places.
+    private var feedItems: [FeedItem] = []
+    private var feedLoaded = false
+    private var feedPeeked: [FeedItem] = []
+    private var feedClusters: [FeedCluster] = []
     private var overlay = IntentOverlay()
     /// What waits in `intents`, as last published.
     private var waiting: [Intent] = []
@@ -92,8 +118,11 @@ public actor SyncEngine {
             .appendingPathComponent("outbox-files", isDirectory: true)
         let forward = EngineIntentStorage()
         let todoDelivery = TodoDelivery()
+        let feedDelivery = FeedDelivery()
         let intents = IntentOutbox(storage: forward, deliver: { intent in
-            if intent.kind.isTodo { try await todoDelivery.deliver(intent) } else { try await SyncEngine.deliver(intent, client: client) }
+            if intent.kind.isTodo { try await todoDelivery.deliver(intent) }
+            else if intent.kind.isFeed { try await feedDelivery.deliver(intent) }
+            else { try await SyncEngine.deliver(intent, client: client) }
         })
         self.intents = intents
         documents = DocumentLibrary(client: client, directory: directory)
@@ -102,6 +131,16 @@ public actor SyncEngine {
         let keep = EngineResources()
         todos = TodoLibrary(routes: client, outbox: intents, keep: keep, events: { await spaces.events(matching: ["todo."]) })
         todoDelivery.library = todos
+        feed = FeedLibrary(routes: client, outbox: intents, keep: keep)
+        feedDelivery.library = feed
+        artifacts = ArtifactCatalogFeed(
+            fetch: { cursor in try await client.artifacts(pageCursor: cursor, limit: 100) },
+            fetchOne: { id in try await client.artifact(id) },
+            keep: { value in await keep.write(ArtifactCatalogFeed.resource, value) },
+            kept: { await keep.read(ArtifactCatalogFeed.resource) },
+            events: { await spaces.events(matching: ["artifact."]) }
+        )
+        lookups = FeedLookups(routes: client, keep: keep)
         forward.engine = self
         keep.engine = self
     }
@@ -152,6 +191,8 @@ public actor SyncEngine {
         verified = false
         let pausedGeneration = generation
         let tasks = [runner, refresh, delivery, messageDelivery, usersRead, gitWatcher].compactMap { $0 }
+        await feed.disconnected()
+        await lookups.disconnected()
         gitWatcher = nil; gitInterest = []
         runner = nil; refresh = nil; delivery = nil; messageDelivery = nil; usersRead = nil
         tasks.forEach { $0.cancel() }
@@ -183,6 +224,14 @@ public actor SyncEngine {
         await spaces.stop()
         await documents.stop()
         await todos.stop()
+        await feed.stop()
+        await artifacts.stop()
+        await lookups.stop()
+        feedFollowing?.cancel()
+        directoryFollowing.forEach { $0.cancel() }
+        directoryFollowing = []
+        for listener in directoryListeners.values { listener.finish() }
+        directoryListeners.removeAll()
         intentsFollowing?.cancel()
         await intents.close()
         try? await storage?.close()
@@ -218,9 +267,13 @@ public actor SyncEngine {
             waiting = await intents.pending()
             overlay = IntentOverlay(settling.map(\.intent) + waiting)
             followIntents()
-            guard current(generation) else { return }
             derive()
+            deriveDirectory()
+            await followFeed()
+            await followDirectory()
+            guard current(generation) else { return }
             await spaces.startExternal()
+            await artifacts.start()
         } catch {
             snapshot.error = Store.describe(error)
             publish()
@@ -251,6 +304,10 @@ public actor SyncEngine {
                         await documents.opened(hello)
                         if hello["gap"] == .bool(true) { scheduleReconcile(generation) }
                         profileChanged()
+                        // Reads the newest page each time, so a gap loses nothing.
+                        await feed.connected()
+                        await lookups.connected(gap: hello["gap"] == .bool(true))
+                        await wantReferences()
                         // Faces may have changed while away.
                         usersMissing = []
                         readAuthors(generation, again: Set(users.keys))
@@ -264,6 +321,8 @@ public actor SyncEngine {
                     guard let event = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8)) else { continue }
                     await spaces.externalEvent(event)
                     guard current(generation) else { return }
+                    if event["type"]?.stringValue?.hasPrefix("feed.") == true { await feed.receive(event) }
+                    await lookups.receive(event)
                     if event["type"] == .string("git.updated"),
                        let id = event["payload"]?["workspaceId"]?.stringValue,
                        gitInterest.contains(id), let value = event["payload"]?["git"],
@@ -383,6 +442,7 @@ public actor SyncEngine {
         self.desktop = desktop
         verified = true
         cursor = desktop.cursor
+        await feed.bootstrap(unread: desktop.feedUnread, cursor: desktop.cursor)
         snapshot.settings = try await database.settings()
         // This read began after these were taken, so it has them.
         if settling.contains(where: { $0.read < read }) {
@@ -390,6 +450,7 @@ public actor SyncEngine {
             await layIntents()
         }
         derive()
+        deriveDirectory()
         readAuthors(generation)
     }
 
@@ -444,6 +505,7 @@ public actor SyncEngine {
                 if let kept { try? await database().commit(.init(value: kept, cursor: nil), named: "users") }
                 guard current(generation) else { break }
                 derive()
+                deriveDirectory()
             }
             if self.generation == generation { usersRead = nil }
         }
@@ -524,12 +586,13 @@ public actor SyncEngine {
     private func derive() {
         snapshot.loaded = desktop != nil
         if let desktop {
-            snapshot.allRows = overlay.apply(SidebarRows.make(desktop, settings: snapshot.settings, users: users))
+            snapshot.allRows = overlay.apply(SidebarRows.make(desktop, settings: snapshot.settings, users: users, feed: feedRow))
             for index in snapshot.allRows.indices {
                 snapshot.allRows[index].lineChanges = snapshot.allRows[index].workspaceId.flatMap { gitSnapshots[$0]?.visible }
             }
             snapshot.rows = Rows.visible(snapshot.allRows)
             snapshot.userId = desktop.profile?.userId
+            snapshot.profilePhoto = desktop.profile?.photo?.thumbhash
         }
         publish()
     }
@@ -574,6 +637,113 @@ public actor SyncEngine {
             changed = true
         }
         if changed { derive() }
+    }
+
+    // MARK: Feed
+
+    /// The Feed's row follows its library: shown while there is a feed,
+    /// with its count; a state that changes neither redraws nothing.
+    private func followFeed() async {
+        guard feedFollowing == nil else { return }
+        await feed.start()
+        let states = await feed.states()
+        feedFollowing = Task { [weak self] in
+            for await state in states {
+                guard let self else { return }
+                await self.feedChanged(state.available == true ? SidebarRows.FeedRow(unread: state.unread) : nil, items: state.items, loaded: state.loaded)
+            }
+        }
+    }
+
+    private func feedChanged(_ row: SidebarRows.FeedRow?, items: [FeedItem], loaded: Bool) async {
+        if items != feedItems || loaded != feedLoaded {
+            feedItems = items
+            feedLoaded = loaded
+            await wantReferences()
+        }
+        guard row != feedRow else { return }
+        feedRow = row
+        if desktop != nil { derive() }
+    }
+
+    // MARK: Feed directory
+
+    /// Everything a Feed row can name, now and after every change that
+    /// changes it: one per account, made here, off the main thread, and
+    /// shared by every screen that joins rows with it.
+    public func feedDirectories() -> AsyncStream<FeedDirectory> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream.makeStream(of: FeedDirectory.self, bufferingPolicy: .bufferingNewest(1))
+        directoryListeners[id] = continuation
+        continuation.yield(directory)
+        continuation.onTermination = { [weak self] _ in Task { await self?.removeDirectoryListener(id) } }
+        return stream
+    }
+
+    private func removeDirectoryListener(_ id: UUID) { directoryListeners.removeValue(forKey: id) }
+
+    /// A place's entries peeked at are on screen: what they name is
+    /// looked up too, until another peek. Empty when it closes.
+    public func feedPeeking(_ entries: [FeedItem]) async {
+        guard entries != feedPeeked else { return }
+        feedPeeked = entries
+        await wantReferences()
+    }
+
+    /// Following's places are on screen: those it names are looked up too.
+    public func feedPlacesShown(_ clusters: [FeedCluster]) async {
+        guard clusters != feedClusters else { return }
+        feedClusters = clusters
+        await wantReferences()
+    }
+
+    private func followDirectory() async {
+        guard directoryFollowing.isEmpty else { return }
+        await lookups.start()
+        let found = await lookups.states()
+        let catalog = await artifacts.states()
+        directoryFollowing = [
+            Task { [weak self] in
+                for await value in found { await self?.foundChanged(value) }
+            },
+            Task { [weak self] in
+                for await state in catalog { await self?.artifactsChanged(state.items) }
+            },
+        ]
+    }
+
+    private func foundChanged(_ value: FeedLookups.Found) async {
+        guard value != found else { return }
+        found = value
+        if deriveDirectory() { await wantReferences() }
+    }
+
+    private func artifactsChanged(_ items: [ArtifactSummary]) async {
+        guard items != artifactItems else { return }
+        artifactItems = items
+        if deriveDirectory() { await wantReferences() }
+    }
+
+    /// Makes the directory again from what it is made of; whether it
+    /// changed, which only then reaches anyone.
+    @discardableResult
+    private func deriveDirectory() -> Bool {
+        let next = FeedDirectory.make(desktop: desktop, users: users, artifacts: artifactItems, found: found, titles: overlay.titles)
+        guard next != directory else { return false }
+        directory = next
+        for listener in directoryListeners.values { listener.yield(next) }
+        return true
+    }
+
+    /// Asks the lookups for what the Feed names and the directory lacks,
+    /// once there is a bootstrap to know the rest by; and lets go of what
+    /// nothing names any more, once the feed itself has been read.
+    private func wantReferences() async {
+        guard desktop != nil else { return }
+        let named = feedItems + feedPeeked
+        let wanted = directory.missing(named, clusters: feedClusters)
+        let referenced = directory.references(named, clusters: feedClusters)
+        await lookups.want(wanted, referenced: feedLoaded ? referenced : nil)
     }
 
     // MARK: Intents
@@ -644,7 +814,7 @@ public actor SyncEngine {
     private func intentsChanged(_ list: [Intent]) async {
         let ids = Set(list.map(\.id)), slots = Set(list.map(\.slot))
         var taken = false
-        for intent in waiting where !intent.kind.isTodo && !ids.contains(intent.id) && !slots.contains(intent.slot) {
+        for intent in waiting where !intent.kind.isTodo && !intent.kind.isFeed && !ids.contains(intent.id) && !slots.contains(intent.slot) {
             if refusedIds.remove(intent.id) != nil { continue }
             settling.append((intent, reads))
             taken = true
@@ -663,6 +833,7 @@ public actor SyncEngine {
         overlay = next
         await spaces.setOverlay(next)
         derive()
+        deriveDirectory()
     }
 
     /// The computer said no: off the overlay, so what it holds shows
@@ -675,8 +846,8 @@ public actor SyncEngine {
         } else if waiting.contains(where: { $0.id == id }) {
             refusedIds.insert(id)
         }
-        // A refused read is nothing to tell; a todo list tells its own.
-        guard rejection.intent.kind != .read, !rejection.intent.kind.isTodo else { return }
+        // A refused read or seen entry is nothing to tell; a todo list tells its own.
+        guard rejection.intent.kind != .read, !rejection.intent.kind.isTodo, !rejection.intent.kind.isFeed else { return }
         snapshot.notice = rejection.reason
         publish()
         noticeClearing?.cancel()
@@ -722,8 +893,8 @@ public actor SyncEngine {
                 _ = try await client.answerQuestion(agentId, questionId: intent.target, answers: answers, mutationId: intent.id)
             case .unarchive, .delete:
                 throw IntentRefusal("")
-            case .todoCreate, .todoText, .todoStatus, .todoMove:
-                // `TodoLibrary.deliver` sends these.
+            case .todoCreate, .todoText, .todoStatus, .todoMove, .feedSeen, .feedReadAll:
+                // `TodoLibrary.deliver` and `FeedLibrary.deliver` send these.
                 throw IntentRefusal("")
             }
         } catch AgentClientError.status(let status, _, _) where status == 404 || (status == 409 && intent.kind == .answer) {
@@ -885,7 +1056,7 @@ extension SyncEngine {
 
 /// The engine's checkpoints as the todo lists' keep, made with the engine
 /// like `EngineIntentStorage`.
-final class EngineResources: TodoKeep, @unchecked Sendable {
+final class EngineResources: TodoKeep, FeedKeep, @unchecked Sendable {
     /// Set once, as the engine finishes its init.
     weak var engine: SyncEngine?
 

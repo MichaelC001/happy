@@ -206,7 +206,7 @@ fun StartScreen(
 
 /** A 48 round touch target with a 24 glyph in the palette's text colour, straight on the gradient. */
 @Composable
-private fun StartControl(icon: Ionicon, description: String, tint: Color, onClick: () -> Unit, modifier: Modifier = Modifier) {
+internal fun StartControl(icon: Ionicon, description: String, tint: Color, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .size(StartSpec.control)
@@ -254,9 +254,9 @@ internal fun StartMenu(
         }
         item(stringResource(R.string.start_enter_link), Ionicon.LinkOutline, StartTags.ENTER_LINK, onClick = onEnterLink)
         HappyMenuDivider()
-        item(stringResource(R.string.start_restore_legacy), Ionicon.KeyOutline, StartTags.RESTORE, onClick = onRestore)
+        item(stringResource(R.string.account_kind_restore_cli_account), Ionicon.KeyOutline, StartTags.RESTORE, onClick = onRestore)
         item(
-            stringResource(R.string.start_legacy_server),
+            stringResource(R.string.account_kind_cli_server),
             Ionicon.ServerOutline,
             StartTags.SERVER,
             detail = customServerLabel,

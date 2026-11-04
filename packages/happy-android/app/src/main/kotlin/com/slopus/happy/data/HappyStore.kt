@@ -264,6 +264,29 @@ class HappyStore(@Volatile private var helper: SQLiteOpenHelper) {
             buildSet { while (c.moveToNext()) add(c.getString(0)) }
         }
 
+    /**
+     * Each session's avatar descriptor as stored, by id. A watcher of every
+     * session reads only the columns it needs: a whole row carries the
+     * metadata, tens of KB a session, and hundreds of sessions read on
+     * every change ran a large account out of memory.
+     */
+    fun sessionAvatarJsons(): Map<String, String?> =
+        query("SELECT id, avatar FROM sessions", null) { c ->
+            buildMap { while (c.moveToNext()) put(c.getString(0), c.stringOrNull(1)) }
+        }
+
+    /** The projects the stored sessions link to, trimmed, without blanks. */
+    fun sessionProjectIds(): Set<String> =
+        query("SELECT DISTINCT project_id FROM sessions WHERE project_id IS NOT NULL", null) { c ->
+            buildSet { while (c.moveToNext()) c.getString(0).trim().ifEmpty { null }?.let(::add) }
+        }
+
+    /** Each session's metadata version, by id: what changed, without reading the metadata. */
+    fun sessionMetadataVersions(): Map<String, Long> =
+        query("SELECT id, metadata_version FROM sessions", null) { c ->
+            buildMap { while (c.moveToNext()) put(c.getString(0), c.getLong(1)) }
+        }
+
     /** Most recently updated first. */
     fun sessions(): List<SessionRecord> =
         query("SELECT $SESSION_COLUMNS FROM sessions ORDER BY updated_at DESC", null) { c ->
@@ -654,6 +677,18 @@ class HappyStore(@Volatile private var helper: SQLiteOpenHelper) {
 
     fun saveProfile(profile: JsonObject) = putDocument(KEY_PROFILE, profile, null)
 
+    /** The account's archives, leaves and deletes not yet taken (ui/home SessionArchiver), as one JSON list; nothing observes it. */
+    fun intents(): String? = query("SELECT value FROM account WHERE key = ?", arrayOf(KEY_INTENTS)) { c -> if (c.moveToFirst()) c.getString(0) else null }
+
+    /** Keeps [value] as [intents], or removes it when null. */
+    fun saveIntents(value: String?) = transaction {
+        if (value == null) {
+            db.delete("account", "key = ?", arrayOf(KEY_INTENTS))
+        } else {
+            db.insertWithOnConflict("account", null, ContentValues().apply { put("key", KEY_INTENTS); put("value", value) }, SQLiteDatabase.CONFLICT_REPLACE)
+        }
+    }
+
     /** Logout: everything goes, schema stays. */
     /** Every session's stored composer document (sync/SessionComposer.kt), by session id. */
     fun composers(): Map<String, String> = query("SELECT session_id, value FROM composer", null) { c ->
@@ -715,6 +750,7 @@ class HappyStore(@Volatile private var helper: SQLiteOpenHelper) {
         private const val KEY_SETTINGS = "settings"
         private const val KEY_PENDING_SETTINGS = "pending-settings"
         private const val KEY_PROFILE = "profile"
+        private const val KEY_INTENTS = "intents"
         private val EMPTY = JsonObject(emptyMap())
         private const val SQL_PARAMETERS = 500
 

@@ -18,14 +18,17 @@ import kotlinx.serialization.json.put
 import java.net.URLEncoder
 import java.security.SecureRandom
 
-/** A refused request: the daemon's status, with its error `code` and words when it sent them. */
-class ConversationApiException(val status: Int, val code: String?, override val message: String?) : Exception(message)
+/** A refused request: the daemon's status, with its error `code` and words when it sent them, and the rest of its answer. */
+class ConversationApiException(val status: Int, val code: String?, override val message: String?, val body: JsonObject? = null) : Exception(message)
 
 /**
  * One request to the paired agent as its [RequestCategory], answered whatever
  * its status; the agent connection's client does the transport.
  */
 typealias AgentRequest = suspend (method: String, path: String, body: JsonElement?, category: RequestCategory) -> TransportResponse
+
+/** [AgentRequest] with a JSON body already made as bytes: a workspace file's upload, built once ([WorkspaceUploads.body]). */
+typealias AgentBytesRequest = suspend (method: String, path: String, body: ByteArray, category: RequestCategory) -> TransportResponse
 
 /**
  * The client-chosen ids of new work made on first send (`POST /v0/tasks` or
@@ -62,7 +65,8 @@ data class UnsentWork(val task: NewTask, val choice: WorkChoice, val draft: Stri
  * [AgentConnectionException.Reason.Revoked]; any other non-2xx is a
  * [ConversationApiException].
  */
-open class ConversationApi(private val request: AgentRequest) {
+open class ConversationApi(private val bytesRequest: AgentBytesRequest?, private val request: AgentRequest) {
+    constructor(request: AgentRequest) : this(null, request)
 
     private suspend fun call(method: String, path: String, body: JsonElement? = null, category: RequestCategory = RequestCategory.Query): JsonObject =
         decode(request(method, path, body, category))
@@ -102,10 +106,11 @@ open class ConversationApi(private val request: AgentRequest) {
     /**
      * The newest runs, the runs before the run [before], or the messages
      * after the message [after] (API.md: what extends the newest run and the
-     * runs started since). Tool data is left out where a presentation stands for it.
+     * runs started since). Tool data is left out where a presentation stands
+     * for it, unless [omitToolData] is false: a tool call opened whole.
      */
-    open suspend fun messages(agentId: String, before: String? = null, limit: Int = 100, after: String? = null): MessagesPage {
-        val query = StringBuilder("limit=$limit&omitToolData=true")
+    open suspend fun messages(agentId: String, before: String? = null, limit: Int = 100, after: String? = null, omitToolData: Boolean = true): MessagesPage {
+        val query = StringBuilder("limit=$limit&omitToolData=$omitToolData")
         before?.let { query.append("&before=").append(escape(it)) }
         after?.let { query.append("&after=").append(escape(it)) }
         return MessagesPage.parse(call("GET", "/v0/agents/${escape(agentId)}/messages?$query")) ?: throw invalid()
@@ -152,17 +157,41 @@ open class ConversationApi(private val request: AgentRequest) {
      * count as written (iOS `AttachmentRules.upload`).
      */
     open suspend fun uploadFile(workspaceId: String, path: String, bytes: ByteArray) {
-        val hash = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        val hash = WorkspaceUploads.hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes))
         val body = buildJsonObject {
             put("path", path)
             put("content", java.util.Base64.getEncoder().encodeToString(bytes))
             put("expectedHash", JsonNull)
         }
-        val response = request("PUT", "/v0/workspaces/${escape(workspaceId)}/file", body, RequestCategory.File)
-        if (response.status == 409) {
-            val answer = runCatching { json.parseToJsonElement(response.text).obj }.getOrNull()
-            if (answer?.get("code").str == "hash_mismatch" && answer?.get("hash").str == hash) return
+        written(hash) { request("PUT", "/v0/workspaces/${escape(workspaceId)}/file", body, RequestCategory.File) }
+    }
+
+    /**
+     * [uploadFile] of a file on disk (desktop 3885593e: up to 50 MB). Its
+     * JSON is made once, from the disk a piece at a time, and goes out a
+     * chunk at a time: a 50 MB file as a string, then JSON, then bytes ran
+     * the phone's 192 MB heap out. Without [bytesRequest] it is read whole.
+     * The disk is read on [io].
+     */
+    open suspend fun uploadFile(workspaceId: String, path: String, file: java.io.File, io: kotlin.coroutines.CoroutineContext = kotlinx.coroutines.Dispatchers.IO) {
+        val send = bytesRequest
+            ?: return uploadFile(workspaceId, path, kotlinx.coroutines.withContext(io) { file.readBytes() })
+        val (body, hash) = kotlinx.coroutines.withContext(io) { WorkspaceUploads.body(path, file) }
+        kotlinx.coroutines.withContext(com.slopus.happy.connection.BodyProgress { _, _ -> }) {
+            written(hash) { send("PUT", "/v0/workspaces/${escape(workspaceId)}/file", body, RequestCategory.File) }
         }
+    }
+
+    /** A write's answer: its [hash] back, or a `409` saying those bytes are there already (a retry whose answer was lost). */
+    private suspend fun written(hash: String, put: suspend () -> TransportResponse) {
+        fun already(status: Int, answer: JsonObject?) = status == 409 && answer?.get("code").str == "hash_mismatch" && answer?.get("hash").str == hash
+        val response = try {
+            put()
+        } catch (e: ConversationApiException) {
+            if (already(e.status, e.body)) return
+            throw e
+        }
+        if (already(response.status, runCatching { json.parseToJsonElement(response.text).obj }.getOrNull())) return
         if (decode(response)["hash"].str != hash) throw invalid()
     }
 

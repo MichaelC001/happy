@@ -84,6 +84,8 @@ data class ConversationState(
     val catalog: ModeCatalog? = null,
     /** The slash commands the agent offers, in its order; empty until read, and where it offers none. */
     val commands: List<SlashCommand> = emptyList(),
+    /** The provider's latest measurement of the conversation's context; null until one. */
+    val context: ContextMeasurement? = null,
     val working: Boolean = false,
     val activity: Activity? = null,
     /** The composer's text as this conversation keeps it, and a count that moves only when it came from elsewhere. */
@@ -108,6 +110,8 @@ data class ConversationState(
     val taken: ComposerTaken? = null,
     /** Why new work could not be made, shown once. */
     val workFailure: WorkFailure? = null,
+    /** A send the agent hasn't taken yet: on its way (its files going up first) or failed. */
+    val unsettledSends: Boolean = false,
 ) {
     val title: String? get() = agent?.title?.takeIf { it.isNotBlank() } ?: knownTitle?.takeIf { it.isNotBlank() }
     /** As the agent says ([AgentInfo.sendable]): an internal subagent, driven by its parent, or an archived chat takes no messages. */
@@ -157,6 +161,10 @@ class Conversation(
     private val keepDelayMillis: Long = 1_000,
     /** Lays out the rows' text on [lane] before each publish, so the screen only draws it; null leaves it to the screen. */
     private val typesetter: RowTypesetter? = null,
+    /** Reads the chat: the connection's outbox, kept until the computer hears ([com.slopus.happy.agent.AgentSession.markRead]); null asks [api] once. */
+    private val read: (suspend (String) -> Unit)? = null,
+    /** What the Happy references in its messages read as ([AgentSession.references][com.slopus.happy.agent.AgentSession.references]); null leaves the tags as written. */
+    private val references: com.slopus.happy.references.ReferenceReader? = null,
 ) {
     /**
      * A send on its way: the person's [text], its pictures inline and its
@@ -167,7 +175,8 @@ class Conversation(
     private class Outgoing(
         val id: String,
         val text: String,
-        val images: List<Block.Image>,
+        /** Fewer once a picture is taken out on its way ([removePicture]). */
+        var images: List<Block.Image>,
         val files: List<OutgoingFile> = emptyList(),
         /** A tool the agent runs before it reads this (a skill's `read_skill`). */
         val toolRequest: ToolRequest? = null,
@@ -192,7 +201,11 @@ class Conversation(
     val state: StateFlow<ConversationState> = _state.asStateFlow()
 
     private var snapshot = _state.value
-    private val builder = ConversationRowBuilder(typesetter = typesetter)
+    private val builder = ConversationRowBuilder(typesetter = typesetter).apply {
+        references = this@Conversation.references?.references?.value
+        named = this@Conversation.references?.let { reader -> reader::read }
+        pages = this@Conversation.references?.let { reader -> reader::readArtifacts }
+    }
     private val runs = ArrayList<Pair<String, MutableList<String>>>()
     /** Each run's status, start and end as last read, so it is kept as it came. */
     private val runInfo = HashMap<String, RunInfo>()
@@ -222,6 +235,12 @@ class Conversation(
     /** Questions answered while this was open, as the computer took them: they settle in their turn before history says so. */
     private val answered = HashMap<String, Question>()
     private var pumping: Job? = null
+
+    /** The send [pump] is writing now. */
+    private var writing: String? = null
+
+    /** Each outgoing picture's way to the computer, for the ring on its tile. */
+    val uploads = UploadBoard()
     private var creating: Deferred<Unit>? = null
     private var choice = initialChoice
     /** The first send is making the new work: the choice is fixed and another send waits. */
@@ -242,8 +261,21 @@ class Conversation(
         following = scope.launch(lane) {
             // The picker's choices; a failure here is asked again when a send needs the default.
             launch { try { readCatalog() } catch (e: CancellationException) { throw e } catch (_: Exception) {} }
+            // A title or name read, or a conversation renamed: the rows that name it read it so.
+            references?.let { reader ->
+                launch {
+                    reader.references.collect { now ->
+                        if (builder.references !== now) {
+                            builder.references = now
+                            publish()
+                        }
+                    }
+                }
+            }
             if (created) reload()
             signals.collect { signal ->
+                // The computer's models changed, or may have while away: the pickers read them again.
+                if (signal == ConversationSignal.Resync || (signal as? ConversationSignal.Event)?.type == "config.updated") rereadCatalog()
                 if (!created) return@collect
                 when (signal) {
                     ConversationSignal.Resync -> reload()
@@ -447,9 +479,12 @@ class Conversation(
             messages[message.id] = message
             pending += message.id
         }
+        outgoing.filter { it.id in messages }.forEach { uploads.clear(it.id) }
         outgoing.removeAll { it.id in messages }
         running = start.agent.isWorking
         activeRunStartedAt = runs.lastOrNull()?.first?.let(runInfo::get)?.takeIf { start.agent.isWorking && it.status == "running" }?.startedAt
+        // Before what came while reading, which is newer.
+        snapshot = snapshot.copy(context = start.context)
         val events = held.orEmpty()
         held = null
         events.forEach(::receive)
@@ -544,6 +579,7 @@ class Conversation(
                 val message = Message.parse(payload["message"]) ?: return
                 messages[message.id] = message
                 outgoing.removeAll { it.id == message.id }
+                uploads.clear(message.id)
                 val runId = payload["runId"].str
                 if (runId != null) place(message.id, runId)
                 else if (message.id !in pending && runs.none { message.id in it.second }) pending += message.id
@@ -626,6 +662,15 @@ class Conversation(
                 }
             }
             "agent.draft.updated" -> Draft.parse(payload["draft"])?.let(::adoptDraft)
+            "agent.context.updated" -> {
+                // A whole replacement; null clears it (a fresh conversation). Only the meter moves: no rows to derive.
+                val value = payload["context"] ?: return
+                val context = if (value is kotlinx.serialization.json.JsonNull) null else ContextMeasurement.parse(value) ?: return
+                if (context == snapshot.context) return
+                snapshot = snapshot.copy(context = context)
+                _state.value = snapshot
+                return
+            }
             // The whole catalog, which replaces what was known.
             "agent.slash_commands.updated" -> {
                 val commands = SlashCommand.parseAll(payload["slashCommands"]) ?: return
@@ -909,11 +954,26 @@ class Conversation(
         pumping = scope.launch(lane) {
             while (true) {
                 val next = outgoing.firstOrNull { !it.accepted && it.failure == null } ?: break
+                writing = next.id
                 try {
+                    next.images.indices.forEach { uploads.set(UploadBoard.pictureKey(next.id, it), UploadPhase.Preparing) }
                     ensureCreated()
                     val mode = sendingMode() ?: throw IllegalStateException("No model is set up on this computer.")
                     upload(next.files)
-                    val message = withRetries { api.send(agentId, next.id, next.wire, next.images, mode, next.toolRequest) }
+                    val images = next.images
+                    val message = withRetries {
+                        // The bytes of each picture's base64 written say how far it is.
+                        var ranges: UploadRanges? = null
+                        val progress = com.slopus.happy.connection.BodyProgress { body, sent ->
+                            val found = ranges ?: UploadRanges(body, images.map { it.data }).also { ranges = it }
+                            found.shares(sent).forEachIndexed { index, share ->
+                                uploads.set(UploadBoard.pictureKey(next.id, index), if (share >= 1f) UploadPhase.Done else UploadPhase.Uploading(share))
+                            }
+                        }
+                        withContext(progress) { api.send(agentId, next.id, next.wire, images, mode, next.toolRequest) }
+                    }
+                    // All there, whatever the transport told on the way; the echo clears them.
+                    images.indices.forEach { uploads.set(UploadBoard.pictureKey(next.id, it), UploadPhase.Done) }
                     next.accepted = true
                     if (message != null && message.id !in messages) {
                         messages[message.id] = message
@@ -925,10 +985,38 @@ class Conversation(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    uploads.clear(next.id)
                     next.failure = describe(e)
+                } finally {
+                    writing = null
                 }
                 publish()
             }
+        }
+    }
+
+    /**
+     * Takes picture [index] out of message [id] while it is still on its
+     * way (iOS `removeAttachment`): what is being written stops and the rest
+     * goes again under the same id; a message left with nothing is taken
+     * back whole. A picture already all written stays.
+     */
+    fun removePicture(id: String, index: Int) {
+        scope.launch(lane) {
+            val send = outgoing.firstOrNull { it.id == id && !it.accepted } ?: return@launch
+            if (index !in send.images.indices || uploads.phase(UploadBoard.pictureKey(id, index)) == UploadPhase.Done) return@launch
+            // Nothing still writing sends the message as it was.
+            pumping?.takeIf { it.isActive && writing == id }?.let {
+                it.cancel()
+                it.join()
+            }
+            if (send.accepted) return@launch pump()
+            send.images = send.images.filterIndexed { i, _ -> i != index }
+            // What is left starts again under its new keys.
+            uploads.clear(id)
+            if (send.text.isEmpty() && send.images.isEmpty() && send.files.isEmpty() && send.toolRequest == null) outgoing.remove(send)
+            publish()
+            pump()
         }
     }
 
@@ -943,8 +1031,7 @@ class Conversation(
             ?: throw IllegalStateException("This chat has no folder on the computer to put files in.")
         for (file in files) {
             if (file.uploaded) continue
-            val bytes = withContext(io) { file.file.readBytes() }
-            withRetries { api.uploadFile(workspaceId, file.path, bytes) }
+            withRetries { api.uploadFile(workspaceId, file.path, file.file, io) }
             file.uploaded = true
         }
     }
@@ -988,6 +1075,24 @@ class Conversation(
         val found = readCatalog().defaults
         // A pick made while the default was read wins.
         return mode ?: found?.also { mode = it; publish() }
+    }
+
+    /** Reads the computer's models again (`config.updated`, a reconnect): hidden accounts and models, names, windows. */
+    private fun rereadCatalog() {
+        scope.launch(lane) {
+            val found = try {
+                api.catalog()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                return@launch
+            }
+            catalogRead = null
+            if (found != catalog) {
+                catalog = found
+                publish()
+            }
+        }
     }
 
     /** The computer's models, read once; a failed read is asked again next time. */
@@ -1098,11 +1203,24 @@ class Conversation(
     /** A tool's presented item, read whole. */
     suspend fun media(ref: MediaRef): ByteArray = api.media(agentId, ref.toolCallId, ref.index)
 
+    /** The tool call [callId] as this conversation holds it now, and where it is in history; null where it holds none. */
+    suspend fun toolCall(callId: String): LocatedCall? = withContext(lane) {
+        fun inMessage(id: String) = (messages[id]?.content?.firstOrNull { it is Block.ToolCall && it.id == callId } as? Block.ToolCall)
+        runs.forEachIndexed { index, (runId, ids) ->
+            for (id in ids) inMessage(id)?.let { return@withContext LocatedCall(it, runId, runs.getOrNull(index + 1)?.first) }
+        }
+        pending.firstNotNullOfOrNull(::inMessage)?.let { LocatedCall(it, null, null) }
+    }
+
+    /** The tool call [callId] read whole from history, its raw data included; [located] finds its run at once. */
+    suspend fun fullToolCall(callId: String, located: LocatedCall? = null): Block.ToolCall? =
+        ToolCallReader(api, agentId).read(callId, located ?: toolCall(callId))
+
     private fun markRead() {
         if (!created) return
         scope.launch(lane) {
             try {
-                api.markRead(agentId)
+                read?.invoke(agentId) ?: api.markRead(agentId)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -1296,6 +1414,7 @@ class Conversation(
             working = working,
             activity = activity,
             draft = draft,
+            unsettledSends = outgoing.any { !it.accepted },
         )
     }
 

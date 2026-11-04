@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.conversation
 
+import com.slopus.happy.ui.tablet.BackOrSidebarToggle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -103,6 +104,8 @@ import com.slopus.happy.ui.layout.contentMaxWidth
 import com.slopus.happy.ui.theme.HappyTheme
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -141,9 +144,6 @@ object ConversationScreenTags {
     const val OLDER_RETRY = "conversation.older.retry"
     const val COMPOSE = "conversation.header.compose"
     const val COMPOSE_ICON = "conversation.header.compose.icon"
-    const val MORE = "conversation.header.more"
-    const val MENU = "conversation.header.menu"
-    const val DETAILS = "conversation.header.details"
     /** The fade behind the dock. */
     const val FADE = "conversation.fade"
 
@@ -172,6 +172,10 @@ class ConversationScreenActions(
     val onStop: () -> Unit = {},
     val onRetrySend: (String) -> Unit = {},
     val onDiscardSend: (String) -> Unit = {},
+    /** Each outgoing picture's way to the computer, for the rings in the bubble. */
+    val uploads: com.slopus.happy.conversation.UploadBoard? = null,
+    /** Takes a picture out of a message still on its way. */
+    val onRemovePicture: (messageId: String, index: Int) -> Unit = { _, _ -> },
     val onRetryFailure: (String) -> Unit = {},
     val onAnswer: suspend (questionId: String, answers: Map<String, List<String>>) -> Unit = { _, _ -> },
     /** Older history; `retry` after a failed page (Retry), which nothing else asks again. */
@@ -181,7 +185,11 @@ class ConversationScreenActions(
     val loadMedia: suspend (MediaRef) -> ByteArray = { throw IllegalStateException() },
     /** One byte range of a presented item, so a recording streams; null where ranges can't be asked for. */
     val loadMediaRange: (suspend (MediaRef, LongRange) -> TransportResponse)? = null,
+    /** The connection's media kept on this phone, with Telegram's download ring on each tile; null where nothing is kept. */
+    val kept: com.slopus.happy.conversation.KeptMedia? = null,
     val onOpenArtifact: ((com.slopus.happy.conversation.ConversationRow.Artifact) -> Unit)? = null,
+    /** HTML artifacts shown inline under their cards; null where none are. */
+    val pages: com.slopus.happy.ui.artifacts.InlinePages? = null,
     /** The newest message is on screen while the app is up: unread clears. */
     val onVisible: (Boolean) -> Unit = {},
     /** How a secret request is made and answered; null where this build cannot. */
@@ -194,6 +202,10 @@ class ConversationScreenActions(
     val onToggleTurn: (String) -> Unit = {},
     /** Opens a person's long message whole, or cuts it back, by its row's key. */
     val onToggleMessage: (String) -> Unit = {},
+    /** Opens a tool call on its own screen, by its id. */
+    val onOpenTool: ((String) -> Unit)? = null,
+    /** How a workspace's folders read, for naming one of its files from the attach sheet; null where they can't. */
+    val workspace: ((workspaceId: String) -> com.slopus.happy.ui.files.WorkspaceSource)? = null,
 )
 
 /**
@@ -224,6 +236,12 @@ fun ConversationScreen(
     bubbleColor: String? = null,
     /** The link as the header shows it, debounced: on its way somewhere, said with a spinner (iOS 7aee3a9b8). */
     link: LinkState = LinkState.Online,
+    /** The computer's accounts' plan usage by provider id, for the model label's warning. */
+    usage: Map<String, com.slopus.happy.conversation.AccountUsage> = emptyMap(),
+    /** A model or effort list opened: ask the computer again for these accounts' readings. */
+    onRefreshUsage: (List<String>) -> Unit = {},
+    /** "+"'s sheet is up as the screen first opens. */
+    opensAttach: Boolean = false,
 ) {
     RecomposeProbe.mark(ConversationScreenTags.PROBE_SCREEN)
     val colors = HappyTheme.colors
@@ -236,6 +254,8 @@ fun ConversationScreen(
         text = state.draft
     }
     val bubble = userMessageBubblePalette(bubbleColor, colors.dark)
+    val workspaceId = state.agent?.workspaceId
+    val workspace = remember(actions, workspaceId) { workspaceId?.let { id -> actions.workspace?.invoke(id) } }
     // "/" opens the agent's commands over the composer, as desktop's palette does.
     val commands by rememberUpdatedState(state.commands)
     val onCommand by rememberUpdatedState(actions.onCommand)
@@ -261,13 +281,14 @@ fun ConversationScreen(
     LaunchedEffect(state.question?.id) { asks.keepOnly(state.question?.id) }
     val pictures = rememberPictureViewer()
     val media = rememberMediaOpener()
-    val store = rememberConversationMediaStore(actions.loadMedia, actions.loadMediaRange)
+    val store = rememberConversationMediaStore(actions.loadMedia, actions.loadMediaRange, actions.kept)
     // The viewer pages through what the transcript holds when it opens.
     val rows by rememberUpdatedState(state.rows)
     val pictureLabel = stringResource(R.string.conversation_picture)
     val videoLabel = stringResource(R.string.artifact_video)
     val folds = remember(listState) { FoldHold(listState) }
-    val rowActions = remember(actions, legacy, pictures, media, store, pictureLabel, videoLabel, asks, folds) {
+    val videos = rememberVideoOpening(store::video)
+    val rowActions = remember(actions, legacy, pictures, media, store, pictureLabel, videoLabel, asks, folds, videos) {
         ConversationRowActions(
             legacy = legacy,
             onRetryFailure = actions.onRetryFailure,
@@ -275,7 +296,7 @@ fun ConversationScreen(
             onOpenArtifact = actions.onOpenArtifact,
             onOpenPicture = { key -> pictures.show(ConversationViewing.entries(rows, pictureLabel, videoLabel), key) },
             loadVideo = store::poster,
-            onOpenMedia = { ref -> media.open(ref.key, ref.item) { actions.loadMedia(ref) } },
+            onOpenMedia = { ref -> media.open(ref.key, ref.item, inApp = true) { store.file(ref) } },
             mediaOpening = { ref -> media.state(ref.key) },
             asks = asks,
             onToggleTurn = { turn ->
@@ -286,6 +307,12 @@ fun ConversationScreen(
                 folds.toggleMessage(key, rows)
                 actions.onToggleMessage(key)
             },
+            uploads = actions.uploads,
+            onRemovePicture = actions.onRemovePicture,
+            onOpenTool = actions.onOpenTool,
+            kept = store.kept,
+            videos = videos,
+            pages = actions.pages,
         )
     }
     val atNewest by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 } }
@@ -318,13 +345,24 @@ fun ConversationScreen(
         state.rows.isEmpty() -> TranscriptPhase.Empty
         else -> TranscriptPhase.Rows
     }
+    // The composer's words full screen (iOS ComposerEditorViewController): the caret it opened on,
+    // packed start and end, or -1 while it is down; kept across a rotation.
+    var editing by rememberSaveable { mutableLongStateOf(-1L) }
+    val editorAt = if (editing < 0) null else TextRange((editing ushr 32).toInt(), (editing and 0xffffffffL).toInt())
+    var returned by remember { mutableStateOf<ComposerReturn?>(null) }
+    val onComposerText: (String) -> Unit = {
+        text = it
+        actions.onDraftChange(it)
+    }
     // A held message lifts over the chat, blurred and veiled behind it above the composer (iOS 8c2a92172).
     val lift = remember { MessageLift() }
     val blur = with(LocalDensity.current) { MessageLiftSpec.blur.toPx() }
     Box(modifier.fillMaxSize()) {
         CompositionLocalProvider(LocalMessageLift provides lift) {
             GlassBarLayout(
-                modifier = Modifier.testTag(ConversationScreenTags.SCREEN).fillMaxSize().background(colors.surface),
+                // Under the editor, TalkBack has the editor alone.
+                modifier = Modifier.testTag(ConversationScreenTags.SCREEN).fillMaxSize().background(colors.surface)
+                    .then(if (editorAt != null) Modifier.clearAndSetSemantics {} else Modifier),
                 ground = colors.surface,
                 source = glass,
                 // Only the transcript runs under the bar; the other states are held below the bar's foot.
@@ -422,8 +460,10 @@ fun ConversationScreen(
                             }
                         },
                         navigationIcon = {
-                            IconButton(onClick = actions.onBack, modifier = Modifier.testTag(ConversationScreenTags.BACK)) {
-                                Icon(MaterialSymbols.ArrowBack, stringResource(R.string.common_back))
+                            BackOrSidebarToggle {
+                                IconButton(onClick = actions.onBack, modifier = Modifier.testTag(ConversationScreenTags.BACK)) {
+                                    Icon(MaterialSymbols.ArrowBack, stringResource(R.string.common_back))
+                                }
                             }
                         },
                         actions = {
@@ -543,10 +583,7 @@ fun ConversationScreen(
                             ConversationComposer(
                                 state = state,
                                 text = text,
-                                onTextChange = {
-                                    text = it
-                                    actions.onDraftChange(it)
-                                },
+                                onTextChange = onComposerText,
                                 onSend = { words, attachments ->
                                     // "/name" and what follows runs that command; its words are never a message.
                                     val invoked = if (attachments.isEmpty()) SlashCommands.invocation(words.trim(), state.commands) else null
@@ -569,18 +606,36 @@ fun ConversationScreen(
                                 // The same centred column as the messages; the bar above stays full width.
                                 modifier = Modifier.contentMaxWidth(LocalWindowLayout.current),
                                 backdrop = glass,
+                                opensAttach = opensAttach,
                                 focusAsks = nameReturns,
                                 flight = flight,
                                 cursor = autocomplete.cursor,
+                                usage = usage,
+                                onRefreshUsage = onRefreshUsage,
+                                onExpand = { at -> if (editing < 0) editing = (at.start.toLong() shl 32) or at.end.toLong() },
+                                returned = returned,
+                                // Sideways with the keyboard up, one row once the full card would leave the transcript too little.
+                                barFoot = barFoot,
+                                workspace = workspace,
                             )
                         }
                     }
                     SendFlightOverlay(flight, bubble, remember(colors) { ProsePalette.of(colors) })
                     PictureViewerHost(pictures, store)
+                    MediaPreview(media)
                 }
             }
         }
         CompositionLocalProvider(LocalMessageLift provides null, LocalCodeCopy provides CodeCopy.Icon) { MessageLiftOverlay(lift) }
+        ComposerEditor(
+            opened = editorAt,
+            text = text,
+            onTextChange = onComposerText,
+            onClose = { selection, focused ->
+                returned = ComposerReturn(selection, focused, (returned?.serial ?: 0) + 1)
+                editing = -1L
+            },
+        )
     }
 }
 

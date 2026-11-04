@@ -1,5 +1,10 @@
 package com.slopus.happy.ui.chat
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import com.slopus.happy.ui.conversation.ConversationHeaderSpec
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,12 +19,12 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -68,9 +73,6 @@ object ChatScreenTags {
     const val GIT_CHANGES = "chat.header.git"
     const val AVATAR = "chat.header.avatar"
     const val COMPOSE = "chat.header.compose"
-    const val MORE = "chat.header.more"
-    const val MENU = "chat.header.menu"
-    const val INFO = "chat.header.info"
     const val LOADING = "chat.loading"
     const val DELETED = "chat.deleted"
     const val DELETED_ICON = "chat.deleted.icon"
@@ -159,14 +161,33 @@ class ChatScreenSlots(
 )
 
 /**
- * A chat being started: "New chat" in the header, [placeholder] in place of
+ * A chat being started: "New chat" in the header (none before the first
+ * send without [headerShown]), [placeholder] in place of
  * the transcript, and the composer under it, its chips read from [anchor]
  * (the chat it was opened beside, which decides how it runs). With
  * [focusComposer] the composer takes the keyboard as it first shows (an
  * empty chat compose opened).
  */
 @Immutable
-class ChatPendingSlot(val anchor: ChatSessionInfo?, val focusComposer: Boolean = false, val placeholder: @Composable () -> Unit)
+class ChatPendingSlot(
+    val anchor: ChatSessionInfo?,
+    val focusComposer: Boolean = false,
+    /** What the composer asks for while empty (a task's first message); null for the chat's own. */
+    val composerPlaceholder: String? = null,
+    /** False until the first send: the header is Back alone (compose's empty chat). */
+    val headerShown: Boolean = true,
+    val placeholder: @Composable () -> Unit,
+)
+
+/** Shown at once, or faded in ease-out over 0.25 s once [shown] turns true; nothing while false. */
+@Composable
+private fun HeaderFadeIn(shown: Boolean, content: @Composable () -> Unit) {
+    AnimatedVisibility(
+        visible = shown,
+        enter = fadeIn(tween(ConversationHeaderSpec.FADE_MILLIS, easing = ConversationHeaderSpec.easing)),
+        exit = ExitTransition.None,
+    ) { content() }
+}
 
 /**
  * One chat (SessionView.tsx). Spec: the header ([ChatHeaderTitle]: back;
@@ -283,12 +304,16 @@ fun ChatScreen(
                 feathered = showsList,
                 bar = {
                     Column(Modifier.liftBackdrop(lift, blur)) {
+                        // An empty chat's header is Back alone; its name and actions fade in with the first send (iOS 323fb2e9f).
+                        val headerShown = session != null || pending?.headerShown != false
                         Header(
                             left = { HeaderBackButton(actions.onBack) },
                             titleContent = {
-                                ChatHeaderTitle(slots.headerTitle ?: title, session, gitStatus, onClick = if (session != null) actions.onInfo else null, subtitleOverride = slots.headerSubtitle, working = state.sessionState == SessionState.Thinking, link = link)
+                                HeaderFadeIn(headerShown) {
+                                    ChatHeaderTitle(slots.headerTitle ?: title, session, gitStatus, onClick = if (session != null) actions.onInfo else null, subtitleOverride = slots.headerSubtitle, working = state.sessionState == SessionState.Thinking, link = link)
+                                }
                             },
-                            right = { ChatHeaderActions(session, modes, session?.metadata ?: pending?.anchor?.metadata, actions) },
+                            right = { HeaderFadeIn(headerShown) { ChatHeaderActions(actions) } },
                         )
                         slots.headerAccessory?.invoke()
                         if (!tablet) com.slopus.happy.ui.voice.VoiceStatusBar()
@@ -315,6 +340,7 @@ fun ChatScreen(
                             ChatDock(
                                 state, composerSession, draft, actions, now, modes, inactiveHint.takeIf { session != null }, goalBar, activityBar, inputPadding, showDetails,
                                 autoFocus = session == null && pending?.focusComposer == true,
+                                placeholder = pending?.composerPlaceholder.takeIf { session == null },
                                 onPanelPositioned = if (docked) { coordinates ->
                                     cardInset = list[0]?.takeIf { it.isAttached }?.let { it.size.height - it.localPositionOf(coordinates, Offset.Zero).y }
                                 } else null,

@@ -15,11 +15,14 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.test.runCurrent
 import org.junit.Test
 
 /** A paired agent answering conversation routes from memory, recording every request. */
@@ -45,6 +48,10 @@ private class FakeAgent {
     var answerStatus: Int? = null
     /** A slash command's invocation answers this status; accepted, with [commandsAfter] as the catalog. */
     var commandStatus = 202
+    /** A send writes half its body, then waits for this before writing the rest and answering. */
+    var halfway: CompletableDeferred<Unit>? = null
+    /** What `GET /v0/config` answers. */
+    var config = CONFIG
     var commandsAfter = """[{"name":"compact","hasArguments":false,"description":"Summarize.","kind":"compaction"}]"""
 
     val request: AgentRequest = { method, path, body, _ ->
@@ -71,6 +78,14 @@ private class FakeAgent {
             route.endsWith("/messages") && failOlder && "before=" in path -> TransportResponse(503, body = "{}".toByteArray())
             route.endsWith("/messages") && "after=" in path && afterPage != null -> ok(afterPage!!)
             route.endsWith("/messages") -> ok(page)
+            route.endsWith("/send") && halfway != null -> {
+                val bytes = body.toString().toByteArray()
+                val progress = kotlinx.coroutines.currentCoroutineContext()[com.slopus.happy.connection.BodyProgress]
+                progress?.report(bytes, bytes.size / 2)
+                halfway!!.await()
+                progress?.report(bytes, bytes.size)
+                TransportResponse(202, body = "{}".toByteArray())
+            }
             route.endsWith("/send") && failSends > 0 -> { failSends--; TransportResponse(503, body = """{"error":"busy"}""".toByteArray()) }
             route.endsWith("/send") -> TransportResponse(sendStatus, body = """{"error":"Unknown model.","code":"invalid_request"}""".toByteArray())
             route.endsWith("/answer") && answerStatus != null -> TransportResponse(answerStatus!!, body = """{"error":"busy"}""".toByteArray())
@@ -79,7 +94,7 @@ private class FakeAgent {
             } else {
                 TransportResponse(commandStatus, body = """{"error":"The daemon's own words.","code":"conflict"}""".toByteArray())
             }
-            route == "/v0/config" -> ok(CONFIG)
+            route == "/v0/config" -> ok(config)
             route.endsWith("/draft") -> ok("""{"draft":${(body as JsonObject).let { """{"value":${it["draft"]},"updatedAt":${it["updatedAt"]}}""" }}}""")
             else -> ok("{}")
         }
@@ -793,6 +808,18 @@ class ConversationTest {
         assertEquals(sol, catalog.pick(sol, "grok", "xai/grok-4.5"))
     }
 
+    @Test fun `the computer's config changed reads the models again`() = runTest {
+        val agent = FakeAgent()
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        assertEquals(3, chat.state.value.catalog?.models?.size)
+        agent.config = FakeAgent.CONFIG.replace(""""grok":{"type":"grok","enabled":false""", """"grok":{"type":"grok","enabled":true""")
+        signals.emit(event("config.updated", "{}"))
+        advanceUntilIdle()
+        assertEquals("xai/grok-4.5", chat.state.value.catalog?.models?.last()?.modelId)
+        assertEquals(4, chat.state.value.catalog?.models?.size)
+    }
+
     @Test fun `a picked mode is kept with the draft at once and sends with the next message`() = runTest {
         val agent = FakeAgent()
         val chat = conversation(agent)
@@ -862,6 +889,64 @@ class ConversationTest {
         assertTrue(row.text.contains("./.happy-uploads/$id/1-clip.mp4"))
     }
 
+    /** desktop 01659140: a send in hand when the screen goes stays with its conversation, which the next screen takes back. */
+    @Test fun `a conversation left mid-send is kept for its next screen and closed once its sends are taken`() = runTest {
+        val agent = FakeAgent()
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        val gate = CompletableDeferred<Unit>()
+        agent.gate = gate
+        chat.send("Ship it")
+        runCurrent()
+        assertTrue(chat.state.value.unsettledSends)
+        val parked = ParkedConversations(CoroutineScope(StandardTestDispatcher(testScheduler) + SupervisorJob().also { jobs += it }))
+        parked.park(chat)
+        assertTrue("the next screen for the agent takes the same conversation", parked.adopt("a1") === chat)
+        assertNull(parked.adopt("a1"))
+        parked.park(chat)
+        agent.gate = null
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertFalse(chat.state.value.unsettledSends)
+        assertNull("settled, it is closed and no longer kept", parked.adopt("a1"))
+        assertEquals("sent once", 1, agent.requests.count { it.second.endsWith("/send") })
+    }
+
+    /** A failed send is in hand too: the reopened chat still shows it failed, and its Retry goes under the same id. */
+    @Test fun `a conversation left with a failed send comes back with it failed and retries it once`() = runTest {
+        val agent = FakeAgent()
+        agent.sendStatus = 400
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        chat.send("Hello")
+        advanceUntilIdle()
+        assertTrue(chat.state.value.holdsSends)
+        val parked = ParkedConversations(CoroutineScope(StandardTestDispatcher(testScheduler) + SupervisorJob().also { jobs += it }))
+        parked.park(chat)
+        advanceUntilIdle()
+        val back = parked.adopt("a1")
+        assertTrue("kept while failed", back === chat)
+        val row = back!!.state.value.rows.single() as ConversationRow.User
+        assertEquals(Delivery.Failed(Problem.Said("Unknown model.")), row.delivery)
+        parked.park(back)
+        agent.sendStatus = 202
+        back.retrySend(row.messageId)
+        advanceUntilIdle()
+        assertFalse(back.state.value.holdsSends)
+        assertNull("taken, it is closed and no longer kept", parked.adopt("a1"))
+        val ids = agent.requests.filter { it.second.endsWith("/send") }.map { it.third!!["id"] }
+        assertEquals(2, ids.size)
+        assertEquals("the retry is the same send", ids[0], ids[1])
+    }
+
+    @Test fun `a conversation left with nothing in hand is closed at once`() = runTest {
+        val chat = conversation(FakeAgent())
+        advanceUntilIdle()
+        val parked = ParkedConversations(CoroutineScope(StandardTestDispatcher(testScheduler) + SupervisorJob().also { jobs += it }))
+        parked.park(chat)
+        assertNull(parked.adopt("a1"))
+    }
+
     @Test fun `a refused upload fails the send and a retry writes only what is missing`() = runTest {
         val agent = FakeAgent()
         agent.refuseFiles = 1
@@ -886,6 +971,45 @@ class ConversationTest {
         api.uploadFile("w1", "a.txt", "hi".toByteArray())
         api.uploadFile("w1", "a.txt", "hi".toByteArray())
         val refused = runCatching { api.uploadFile("w1", "a.txt", "other".toByteArray()) }.exceptionOrNull()
+        assertTrue(refused is ConversationApiException && refused.status == 409)
+    }
+
+    /** desktop 3885593e: a 50 MB file's JSON made once from the disk; a whole string of it ran a phone's heap out. */
+    @Test fun `a file's upload body is its base64 made from the disk a piece at a time`() {
+        val dir = kotlin.io.path.createTempDirectory("body").toFile()
+        val random = java.util.Random(7)
+        // Empty, short, a chunk exactly, and past several chunks with a remainder.
+        for (size in listOf(0, 2, 3 * 64 * 1024, 3 * 64 * 1024 * 3 + 5)) {
+            val bytes = ByteArray(size).also(random::nextBytes)
+            val file = java.io.File(dir, "f$size").apply { writeBytes(bytes) }
+            val (body, hash) = WorkspaceUploads.body(".happy-uploads/m/0-a \"b\".bin", file)
+            val o = Json.parseToJsonElement(body.decodeToString()).jsonObject
+            assertEquals(".happy-uploads/m/0-a \"b\".bin", o["path"]!!.jsonPrimitive.content)
+            assertEquals(kotlinx.serialization.json.JsonNull, o["expectedHash"])
+            assertTrue(java.util.Base64.getDecoder().decode(o["content"]!!.jsonPrimitive.content).contentEquals(bytes))
+            assertEquals(WorkspaceUploads.hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)), hash)
+        }
+    }
+
+    @Test fun `a file uploads from disk as bytes, and a refused write that holds them already counts as written`() = runTest {
+        val agent = FakeAgent()
+        // The connection's client: a refusal is thrown with its answer, as AgentClient.check does.
+        val bytesRequest: AgentBytesRequest = { method, path, body, category ->
+            val response = agent.request(method, path, Json.parseToJsonElement(body.decodeToString()), category)
+            if (response.status !in 200..299) {
+                val answer = Json.parseToJsonElement(response.text).jsonObject
+                throw ConversationApiException(response.status, answer["code"]?.jsonPrimitive?.content, null, answer)
+            }
+            response
+        }
+        val api = ConversationApi(bytesRequest, agent.request)
+        val dir = kotlin.io.path.createTempDirectory("upload").toFile()
+        val file = java.io.File(dir, "big.bin").apply { writeBytes(ByteArray(700_000) { (it % 251).toByte() }) }
+        api.uploadFile("w1", "big.bin", file, kotlin.coroutines.EmptyCoroutineContext)
+        api.uploadFile("w1", "big.bin", file, kotlin.coroutines.EmptyCoroutineContext)
+        assertTrue(agent.written.getValue("w1:big.bin").contentEquals(file.readBytes()))
+        file.writeBytes(byteArrayOf(1))
+        val refused = runCatching { api.uploadFile("w1", "big.bin", file, kotlin.coroutines.EmptyCoroutineContext) }.exceptionOrNull()
         assertTrue(refused is ConversationApiException && refused.status == 409)
     }
 
@@ -1044,6 +1168,24 @@ class ConversationTest {
         signals.emit(event("agent.slash_commands.updated", """{"agentId":"a1"}"""))
         advanceUntilIdle()
         assertEquals(listOf("deploy"), chat.state.value.commands.map { it.name })
+    }
+
+    @Test fun `the context measurement comes with the bootstrap and each update replaces it, null clearing it`() = runTest {
+        val agent = FakeAgent().apply {
+            bootstrap = bootstrap.replace("\"pending\":[]", """"pending":[],"context":{"approximate":false,"contextTokens":84000,"contextWindow":200000,"modelId":"m","providerId":"codex"}""")
+        }
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        assertEquals(ContextMeasurement(false, 84000.0, 200000.0, "m", "codex"), chat.state.value.context)
+        val rows = chat.state.value.rows
+        signals.emit(event("agent.context.updated", """{"agentId":"a1","context":{"approximate":true,"contextTokens":120000,"contextWindow":200000,"modelId":"m","providerId":"codex"}}"""))
+        advanceUntilIdle()
+        assertEquals(ContextMeasurement(true, 120000.0, 200000.0, "m", "codex"), chat.state.value.context)
+        // Only the meter moves: the rows are the same list.
+        assertTrue(rows === chat.state.value.rows)
+        signals.emit(event("agent.context.updated", """{"agentId":"a1","context":null}"""))
+        advanceUntilIdle()
+        assertNull(chat.state.value.context)
     }
 
     @Test fun `a command runs on its module under the composer's mode and is never a message`() = runTest {
@@ -1213,6 +1355,56 @@ class ConversationTest {
         assertEquals(ConversationRow.TurnEnd("r2:status", "r2", "error", 5_000, 0, "Again"), failed)
     }
 
+
+    private fun picture(fill: Char) = Block.Image("image/png", fill.toString().repeat(4000))
+
+    private fun sentImages(agent: FakeAgent) = agent.requests.filter { it.second.endsWith("/send") }.map { request ->
+        request.third!!["content"]?.jsonArray.orEmpty().map { it.jsonObject }.filter { it["type"]?.jsonPrimitive?.content == "image" }.map { it["data"]!!.jsonPrimitive.content.first() }
+    }
+
+    @Test fun `a sending picture says how much of it is written and is forgotten once taken`() = runTest {
+        val agent = FakeAgent()
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        val gate = CompletableDeferred<Unit>().also { agent.halfway = it }
+        assertTrue(chat.send("Look", listOf(picture('A'), picture('B'))))
+        advanceUntilIdle()
+        val id = chat.state.value.rows.filterIsInstance<ConversationRow.User>().single().messageId
+        // Half the body: the first picture mostly written, the second not begun.
+        val first = chat.uploads.phase(UploadBoard.pictureKey(id, 0))
+        val second = chat.uploads.phase(UploadBoard.pictureKey(id, 1))
+        assertTrue("first: $first", first is UploadPhase.Uploading && first.share > 0.5f || first == UploadPhase.Done)
+        assertTrue("second: $second", second == UploadPhase.Uploading(0f) || second is UploadPhase.Uploading && second.share < 0.5f)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        // Taken: all there until the agent's own copy comes back.
+        assertEquals(UploadPhase.Done, chat.uploads.phase(UploadBoard.pictureKey(id, 1)))
+        assertEquals(Delivery.Pending, chat.state.value.rows.filterIsInstance<ConversationRow.User>().single().delivery)
+        signals.emit(event("message.created", """{"agentId":"a1","runId":null,"message":{"id":"$id","role":"user","status":"pending","createdAt":5,"content":[{"type":"text","text":"Look"}],"metadata":{}}}"""))
+        advanceUntilIdle()
+        assertEquals(null, chat.uploads.phase(UploadBoard.pictureKey(id, 0)))
+    }
+
+    @Test fun `taking a picture out on its way sends the rest under the same id, and the last one takes the message back`() = runTest {
+        val agent = FakeAgent()
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        agent.halfway = CompletableDeferred()
+        assertTrue(chat.send("", listOf(picture('A'), picture('B'))))
+        advanceUntilIdle()
+        val id = chat.state.value.rows.filterIsInstance<ConversationRow.User>().single().messageId
+        chat.removePicture(id, 1)
+        advanceUntilIdle()
+        assertEquals("written again without it", listOf(listOf('A', 'B'), listOf('A')), sentImages(agent))
+        assertEquals(1, chat.state.value.rows.filterIsInstance<ConversationRow.User>().single().pictures.size)
+        val ids = agent.requests.filter { it.second.endsWith("/send") }.map { it.third!!["id"]!!.jsonPrimitive.content }.distinct()
+        assertEquals("one message", 1, ids.size)
+
+        chat.removePicture(id, 0)
+        advanceUntilIdle()
+        assertTrue("nothing left: taken back", chat.state.value.rows.filterIsInstance<ConversationRow.User>().isEmpty())
+        assertEquals(2, sentImages(agent).size)
+    }
 }
 
 private fun preview(uri: String, mimeType: String, size: Long, name: String = uri.substringAfterLast('/')) =

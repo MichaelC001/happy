@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.connection
 
+import com.slopus.happy.ui.tablet.BackOrSidebarToggle
 import com.slopus.happy.ui.page
 import com.slopus.happy.ui.components.ProvideRowReveal
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -106,6 +107,7 @@ internal fun NavGraphBuilder.agentSettingsPages(graph: AppGraph, nav: NavHostCon
             )
         }
     }
+    page<AgentDataStorageRoute> { entry -> AgentDataStorage(graph, nav, entry.toRoute<AgentDataStorageRoute>().connectionId) }
     page<AgentProfileRoute> { entry ->
         val id = entry.toRoute<AgentProfileRoute>().connectionId
         val source = remember(id) { graph.agentSessions.session(id)?.profile } ?: return@page
@@ -127,13 +129,13 @@ object AgentPagesTags {
 
 /** A page under an agent connection's Settings: its bar on the page's own grey, as Settings' is. */
 @Composable
-private fun AgentPage(title: String, onBack: () -> Unit, content: @Composable () -> Unit) {
+internal fun AgentPage(title: String, onBack: () -> Unit, content: @Composable () -> Unit) {
     Screen(
         header = {
             AgentTopBar(
                 tag = AgentPagesTags.BAR,
                 container = HappyTheme.colors.grouped.background,
-                navigationIcon = { BarIconButton(Ionicon.ArrowBack, stringResource(R.string.common_back), onBack) },
+                navigationIcon = { BackOrSidebarToggle { BarIconButton(Ionicon.ArrowBack, stringResource(R.string.common_back), onBack) } },
                 title = { Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 1) },
             )
         },

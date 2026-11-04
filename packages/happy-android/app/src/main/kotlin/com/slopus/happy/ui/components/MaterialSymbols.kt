@@ -13,6 +13,10 @@ import androidx.compose.ui.unit.dp
  */
 object MaterialSymbols {
     val ArrowBack: ImageVector by lazy { icon("ArrowBack", "M20,11H7.83l5.59,-5.59L12,4l-8,8 8,8 1.41,-1.41L7.83,13H20v-2z", mirrored = true) }
+    /** iPadOS's `sidebar.left`: a window with its leading column ruled off. */
+    val Sidebar: ImageVector by lazy {
+        icon("Sidebar", "M19,4H5C3.9,4 3,4.9 3,6v12c0,1.1 0.9,2 2,2h14c1.1,0 2,-0.9 2,-2V6c0,-1.1 -0.9,-2 -2,-2zM5,18V6h3v12H5zM19,18h-9V6h9v12z", mirrored = true)
+    }
     val Send: ImageVector by lazy { icon("Send", "M2.01,21L23,12 2.01,3 2,10l15,2 -15,2z", mirrored = true) }
     val Stop: ImageVector by lazy { icon("Stop", "M6,6h12v12H6z") }
     val Close: ImageVector by lazy {
@@ -118,6 +122,9 @@ object MaterialSymbols {
     }
     val Folder: ImageVector by lazy {
         icon("Folder", "M10,4H4c-1.1,0 -1.99,0.9 -1.99,2L2,18c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V8c0,-1.1 -0.9,-2 -2,-2h-8l-2,-2z")
+    }
+    val Computer: ImageVector by lazy {
+        icon("Computer", "M20,18c1.1,0 1.99,-0.9 1.99,-2L22,6c0,-1.1 -0.9,-2 -2,-2H4c-1.1,0 -2,0.9 -2,2v10c0,1.1 0.9,2 2,2H0v2h24v-2h-4zM4,6h16v10H4V6z")
     }
     val ContentPaste: ImageVector by lazy {
         icon(

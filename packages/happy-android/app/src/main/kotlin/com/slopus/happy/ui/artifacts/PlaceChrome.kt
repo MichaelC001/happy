@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.artifacts
 
+import com.slopus.happy.ui.tablet.BackOrSidebarToggle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,7 +40,8 @@ object PlaceTags {
  * back (or, [closes], a close: the in-app browser, whose system back walks
  * its history first), the title on one line with [subtitle] under it, and
  * [actions]; glass over the page's own surface ([GlassBarScreen]), as
- * home's bar is, the content held below it.
+ * home's bar is, the content held below it. [bar] takes the bar's place
+ * while given (a search field).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -50,20 +52,23 @@ internal fun PlaceScaffold(
     actions: @Composable RowScope.() -> Unit = {},
     subtitle: String? = null,
     closes: Boolean = false,
+    bar: (@Composable () -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     val colors = HappyTheme.colors
     GlassBarScreen(
         modifier = Modifier.fillMaxSize().background(colors.surface).testTag(tag),
         ground = colors.surface,
-        bar = {
+        bar = bar ?: {
             AgentTopBar(
                 tag = PlaceTags.BAR,
                 container = colors.surface,
                 navigationIcon = {
-                    IconButton(onClick = onBack, modifier = Modifier.testTag(ConversationScreenTags.BACK)) {
-                        if (closes) Icon(MaterialSymbols.Close, stringResource(R.string.browser_close))
-                        else Icon(MaterialSymbols.ArrowBack, stringResource(R.string.common_back))
+                    BackOrSidebarToggle {
+                        IconButton(onClick = onBack, modifier = Modifier.testTag(ConversationScreenTags.BACK)) {
+                            if (closes) Icon(MaterialSymbols.Close, stringResource(R.string.browser_close))
+                            else Icon(MaterialSymbols.ArrowBack, stringResource(R.string.common_back))
+                        }
                     }
                 },
                 title = {

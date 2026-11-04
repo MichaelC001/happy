@@ -9,6 +9,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.R
+import com.slopus.happy.ui.connection.DataStorageTags
 import com.slopus.happy.model.Profile
 import com.slopus.happy.ui.components.Avatar
 import com.slopus.happy.ui.components.Icon
@@ -98,6 +99,7 @@ class HappySettingsActions(
     val onLanguage: () -> Unit = {},
     val onVoice: () -> Unit = {},
     val onAgents: () -> Unit = {},
+    val onDataStorage: () -> Unit = {},
     val onScanTerminal: () -> Unit = {},
     val onEnterTerminal: () -> Unit = {},
     /** Signs this account out, once confirmed. */
@@ -153,6 +155,12 @@ fun happySettingsSections(actions: HappySettingsActions, connectingTerminal: Boo
                 icon = { SettingsTile(Ionicon.OptionsOutline, SettingsTiles.teal) },
                 onClick = actions.onAgents,
             ),
+            SettingsEntry(
+                id = DataStorageTags.ROW,
+                title = stringResource(R.string.data_storage_title),
+                icon = { SettingsTile(Ionicon.ServerOutline, SettingsTiles.green) },
+                onClick = actions.onDataStorage,
+            ),
         ),
     ),
     SettingsSection(
@@ -178,8 +186,9 @@ fun happySettingsSections(actions: HappySettingsActions, connectingTerminal: Boo
 
 /**
  * A Happy account's Settings, as iOS's SettingsViewController lays out a
- * Happy account's page: its picture, name and "@username" (or "Happy
- * account") at the top ([SettingsHeader]); every account on the phone with
+ * Happy account's page: its picture, name and "Happy CLI · @username"
+ * (an account with no name goes by "Happy CLI", iOS 64edb6a34) at the top
+ * ([SettingsHeader]); every account on the phone with
  * Add Agent ([AccountsCard]); Account and Backup & Restore; Appearance,
  * Language, Voice Assistant and Agents; the terminal's Scan QR code and
  * Enter URL; Support us; About; and Logout. Rows carry iOS's coloured

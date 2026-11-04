@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.connection
 
+import com.slopus.happy.ui.tablet.BackOrSidebarToggle
 import com.slopus.happy.ui.settings.SettingsTags
 import com.slopus.happy.ui.components.ProvideRowReveal
 import android.graphics.BitmapFactory
@@ -67,6 +68,7 @@ import com.slopus.happy.ui.settings.rememberSettingsSearch
 import com.slopus.happy.ui.settings.settingsProfileEntries
 import com.slopus.happy.ui.settings.settingsSearchResults
 import com.slopus.happy.ui.settings.supportEntry
+import com.slopus.happy.ui.settings.kindSubtitle
 import com.slopus.happy.ui.settings.SettingsTiles
 import com.slopus.happy.ui.settings.rememberAboutActions
 import com.slopus.happy.ui.settings.rememberAboutInfo
@@ -114,6 +116,7 @@ fun agentSettingsIndex(): List<AgentSettingsRow> {
         row(AgentSettingsTags.ASK_AVATAR, stringResource(R.string.settings_change_avatar), Ionicon.ImageOutline, AgentSettingsPlace.Ask, stringResource(R.string.agent_settings_edit_avatar_prefix)),
         row(AgentSettingsTags.APPEARANCE, stringResource(R.string.settings_appearance), Ionicon.ColorPaletteOutline),
         row(AgentPagesTags.HIDE_PROJECTS_ROW, stringResource(R.string.settings_hide_projects), Ionicon.FolderOutline, AgentSettingsPlace.Appearance),
+        row(DataStorageTags.ROW, stringResource(R.string.data_storage_title), Ionicon.ServerOutline),
         row(SettingsTags.SUPPORT, stringResource(R.string.settings_support_us), Ionicon.HeartOutline),
         row(SettingsPageTags.ADD_AGENT, stringResource(R.string.settings_add_agent), Ionicon.Add),
         row(SettingsTags.WHATS_NEW, stringResource(R.string.settings_whats_new), Ionicon.SparklesOutline),
@@ -158,6 +161,8 @@ class AgentSettingsActions(
     /** The person's own name and picture on this agent. */
     val onProfile: () -> Unit = {},
     val onAppearance: () -> Unit = {},
+    /** Data and Storage: the media kept on this phone; null where nothing is kept. */
+    val onDataStorage: (() -> Unit)? = null,
     /** Disconnects this connection; asked for only after the person confirmed. */
     val onRemove: () -> Unit = {},
     /** Opens this connection's Chief of Staff with [prefix] typed, unsent. */
@@ -226,6 +231,15 @@ fun AgentConnectionSettingsScreen(
                     icon = { SettingsTile(Ionicon.ColorPaletteOutline, SettingsTiles.purple) },
                     onClick = actions.onAppearance,
                 ),
+            ) + listOfNotNull(
+                actions.onDataStorage?.let { open ->
+                    SettingsEntry(
+                        id = DataStorageTags.ROW,
+                        title = stringResource(R.string.data_storage_title),
+                        icon = { SettingsTile(Ionicon.ServerOutline, SettingsTiles.green) },
+                        onClick = open,
+                    )
+                },
             ),
         ),
         SettingsSection(listOf(supportEntry(about, aboutActions))),
@@ -240,7 +254,7 @@ fun AgentConnectionSettingsScreen(
                 AgentTopBar(
                     tag = AgentSettingsTags.BAR,
                     container = HappyTheme.colors.grouped.background,
-                    navigationIcon = { BarIconButton(Ionicon.ArrowBack, stringResource(R.string.common_back), actions.onBack) },
+                    navigationIcon = { BackOrSidebarToggle { BarIconButton(Ionicon.ArrowBack, stringResource(R.string.common_back), actions.onBack) } },
                     title = { Text(stringResource(R.string.settings_title), style = MaterialTheme.typography.titleLarge, maxLines = 1) },
                     actions = { SettingsSearchButton(search) },
                 )
@@ -371,6 +385,7 @@ internal fun AgentConnectionSettings(graph: AppGraph, nav: NavHostController, co
             onBack = { nav.popBackStack() },
             onProfile = { nav.navigate(AgentProfileRoute(connectionId)) },
             onAppearance = { nav.navigate(AgentAppearanceRoute(connectionId)) },
+            onDataStorage = { nav.navigate(AgentDataStorageRoute(connectionId)) },
             onAskChief = { prefix -> nav.openChiefOfStaff(connectionId, prefix) },
             onRemove = {
                 if (switcher != null) switcher.removingFromSettings { removeAgentConnection(graph, connectionId) }
@@ -382,8 +397,8 @@ internal fun AgentConnectionSettings(graph: AppGraph, nav: NavHostController, co
         profile = SettingsProfile(
             id = connectionId,
             seed = accounts.entries.firstOrNull { it.id == connectionId }?.seed ?: connectionId,
-            name = agent.name,
-            subtitle = statusText(status),
+            name = agent.name.ifEmpty { stringResource(R.string.account_kind_agent) },
+            subtitle = kindSubtitle(stringResource(R.string.account_kind_agent), statusText(status)),
             imageUri = agent.avatarFile?.let { "file://$it" },
             thumbhash = agent.thumbhash,
         ),
