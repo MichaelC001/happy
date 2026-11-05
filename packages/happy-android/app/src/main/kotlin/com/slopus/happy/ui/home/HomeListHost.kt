@@ -1,5 +1,7 @@
 package com.slopus.happy.ui.home
 
+import com.slopus.happy.ui.migration.MigrationPath
+
 import com.slopus.happy.ui.rememberHomeAccountSwitch
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
@@ -47,6 +49,8 @@ class HomeListScope(
      */
     val listState: LazyListState,
     val syncing: Boolean = false,
+    /** The migration card over the list, if it shows. */
+    val migration: MigrationPath? = null,
 )
 
 /**
@@ -74,6 +78,11 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, phone: Boolean = f
         if (graph.changelog.lastViewedTitle.value.isEmpty() && latestChangelog.isNotEmpty()) graph.changelog.markViewed(latestChangelog)
     }
     val update = HomeUpdate.resolve(updateUrl, lastViewedChangelog.isNotEmpty() && graph.changelog.hasUnread(latestChangelog))
+    // PostHog's flag brings the migration card; a paired Happy Agent takes it away; its x hides that path's card on this phone.
+    val migrationNote by graph.migrationNote.collectAsStateWithLifecycle()
+    val agents by graph.agentConnections.accounts.collectAsStateWithLifecycle()
+    val closedMigrations by graph.desktopMigration.closed.collectAsStateWithLifecycle()
+    val migration = MigrationPath.shown(migrationNote, agents, serverAgent = state?.hasServerAgent == true, closed = closedMigrations)
     val uriHandler = LocalUriHandler.current
     var alert by remember { mutableStateOf<Alert?>(null) }
     val showAlert = remember { { next: Alert -> alert = next } }
@@ -154,6 +163,8 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, phone: Boolean = f
             onSwitchAccount = switchAccount,
             onLinkComputer = connect::scan,
             onCompose = navigation.onCompose,
+            onMigration = navigation.onMigration,
+            onCloseMigration = graph.desktopMigration::close,
         )
     }
 
@@ -172,7 +183,7 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, phone: Boolean = f
     }
 
     ProvideAvatarSettings(settings) {
-        content(HomeListScope(state, connection, settings.sessionListGrouping, callbacks, actions, update, navigation, listState, syncing))
+        content(HomeListScope(state, connection, settings.sessionListGrouping, callbacks, actions, update, navigation, listState, syncing, migration))
     }
     duplicating?.let { session ->
         DuplicateSheet(

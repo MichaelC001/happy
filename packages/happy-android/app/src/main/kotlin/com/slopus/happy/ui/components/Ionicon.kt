@@ -22,6 +22,7 @@ import com.slopus.happy.ui.theme.RnLineHeightStyle
  * (@expo/vector-icons 15.0.x, glyphmaps/Ionicons.json; MIT). Add entries as screens need them.
  */
 enum class Ionicon(val codepoint: Int) {
+    CardOutline(0xf1e8), // card-outline
     Add(0xf103), // add
     AddOutline(0xf107), // add-outline
     AlbumsOutline(0xf110), // albums-outline
@@ -84,6 +85,7 @@ enum class Ionicon(val codepoint: Int) {
     Folder(0xf325), // folder
     FolderOpenOutline(0xf327), // folder-open-outline
     FolderOutline(0xf329), // folder-outline
+    GiftOutline(0xf338), // gift-outline
     GitBranchOutline(0xf33b), // git-branch-outline
     GitCommitOutline(0xf33e), // git-commit-outline
     GitCompareOutline(0xf341), // git-compare-outline
@@ -113,12 +115,14 @@ enum class Ionicon(val codepoint: Int) {
     LogoGithub(0xf3f3), // logo-github
     Mic(0xf454), // mic
     MicOutline(0xf45e), // mic-outline
+    MicOff(0xf458), // mic-off
     HeartOutline(0xf377), // heart-outline
     SearchOutline(0xf563), // search-outline
     MoonOutline(0xf461), // moon-outline
     NewspaperOutline(0xf473), // newspaper-outline
     NotificationsOutline(0xf47f), // notifications-outline
     OptionsOutline(0xf48b), // options-outline
+    PaperPlaneOutline(0xf48e), // paper-plane-outline
     PauseOutline(0xf497), // pause-outline
     Pencil(0xf49c), // pencil
     PeopleOutline(0xf4a3), // people-outline

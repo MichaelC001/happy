@@ -6,12 +6,14 @@ import com.slopus.happy.accounts.AccountRemovals
 import com.slopus.happy.accounts.AccountStore
 import com.slopus.happy.accounts.RnServerConfigImporter
 import com.slopus.happy.accounts.accountId
+import com.slopus.happy.call.CallController
 import com.slopus.happy.agent.AgentSessions
 import com.slopus.happy.agent.CompletionChime
 import com.slopus.happy.auth.AndroidKeyStoreKeys
 import com.slopus.happy.auth.AuthCredentials
 import com.slopus.happy.auth.CredentialStore
 import com.slopus.happy.model.Profile
+import com.slopus.happy.model.Settings
 import java.io.File
 import com.slopus.happy.auth.AuthApi
 import com.slopus.happy.auth.AuthRepository
@@ -19,8 +21,11 @@ import com.slopus.happy.auth.AuthState
 import com.slopus.happy.auth.ExpoSecureStore
 import com.slopus.happy.auth.SecureStoreCredentialStore
 import com.slopus.happy.auth.SecureStoreKeys
+import com.slopus.happy.auth.tokenSubject
+import com.slopus.happy.config.FeatureFlags
 import com.slopus.happy.config.LiveAvatarsSetting
 import com.slopus.happy.config.LocalSettings
+import com.slopus.happy.config.PostHogFlags
 import com.slopus.happy.config.ServerConfig
 import com.slopus.happy.data.HappyDatabase
 import com.slopus.happy.data.HappyStore
@@ -29,10 +34,12 @@ import com.slopus.happy.model.settings.LanguageController
 import com.slopus.happy.model.settings.SettingsRepository
 import com.slopus.happy.net.ConnectionStatus
 import com.slopus.happy.net.HappyHttp
-import com.slopus.happy.payments.PreferencesPurchasesCache
-import com.slopus.happy.payments.PurchaseAccount
-import com.slopus.happy.payments.PurchasesRepository
-import com.slopus.happy.payments.RevenueCatPurchases
+import com.slopus.happy.payments.PlayBilling
+import com.slopus.happy.payments.RevenueCatApi
+import com.slopus.happy.payments.CallIntro
+import com.slopus.happy.payments.Offers
+import com.slopus.happy.payments.Subscription
+import com.slopus.happy.call.PreferencesCallUsageStore
 import com.slopus.happy.push.PushApi
 import com.slopus.happy.push.PushUnregisterQueue
 import com.slopus.happy.connection.AgentConnections
@@ -40,6 +47,7 @@ import com.slopus.happy.connection.PairingFlow
 import com.slopus.happy.connection.ServerAuthClient
 import com.slopus.happy.connection.ServerSignInFlow
 import com.slopus.happy.connection.TailcatTransport
+import com.slopus.happy.connection.networkPath
 import com.slopus.happy.sync.AccountSync
 import com.slopus.happy.sync.SessionFileCache
 import com.slopus.happy.ui.changelog.ChangelogReadMarker
@@ -55,6 +63,7 @@ import com.slopus.happy.voice.VoiceOptions
 import com.slopus.happy.voice.VoicePaywall
 import com.slopus.happy.voice.VoicePreferences
 import com.slopus.happy.voice.VoiceTools
+import com.slopus.happy.voice.VoiceStatus
 import com.slopus.happy.voice.VoiceUpsell
 import com.slopus.happy.chat.AgentState
 import com.slopus.happy.sync.SendOptions
@@ -69,8 +78,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
@@ -161,14 +172,16 @@ class AppGraph(
         val pending = removals.pending()
         if (pending.isEmpty()) return false
         for (id in pending) {
+            val publicId = accountStore.credentials(id)?.credentials?.token?.let(::tokenSubject)
             accountStore.remove(id)
             if (onDisk) {
                 appContext.deleteDatabase("account-$id.db")
                 SessionFileCache.directory(appContext.noBackupFilesDir, id).deleteRecursively()
+                if (!hasMediaOwner(publicId)) legacyMediaDirectory(publicId)?.deleteRecursively()
             }
             removals.finish(id)
         }
-        if (accountStore.registry.value.entries.isNotEmpty()) return false
+        if (accountStore.registry.value.entries.isNotEmpty() || accountStore.registry.value.activeId != null) return false
         localSettings.clear()
         for (name in WIPED_PREFS + ChangelogReadMarker.PREFS_NAME) appContext.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
         LocalCaches.wipe(appContext)
@@ -223,13 +236,6 @@ class AppGraph(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    val purchases = PurchasesRepository(
-        scope,
-        RevenueCatPurchases(appContext, BuildConfig.REVENUE_CAT_GOOGLE_KEY, BuildConfig.DEBUG),
-        PreferencesPurchasesCache(context.getSharedPreferences(PreferencesPurchasesCache.PREFS_NAME, Context.MODE_PRIVATE)),
-        currentAccount = { purchaseAccount() },
-    )
-
     /** The account's synced settings; a change is uploaded by the next sync. */
     val settings = SettingsRepository(store, scope, onChanged = ::requestSync)
 
@@ -240,7 +246,18 @@ class AppGraph(
 
     /** The newest What's New entry the user has seen (changelog/storage.ts). */
     val changelog = ChangelogReadMarker(context.getSharedPreferences(ChangelogReadMarker.PREFS_NAME, Context.MODE_PRIVATE))
+    /** The Happy CLI home's migration cards closed on this phone (iOS ea1a0902f). */
+    val desktopMigration = com.slopus.happy.ui.migration.DesktopMigrationCards(
+        context.getSharedPreferences(com.slopus.happy.ui.migration.DesktopMigrationCards.PREFS_NAME, Context.MODE_PRIVATE),
+    )
+    /** PostHog's flags for each Happy account, kept from the last answer, asked again in the foreground. */
+    val featureFlags = FeatureFlags(
+        context.getSharedPreferences(FeatureFlags.PREFS_NAME, Context.MODE_PRIVATE),
+        BuildConfig.POSTHOG_KEY.takeIf { it.isNotEmpty() }?.let { PostHogFlags(okHttp, it)::fetch },
+    )
     private val accountLock = Mutex()
+    /** Selection and removal publish atomically without waiting for another account's sync startup. */
+    private val accountSelectionLock = Mutex()
     private val foreground = MutableStateFlow(false)
     private val accountState = MutableStateFlow<AccountSync?>(null)
 
@@ -249,9 +266,16 @@ class AppGraph(
 
     val voicePreferences = VoicePreferences(context.getSharedPreferences(VoicePreferences.PREFS_NAME, Context.MODE_PRIVATE))
 
-    /** The SDK is allocated only inside connect(), never while constructing the app graph. */
+    /**
+     * The relay sessions' voice. Switched off: a Happy session's chat shows
+     * no voice button and nothing reaches ElevenLabs. Agent connections call
+     * through [calls]. The SDK is allocated only inside connect(), never
+     * while constructing the app graph.
+     */
     val voice: VoiceEngine = VoiceEngine(
         scope = scope,
+        enabled = false,
+        foreground = foreground,
         service = VoiceApi(okHttp, clientId, { serverUrl }, { serverConfig.voiceUrl }, BuildConfig.ELEVENLABS_AGENT_ID),
         transport = ElevenLabsTransport(appContext),
         credentials = { (auth.state.value as? AuthState.SignedIn)?.credentials },
@@ -263,8 +287,8 @@ class AppGraph(
                 VoiceUpsell.resolve(override = local.voiceUpsellOverride, overrideEnabled = BuildConfig.DEBUG || local.devModeEnabled))
         },
         paywall = object : VoicePaywall {
-            override fun hasPro() = purchases.hasPro()
-            override suspend fun present(flow: String) = purchases.present(flow).purchased
+            override fun hasPro() = subscription.hasPro()
+            override suspend fun present(flow: String) = offers.relayVoice(flow)
         },
         preferences = voicePreferences,
         contextFactory = {
@@ -371,8 +395,12 @@ class AppGraph(
     fun open(id: String): Job = scope.launch {
         if (accountStore.registry.value.activeId == id && (openAgentId.value == id || openAccountId() == id)) return@launch
         whileSwitching {
-            withContext(Dispatchers.IO) { accountStore.select(id) }
-            auth.reload()
+            accountSelectionLock.withLock {
+                // A row tapped just before its removal must not reopen the forgotten account.
+                if (accountStore.registry.value.entry(id) == null && agentConnections.accounts.value.none { it.id == id }) return@withLock
+                withContext(Dispatchers.IO) { accountStore.select(id) }
+                auth.reload()
+            }
         }
     }
 
@@ -441,18 +469,62 @@ class AppGraph(
         .flatMapLatest { it?.connectionStatus ?: flowOf(ConnectionStatus.DISCONNECTED) }
         .stateIn(scope, SharingStarted.Eagerly, ConnectionStatus.DISCONNECTED)
 
+    /**
+     * The Happy CLI home's migration card may show: PostHog's flag is on for
+     * the open Happy account, and its analytics are on.
+     */
+    val migrationNote: StateFlow<Boolean> = combine(accountState, settings.settings, featureFlags.on) { account, values, on ->
+        account != null && !values.analyticsOptOut && FeatureFlags.DIRECT_CONNECTION_MIGRATION_NOTE in on[account.anonId].orEmpty()
+    }.stateIn(scope, SharingStarted.Eagerly, false)
+
     /** The open relay account is catching up its stored state. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val isSyncing: StateFlow<Boolean> = accountState
         .flatMapLatest { it?.isSyncing ?: flowOf(false) }
         .stateIn(scope, SharingStarted.Eagerly, false)
 
+    /**
+     * The app's one subscription, RevenueCat's `pro` through Play and
+     * RevenueCat's REST API, under the Happy account when one is signed in.
+     * Without the build's RevenueCat key it offers nothing.
+     */
+    val subscription: Subscription by lazy {
+        val key = BuildConfig.REVENUE_CAT_GOOGLE_KEY
+        Subscription(
+            scope,
+            store = PlayBilling(appContext).takeIf { key.isNotBlank() },
+            revenueCat = RevenueCatApi(okHttp, key).takeIf { key.isNotBlank() },
+            preferences = appContext.getSharedPreferences(Subscription.PREFS_NAME, Context.MODE_PRIVATE),
+        )
+    }
+
+    /** The app's offer sheets, one at a time, for everything that sells the [subscription]. */
+    val offers: Offers by lazy {
+        Offers(scope, subscription, CallIntro(appContext.getSharedPreferences(PreferencesCallUsageStore.PREFS_NAME, Context.MODE_PRIVATE)))
+    }
+
     init {
         scope.launch {
-            combine(auth.state, serverConfig.url, accountStore.registry) { _, _, _ -> purchaseAccount() }.collect(purchases::setAccount)
+            var relay: String? = null
+            combine(auth.state, openAccount, accountStore.registry) { _, _, _ -> voiceRelay(relay).also { relay = it } }
+                .distinctUntilChanged()
+                .collect {
+                    subscription.relay(it)
+                    // Another account's: whatever sheet was up for the last one goes.
+                    offers.close()
+                }
         }
         scope.launch {
-            foreground.collect { if (it) purchases.refresh() }
+            foreground.collect { if (it) subscription.refresh() }
+        }
+        scope.launch {
+            featureFlags.load()
+            // The store is the account's by the time it opens, so its own opt-out is read, never the last account's.
+            combine(foreground, accountState) { visible, account -> account.takeIf { visible } }.collect { account ->
+                if (account != null && !withContext(Dispatchers.IO) { Settings.parse(store.effectiveSettings()).analyticsOptOut }) {
+                    featureFlags.refresh(account.anonId)
+                }
+            }
         }
         scope.launch {
             auth.state.collect { state -> accountLock.withLock { openAccount(state) } }
@@ -466,20 +538,38 @@ class AppGraph(
         }
     }
 
-    private fun purchaseAccount(): PurchaseAccount? = (auth.state.value as? AuthState.SignedIn)?.publicId
-        ?.takeIf { it.isNotBlank() }?.let { PurchaseAccount(serverUrl, it) }
+    /**
+     * The Happy account voice's subscription is under: the open one; while
+     * an agent connection is open, the account open before it ([last], or
+     * before this launch), as long as it is still signed in here. Voice is
+     * used on agent connections, so opening one never changes whose
+     * subscription it is.
+     */
+    private fun voiceRelay(last: String?): String? = when (openAccount.value) {
+        is OpenAccount.Happy -> (auth.state.value as? AuthState.SignedIn)?.publicId?.takeIf(String::isNotBlank)
+        is OpenAccount.Agent -> (last ?: subscription.account)?.takeIf { subject ->
+            accountStore.registry.value.entries.any { accountStore.credentials(it.id)?.credentials?.token?.let(::tokenSubject) == subject }
+        }
+        OpenAccount.None -> null
+    }
 
     /** Ask for a delta sync now (sign-in, app back in the foreground). No-op when signed out. */
     fun requestSync() {
         accountState.value?.requestSync()
     }
 
-    /** Whether the app is in the foreground (MainActivity started). */
+    /** Whether the app is in the foreground (one of its activities started). */
     val isForeground: StateFlow<Boolean> = foreground.asStateFlow()
+    private var started = 0
 
-    /** The app came to the foreground or left it (MainActivity onStart/onStop). */
+    /**
+     * One of the app's activities started or stopped (MainActivity, the QR
+     * scanner). Going from one to the other, the next starts before the last
+     * stops, so the app stays in the foreground throughout. Main thread.
+     */
     fun setForeground(value: Boolean) {
-        foreground.value = value
+        started = (started + if (value) 1 else -1).coerceAtLeast(0)
+        foreground.value = started > 0
     }
 
     /** Each agent connection's live link and cached home (AgentSessions). */
@@ -489,8 +579,28 @@ class AppGraph(
         cacheDir = File(appContext.noBackupFilesDir, "agent-connections"),
         openId = openAgentId,
         foreground = isForeground,
+        network = appContext.networkPath(),
         chime = CompletionChime(appContext)::play,
     )
+
+    /**
+     * The agent connection's voice call, apart from the relay's [voice]:
+     * made the first time home's voice button or the bar asks for it.
+     */
+    val calls: CallController by lazy {
+        CallController(
+            appContext,
+            agentSessions,
+            foreground = isForeground,
+            openAccount = openAccount.map { (it as? OpenAccount.Agent)?.id },
+            relayVoiceActive = voice.state.map { it.status != VoiceStatus.Disconnected },
+            stopRelayVoice = voice::stop,
+            subscription = subscription,
+            offers = offers,
+        )
+    }
+
+
 
     /**
      * Starts reading the open account's home from disk: the agent
@@ -508,6 +618,7 @@ class AppGraph(
     }
 
     private val logoutHooks = CopyOnWriteArrayList<suspend (authToken: String, serverUrl: String) -> Unit>()
+    private val accountRemovalHooks = CopyOnWriteArrayList<suspend (authToken: String, serverUrl: String, open: Boolean) -> Unit>()
 
     /**
      * [hook] runs first on every logout, on IO, with the account's token and
@@ -516,6 +627,11 @@ class AppGraph(
      */
     fun beforeLogout(hook: suspend (authToken: String, serverUrl: String) -> Unit) {
         logoutHooks += hook
+    }
+
+    /** Every CLI account removal, including a row that isn't open; only an open one forgets this phone's current push registration. */
+    fun beforeAccountRemoval(hook: suspend (authToken: String, serverUrl: String, open: Boolean) -> Unit) {
+        accountRemovalHooks += hook
     }
 
     /** Signed-out accounts' push tokens, still to be dropped on their servers (iOS c7d74a4e8). */
@@ -538,45 +654,75 @@ class AppGraph(
      * on is finished at the next start. With the last account this phone's
      * preferences and caches go too; the server choice stays. Runs in the
      * app scope, since the screen that asked is gone as soon as the account is.
+     * [accountIdToRemove] targets an accounts-card row; an inactive row leaves
+     * the open account, its sync and this phone's preferences in place.
      */
-    fun logout(): Job = scope.launch {
-        accountLock.withLock {
-            val leaving = auth.state.value as? AuthState.SignedIn
-            val id = leaving?.let { accountId(it.credentials) }
-            val server = serverUrl
-            val last = accountStore.registry.value.entries.size <= 1
-            withContext(Dispatchers.IO) {
-                id?.let(removals::begin)
-                leaving?.let { signedIn -> logoutHooks.forEach { it(signedIn.credentials.token, server) } }
-            }
-            purchases.setAccount(null)
-            stopAccount()
-            auth.logout()
-            store.use(database(openAccountId()))
-            if (last) {
-                // After the store moved off the account, so nothing that follows it writes these again.
-                withContext(Dispatchers.IO) {
-                    // persistence.ts clearPersistence: with the last account, everything in the default MMKV goes.
-                    localSettings.clear()
-                    changelog.clear()
-                    for (name in WIPED_PREFS) appContext.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
+    fun logout(accountIdToRemove: String? = null): Job = scope.launch {
+        accountSelectionLock.withLock {
+            accountLock.withLock accountRemoval@ {
+                val leaving = auth.state.value as? AuthState.SignedIn
+                val id = leaving?.let { accountId(it.credentials) }
+                if (accountIdToRemove != null && accountIdToRemove != id) {
+                    removeInactiveAccount(accountIdToRemove)
+                    return@accountRemoval
                 }
-                wipeHooks.forEach { it() }
-                // The language was the account's setting: back to the device's, as after happy-app's reload.
-                language.apply(null)
+                val server = serverUrl
+                val last = accountStore.registry.value.entries.size <= 1
+                withContext(Dispatchers.IO) {
+                    id?.let(removals::begin)
+                    leaving?.let { signedIn ->
+                        accountRemovalHooks.forEach { it(signedIn.credentials.token, server, true) }
+                        logoutHooks.forEach { it(signedIn.credentials.token, server) }
+                    }
+                }
+                stopAccount()
+                auth.logout()
+                store.use(database(openAccountId()))
+                if (last) {
+                    // After the store moved off the account, so nothing that follows it writes these again.
+                    withContext(Dispatchers.IO) {
+                        // persistence.ts clearPersistence: with the last account, everything in the default MMKV goes.
+                        localSettings.clear()
+                        changelog.clear()
+                        for (name in WIPED_PREFS) appContext.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
+                    }
+                    wipeHooks.forEach { it() }
+                    // The language was the account's setting: back to the device's, as after happy-app's reload.
+                    language.apply(null)
+                }
+                if (id != null) forget(id, leaving.publicId, synchronized(databases) { databases.remove(id) }, wipeCaches = last)
             }
-            if (id != null) forget(id, leaving.publicId, synchronized(databases) { databases.remove(id) }, wipeCaches = last)
         }
     }
 
+    /** Under [accountLock], removes only [id]'s kept state: the selected account and its sync keep running. */
+    private suspend fun removeInactiveAccount(id: String) {
+        val entry = accountStore.registry.value.entry(id) ?: return
+        val publicId = withContext(Dispatchers.IO) {
+            val stored = accountStore.credentials(id)
+            removals.begin(id)
+            if (entry.serverConfirmed && stored != null) {
+                accountRemovalHooks.forEach { it(stored.credentials.token, stored.serverUrl, false) }
+            }
+            accountStore.remove(id)
+            stored?.credentials?.token?.let(::tokenSubject)
+        }
+        forget(id, publicId, synchronized(databases) { databases.remove(id) }, wipeCaches = false)
+    }
+
     private val removalJobs = CopyOnWriteArrayList<Job>()
+
+    /** The legacy media folder is keyed by the server's public id; another server can issue the same id. */
+    private fun hasMediaOwner(publicId: String?): Boolean = publicId != null && accountStore.registry.value.entries.any { entry ->
+        accountStore.credentials(entry.id)?.credentials?.token?.let(::tokenSubject) == publicId
+    }
 
     /** What is slow in a sign-out, once the store has moved off [database]: the file, its kept media and file reads, the caches with the last account. */
     private fun forget(id: String, publicId: String?, database: HappyDatabase?, wipeCaches: Boolean) {
         val job = scope.launch(Dispatchers.IO) {
             database?.let(store::retire)
             if (!inMemoryDatabases) appContext.deleteDatabase("account-$id.db")
-            legacyMediaDirectory(publicId)?.deleteRecursively()
+            if (!hasMediaOwner(publicId)) legacyMediaDirectory(publicId)?.deleteRecursively()
             // The file viewer's kept reads go with the account (its cache closed with its sync).
             SessionFileCache.directory(appContext.noBackupFilesDir, id).deleteRecursively()
             if (wipeCaches) LocalCaches.wipe(appContext)
@@ -618,6 +764,7 @@ class AppGraph(
             store = store,
             parent = scope.coroutineContext[Job]!!,
             foreground = foreground,
+            network = appContext.networkPath(),
         )
         accountState.value = account
         account.start()
@@ -663,4 +810,4 @@ sealed interface OpenAccount {
  * empties). The server choice, the secure store (cleared by [AuthRepository])
  * and the push token store (cleared by its own logout hook) are not here.
  */
-private val WIPED_PREFS = listOf(NewSessionDraftStore.PREFS_NAME, PrefsReviewStamps.PREFS_NAME, VoicePreferences.PREFS_NAME)
+private val WIPED_PREFS = listOf(NewSessionDraftStore.PREFS_NAME, PrefsReviewStamps.PREFS_NAME, VoicePreferences.PREFS_NAME, FeatureFlags.PREFS_NAME)

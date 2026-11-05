@@ -167,6 +167,9 @@ class ConversationScreenActions(
     val onDraftChange: (String) -> Unit = {},
     /** The words and the attached pictures' files; true when the message was taken (the composer then clears). */
     val onSend: (String, List<com.slopus.happy.attachments.AttachmentPreview>) -> Boolean = { _, _ -> false },
+    /** [onSend] with gallery photos still being read: drawn from their thumbnails, they go once read. */
+    val onSendPending: (String, List<com.slopus.happy.attachments.AttachmentPreview>, List<com.slopus.happy.attachments.PendingPicture>) -> Boolean =
+        { words, attachments, _ -> onSend(words, attachments) },
     /** The composer picked another model, effort or permission mode. */
     val onModeChange: (Mode) -> Unit = {},
     val onStop: () -> Unit = {},
@@ -499,8 +502,8 @@ fun ConversationScreen(
                                 tag = ConversationScreenTags.ERROR,
                                 modifier = Modifier.padding(top = barFoot).keyboardPadding(keyboard, dockHeight),
                             )
-                            // New work is asked in the middle instead, and the chat it becomes is about to have its first message.
-                            TranscriptPhase.Empty -> if (state.created && state.taken == null) {
+                            // New work is asked in the middle instead. Read live: fading out under the first message, it says nothing.
+                            TranscriptPhase.Empty -> if (state.created && state.rows.isEmpty()) {
                                 StatePage(
                                     title = null,
                                     body = stringResource(R.string.conversation_empty),
@@ -599,6 +602,10 @@ fun ConversationScreen(
                                     // The words went as the answer: the draft they were goes with them, as a send's does.
                                     if (answered) actions.onDraftChange("")
                                     answered || actions.onSend(words, attachments)
+                                },
+                                onSendPending = { words, attachments, pending ->
+                                    flight.grounded = false
+                                    actions.onSendPending(words, attachments, pending)
                                 },
                                 onSent = { text = "" },
                                 onStop = actions.onStop,
@@ -758,11 +765,17 @@ internal class FoldHold(private val list: androidx.compose.foundation.lazy.LazyL
 
     /** The person's message [key] is tapped open or shut while the list shows [rows]. */
     fun toggleMessage(key: String, rows: List<ConversationRow>) {
-        val visible = list.layoutInfo.visibleItemsInfo
-        val at = visible.indexOfFirst { it.key == key }
-        val over = visible.getOrNull(at + 1)?.takeIf { at >= 0 && it.index == visible[at].index + 1 }
+        val info = list.layoutInfo
+        val message = info.visibleItemsInfo.firstOrNull { it.key == key }
         val opened = (rows.firstOrNull { it.key == key } as? ConversationRow.User)?.opened
-        held = if (over != null && opened != null) Held(over.key, over.offset) { (it.firstOrNull { row -> row.key == key } as? ConversationRow.User)?.opened != opened } else null
+        // The row over it, where it is or, past the screen's edge (a folded message is seventy lines), where it would be.
+        val index = rows.indexOfFirst { it.key == key } + 1
+        val overKey = rows.getOrNull(index)?.key ?: OLDER_KEY.takeIf { index == rows.size }
+        held = if (message != null && opened != null && overKey != null) {
+            Held(overKey, message.offset + message.size + info.mainAxisItemSpacing) { (it.firstOrNull { row -> row.key == key } as? ConversationRow.User)?.opened != opened }
+        } else {
+            null
+        }
     }
 
     /** The rows composed now: once the row has turned, the held one is put back where it was, before they are laid out. */
@@ -810,4 +823,4 @@ internal fun activityLabel(activity: Activity?): String? = activity?.let {
 
 /** The send/stop button the composer shows; kept beside the screen for its tests. */
 internal fun primaryActionOf(hasContent: Boolean, state: ConversationState): PrimaryAction =
-    resolvePrimaryAction(hasContent = hasContent, showAbort = state.working, canAbort = state.created, blocked = false, disabled = state.newWork?.making == true)
+    resolvePrimaryAction(hasContent = hasContent, showAbort = state.working, canAbort = state.created, blocked = false, disabled = false)

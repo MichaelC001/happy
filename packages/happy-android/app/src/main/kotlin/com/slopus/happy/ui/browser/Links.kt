@@ -57,9 +57,11 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.R
+import com.slopus.happy.ui.call.SheetStatusIcons
 import com.slopus.happy.browser.BrowserPolicy
 import com.slopus.happy.references.HappyReferences
 import com.slopus.happy.ui.components.MaterialSymbols
+import com.slopus.happy.ui.components.TrackOverlay
 import com.slopus.happy.ui.theme.HappyTheme
 import com.slopus.happy.ui.theme.happyTextStyle
 import kotlinx.coroutines.launch
@@ -299,6 +301,7 @@ fun LinkMenu(opener: LinkOpener) {
             action()
         }
     }
+    TrackOverlay(true) { opener.menu = null }
     if (!com.slopus.happy.ui.components.LocalPageActive.current) return
     ModalBottomSheet(
         onDismissRequest = { opener.menu = null },
@@ -306,6 +309,7 @@ fun LinkMenu(opener: LinkOpener) {
         containerColor = colors.surface,
         modifier = Modifier.testTag(LinkTags.MENU),
     ) {
+        SheetStatusIcons()
         Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 8.dp)) {
             Text(
                 url,

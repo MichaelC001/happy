@@ -2,6 +2,7 @@ package com.slopus.happy.conversation
 
 import androidx.compose.runtime.Immutable
 import com.slopus.happy.attachments.AttachmentPreview
+import com.slopus.happy.attachments.PendingPicture
 import com.slopus.happy.chat.arr
 import com.slopus.happy.chat.long
 import com.slopus.happy.chat.num
@@ -16,6 +17,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -24,9 +26,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import java.io.File
+import java.util.Base64
 import kotlin.coroutines.CoroutineContext
 
 /** What a conversation hears from the agent connection's event stream. */
@@ -42,17 +47,9 @@ sealed interface ConversationSignal {
 @Immutable
 data class ComposerFocus(val serial: Int, val cursor: Int)
 
-/** A new chat before its first send has made it: what it will be, and whether it is being made now. */
+/** A new chat before its first send has made it: what it will be, and whether a first message has fixed it ([locked]). */
 @Immutable
-data class NewWork(val choice: WorkChoice, val making: Boolean = false)
-
-/** The composer's words and pictures went with the first message: [text] leaves the composer, unless edited since. */
-@Immutable
-data class ComposerTaken(val serial: Int, val text: String)
-
-/** New work that could not be made: nothing was sent, and the composer keeps everything. */
-@Immutable
-data class WorkFailure(val kind: WorkKind, val reason: Problem)
+data class NewWork(val choice: WorkChoice, val locked: Boolean = false)
 
 /** A run's status, when it began and ended, and why it ended (`run.*` metadata). */
 internal data class RunInfo(val status: String, val startedAt: Long?, val endedAt: Long? = null, val reason: String? = null) {
@@ -106,10 +103,6 @@ data class ConversationState(
     val knownTitle: String? = null,
     /** A new chat's Task or Bot and name; null once it is made. */
     val newWork: NewWork? = null,
-    /** The first message took the composer's words and pictures. */
-    val taken: ComposerTaken? = null,
-    /** Why new work could not be made, shown once. */
-    val workFailure: WorkFailure? = null,
     /** A send the agent hasn't taken yet: on its way (its files going up first) or failed. */
     val unsettledSends: Boolean = false,
 ) {
@@ -125,8 +118,9 @@ data class ConversationState(
  * the agent, and the open question. A new chat is [newTask]: nothing is read
  * until its first send makes it, a task or a bot as [setChoice] last said,
  * under the same [agentId], so the screen becomes the real chat in place.
- * That first send waits in the composer while the work is made; a refusal
- * leaves it there ([ConversationState.workFailure]).
+ * That first send is drawn at once and the composer cleared; the work is
+ * made behind it (iOS c344a0cb3), and a refusal leaves the message failed,
+ * its Retry asking for the same work again under the same ids.
  *
  * Offline first: with a [keeper], the newest runs are kept on the phone
  * ([KeptConversation]) and shown as soon as the disk read returns; the agent
@@ -177,14 +171,31 @@ class Conversation(
         val text: String,
         /** Fewer once a picture is taken out on its way ([removePicture]). */
         var images: List<Block.Image>,
-        val files: List<OutgoingFile> = emptyList(),
+        var files: List<OutgoingFile> = emptyList(),
         /** A tool the agent runs before it reads this (a skill's `read_skill`). */
         val toolRequest: ToolRequest? = null,
         var accepted: Boolean = false,
         var failure: Problem? = null,
         val sentAt: Long,
+        /**
+         * Photos still being read (iOS's held previews): drawn from their
+         * thumbnails after [images], and nothing goes until [prepared] has
+         * them; null once it has.
+         */
+        waiting: List<PendingPicture>? = null,
     ) {
-        val wire: String = WorkspaceUploads.text(text, files)
+        val wire: String get() = WorkspaceUploads.text(text, files)
+        var waiting: List<PendingPicture>? = waiting
+            set(value) {
+                field = value
+                thumbnails = drawn(value)
+            }
+        /** [waiting]'s thumbnails as the bubble draws them. */
+        var thumbnails: List<Block.Image> = drawn(waiting)
+            private set
+
+        private fun drawn(pictures: List<PendingPicture>?) =
+            pictures.orEmpty().map { Block.Image("image/jpeg", Base64.getEncoder().encodeToString(it.thumbnail)) }
     }
 
     private val _state = MutableStateFlow(
@@ -243,8 +254,8 @@ class Conversation(
     val uploads = UploadBoard()
     private var creating: Deferred<Unit>? = null
     private var choice = initialChoice
-    /** The first send is making the new work: the choice is fixed and another send waits. */
-    private var making = false
+    /** A first message is in: the new work's choice is fixed. */
+    private var locked = false
     /** Events that came while history was read, applied after it. */
     private var held: MutableList<ConversationSignal.Event>? = null
 
@@ -743,19 +754,16 @@ class Conversation(
     // Sending
 
     /**
-     * Draws the message at once and delivers it. False when there is nothing
-     * to send, and on a new chat's first send, which waits in the composer
-     * while the task or bot is made ([startWork]).
+     * Draws the message at once and delivers it; false when there is nothing
+     * to send. A new chat's messages go once its task or bot is made
+     * ([ensureCreated], in [pump]); the first fixes what it will be.
      */
     fun send(text: String, images: List<Block.Image> = emptyList()): Boolean {
         val trimmed = text.trim()
         if (trimmed.isEmpty() && images.isEmpty()) return false
-        if (!created) {
-            startWork(ConversationApi.clientId(), trimmed, emptyList()) { images }
-            return false
-        }
         val id = ConversationApi.clientId()
         scope.launch(lane) {
+            if (!created) locked = true
             outgoing += Outgoing(id, trimmed, images, sentAt = now())
             setDraftNow("")
             publish()
@@ -765,26 +773,46 @@ class Conversation(
     }
 
     /**
+     * A voice call's send (iOS's `send(id:text:)`): [text] exactly as given,
+     * under the caller's [id], delivered in order with the composer's. The
+     * composer's draft is left as it is. False on a chat not made yet, and
+     * for an [id] this conversation already has, which goes only once.
+     */
+    suspend fun sendAs(id: String, text: String): Boolean = withContext(lane) {
+        if (!created || closed || text.isBlank()) return@withContext false
+        if (outgoing.any { it.id == id } || id in messages) return@withContext false
+        outgoing += Outgoing(id, text, emptyList(), sentAt = now())
+        publish()
+        pump()
+        true
+    }
+
+    /** Whether [id] is a message here already: one of this phone's sends, or one the computer has. */
+    suspend fun has(id: String): Boolean = withContext(lane) { outgoing.any { it.id == id } || id in messages }
+
+    /**
      * [send] with [attachments] (staged copies on this phone): pictures the
      * model reads go inline, read in order with the sends around it; the
      * rest are written into the agent's workspace before the message goes
      * ([WorkspaceUploads]). Pictures that can't be read send nothing: the
      * words go back to an empty composer and an alert says why.
+     *
+     * [pending] are photos still being read (iOS b03dd48cc): the message is
+     * drawn at once with their thumbnails under rings and waits, [PendingPicture.READS]
+     * read at a time, until all are in ([prepared]); it then goes with them
+     * after [attachments], in the order they were picked.
      */
     fun send(
         text: String,
         attachments: List<AttachmentPreview>,
+        pending: List<PendingPicture> = emptyList(),
         readPictures: (List<File>) -> List<Block.Image> = InlinePictures::read,
     ): Boolean {
-        if (attachments.isEmpty()) return send(text)
+        if (attachments.isEmpty() && pending.isEmpty()) return send(text)
         val trimmed = text.trim()
         val id = ConversationApi.clientId()
         val (inline, files) = WorkspaceUploads.split(id, attachments)
         val pictures = inline.map { WorkspaceUploads.localFile(it.uri) }
-        if (!created) {
-            startWork(id, trimmed, files) { if (pictures.isEmpty()) emptyList() else readPictures(pictures) }
-            return false
-        }
         scope.launch(lane) {
             val images = try {
                 if (pictures.isEmpty()) emptyList() else readPictures(pictures)
@@ -794,48 +822,70 @@ class Conversation(
                 publish { it.copy(draftArrivals = it.draftArrivals + if (restore) 1 else 0, alert = Problem.PicturesUnreadable) }
                 return@launch
             }
-            outgoing += Outgoing(id, trimmed, images, files, sentAt = now())
+            if (!created) locked = true
+            outgoing += Outgoing(id, trimmed, images, files, sentAt = now(), waiting = pending.takeIf { it.isNotEmpty() })
             setDraftNow("")
             publish()
-            pump()
+            if (pending.isEmpty()) pump() else read(id, attachments.size, pending, readPictures)
         }
         return true
     }
 
-    /**
-     * A new chat's first send (iOS's NewTask): the task or bot is made as
-     * chosen, once, and only then does the message go, the composer giving
-     * up its words and pictures ([ConversationState.taken]). Until then they
-     * stay in the composer, and a refusal leaves them there and says why. A
-     * send while it is being made is dropped, as the button can't send then.
-     */
-    private fun startWork(id: String, text: String, files: List<OutgoingFile>, pictures: () -> List<Block.Image>) {
-        scope.launch(lane) {
-            if (created || making) return@launch
-            val images = try {
-                pictures()
-            } catch (e: Exception) {
-                publish { it.copy(alert = Problem.PicturesUnreadable) }
-                return@launch
+    /** Reads message [id]'s [pending] photos, a few at once, and hands them to [prepared] in their order. */
+    private fun read(id: String, first: Int, pending: List<PendingPicture>, readPictures: (List<File>) -> List<Block.Image>) {
+        scope.launch(io) {
+            val gate = Semaphore(PendingPicture.READS)
+            val read = coroutineScope {
+                pending.map { picture ->
+                    async {
+                        gate.withPermit {
+                            picture to try {
+                                picture.read()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                null
+                            }
+                        }
+                    }
+                }.awaitAll()
             }
-            val kind = choice.kind
-            making = true
-            publish()
-            try {
-                ensureCreated()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                making = false
-                publish { it.copy(workFailure = WorkFailure(kind, describe(e))) }
-                return@launch
-            }
-            making = false
-            outgoing += Outgoing(id, text, images, files, sentAt = now())
-            setDraftNow("")
-            publish { it.copy(taken = ComposerTaken((it.taken?.serial ?: 0) + 1, text)) }
-            pump()
+            withContext(lane) { prepared(id, first, read, readPictures) }
         }
+    }
+
+    /**
+     * The photos a waiting send waited for, read (null for one that
+     * couldn't be): those still in it are added after its pictures and
+     * files, and it goes. One that couldn't be read is left out and an
+     * alert says so; a message left with nothing is taken back.
+     */
+    private fun prepared(
+        id: String,
+        first: Int,
+        read: List<Pair<PendingPicture, AttachmentPreview?>>,
+        readPictures: (List<File>) -> List<Block.Image>,
+    ) {
+        val send = outgoing.firstOrNull { it.id == id } ?: return
+        val waiting = send.waiting ?: return
+        send.waiting = null
+        val still = read.filter { (picture, _) -> picture in waiting }
+        val kept = still.mapNotNull { it.second }
+        val unreadable = kept.size < still.size
+        // The thumbnails' rings; the pictures' own start again under their keys.
+        uploads.clear(id)
+        try {
+            val (inline, files) = WorkspaceUploads.split(id, kept, first)
+            if (inline.isNotEmpty()) send.images = send.images + readPictures(inline.map { WorkspaceUploads.localFile(it.uri) })
+            send.files = send.files + files
+        } catch (e: Exception) {
+            send.failure = Problem.PicturesUnreadable
+            publish()
+            return
+        }
+        if (send.text.isEmpty() && send.images.isEmpty() && send.files.isEmpty() && send.toolRequest == null) outgoing.remove(send)
+        publish { if (unreadable) it.copy(alert = Problem.PicturesUnreadable) else it }
+        pump()
     }
 
     /**
@@ -887,10 +937,10 @@ class Conversation(
         return true
     }
 
-    /** A new chat's Task or Bot and name, as picked; fixed once its first send is making it. */
+    /** A new chat's Task or Bot and name, as picked; fixed once its first message is in. */
     fun setChoice(next: WorkChoice) {
         scope.launch(lane) {
-            if (created || making || next == choice) return@launch
+            if (created || locked || next == choice) return@launch
             choice = next
             publish()
         }
@@ -954,6 +1004,8 @@ class Conversation(
         pumping = scope.launch(lane) {
             while (true) {
                 val next = outgoing.firstOrNull { !it.accepted && it.failure == null } ?: break
+                // Its photos still being read: it and everything after it wait ([prepared]).
+                if (next.waiting != null) break
                 writing = next.id
                 try {
                     next.images.indices.forEach { uploads.set(UploadBoard.pictureKey(next.id, it), UploadPhase.Preparing) }
@@ -1004,6 +1056,13 @@ class Conversation(
     fun removePicture(id: String, index: Int) {
         scope.launch(lane) {
             val send = outgoing.firstOrNull { it.id == id && !it.accepted } ?: return@launch
+            // A photo still being read: it is left out when the rest come.
+            val waiting = send.waiting
+            if (waiting != null && index - send.images.size in waiting.indices) {
+                send.waiting = waiting.filterIndexed { i, _ -> i != index - send.images.size }
+                publish()
+                return@launch
+            }
             if (index !in send.images.indices || uploads.phase(UploadBoard.pictureKey(id, index)) == UploadPhase.Done) return@launch
             // Nothing still writing sends the message as it was.
             pumping?.takeIf { it.isActive && writing == id }?.let {
@@ -1197,7 +1256,7 @@ class Conversation(
     }
 
     fun dismissAlert() {
-        scope.launch(lane) { publish { it.copy(alert = null, workFailure = null) } }
+        scope.launch(lane) { publish { it.copy(alert = null) } }
     }
 
     /** A tool's presented item, read whole. */
@@ -1387,7 +1446,7 @@ class Conversation(
         for (send in outgoing) {
             val delivery = send.failure?.let(Delivery::Failed) ?: if (send.accepted) Delivery.Pending else Delivery.Sending
             val time = shownAt.getOrPut(send.id) { send.sentAt }
-            rows += ConversationRow.User("${send.id}:user", send.id, send.wire, com.slopus.happy.chat.markdown.parseMarkdown(send.wire), send.images, delivery, time)
+            rows += ConversationRow.User("${send.id}:user", send.id, send.wire, com.slopus.happy.chat.markdown.parseMarkdown(send.wire), send.images + send.thumbnails, delivery, time)
         }
         if (opened.isNotEmpty()) rows.replaceAll { if (it is ConversationRow.User && it.key in opened) it.copy(opened = true) else it }
         builder.forget(messages.keys)
@@ -1406,7 +1465,7 @@ class Conversation(
         typesetter?.prepare(newestFirst)
         return base.copy(
             created = created,
-            newWork = if (created) null else NewWork(choice, making),
+            newWork = if (created) null else NewWork(choice, locked),
             rows = newestFirst,
             agent = agent,
             mode = mode,

@@ -1,5 +1,7 @@
 package com.slopus.happy.ui.tablet
 
+import com.slopus.happy.ui.backStackEntries
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
@@ -44,7 +46,7 @@ import com.slopus.happy.ui.chat.isComposeChatId
 import com.slopus.happy.ui.components.MaterialSymbols
 import com.slopus.happy.ui.components.SceneAnimation
 import com.slopus.happy.ui.components.StateArt
-import com.slopus.happy.ui.connection.AgentSurfaceRoute
+import com.slopus.happy.ui.surfaces.SurfaceRoute
 import com.slopus.happy.ui.conversation.ConversationRoute
 import com.slopus.happy.ui.home.NewSessionRoute
 import com.slopus.happy.ui.machine.MachineRoute
@@ -164,7 +166,7 @@ class MainPanel internal constructor(internal val nav: NavHostController) {
     }
 }
 
-private fun NavHostController.screens() = currentBackStack.value.filter { it.destination !is NavGraph }
+private fun NavHostController.screens() = backStackEntries.value.filter { it.destination !is NavGraph }
 
 private val NavBackStackEntry.opened: Boolean get() = savedStateHandle.get<Boolean>(MainPanel.SIDEBAR_ROOT) == true
 
@@ -181,6 +183,7 @@ object MainPanelKey {
     const val SETTINGS = "settings"
     const val ARTIFACTS = "artifacts"
     const val FEED = "feed"
+    const val TODOS = "todos"
     const val NEW_SESSION = "newSession"
     const val CHANGELOG = "changelog"
     const val TROUBLESHOOT = "troubleshoot"
@@ -201,9 +204,10 @@ object MainPanelKey {
                 .let { if (isComposeChatId(it)) entry.savedStateHandle.get<String>(COMPOSE_STARTED) else it }
                 ?.let(::session)
             destination.hasRoute<ConversationRoute>() -> entry.toRoute<ConversationRoute>().agentId?.let(::conversation)
-            destination.hasRoute<AgentSurfaceRoute>() -> surface(entry.toRoute<AgentSurfaceRoute>().surfaceId)
+            destination.hasRoute<SurfaceRoute>() -> surface(entry.toRoute<SurfaceRoute>().surfaceId)
             destination.hasRoute<AgentArtifactsRoute>() -> ARTIFACTS
             destination.hasRoute<AgentFeedRoute>() -> FEED
+            destination.hasRoute<com.slopus.happy.ui.todos.TodoListsRoute>() -> TODOS
             destination.hasRoute<SettingsRoute>() -> SETTINGS
             destination.hasRoute<MachineRoute>() -> machine(entry.toRoute<MachineRoute>().id)
             destination.hasRoute<SessionInfoRoute>() -> info(entry.toRoute<SessionInfoRoute>().id)
@@ -220,7 +224,7 @@ object MainPanelKey {
 fun rememberMainPanelRoot(): Boolean {
     val panel = LocalMainPanel.current ?: return false
     val entry = LocalViewModelStoreOwner.current as? NavBackStackEntry ?: return false
-    val stack by panel.nav.currentBackStack.collectAsState()
+    val stack by panel.nav.backStackEntries.collectAsState()
     return panel.split && MainPanel.root(stack.filter { it.destination !is NavGraph })?.id == entry.id && panel.opened(entry)
 }
 
@@ -258,7 +262,7 @@ fun MainPanelPlaceholder() {
     val colors = HappyTheme.colors
     val panel = LocalMainPanel.current
     val entry = LocalViewModelStoreOwner.current as? NavBackStackEntry
-    val stack = panel?.nav?.currentBackStack?.collectAsState()?.value
+    val stack = panel?.nav?.backStackEntries?.collectAsState()?.value
     val empty = stack?.lastOrNull { it.destination !is NavGraph }?.id == entry?.id
     // Plays asked for, and whether the panel was empty at the last look: kept through recreation, so a rotation doesn't replay it.
     var requested by rememberSaveable { mutableIntStateOf(0) }

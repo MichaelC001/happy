@@ -23,6 +23,8 @@ sealed interface AgentFeedRow {
     data class Feed(val unread: Int) : AgentFeedRow {
         override val key get() = "feed"
     }
+    /** iOS direct:todos: the computer's todo lists among the fixed places. */
+    data object Todos : AgentFeedRow { override val key get() = "todos" }
 
     /**
      * A Surface the person joined: a todo list, a document, a calendar, a
@@ -72,6 +74,14 @@ sealed interface AgentFeedRow {
         val lineChanges: WorkspaceLineChanges? = null,
     ) : AgentFeedRow {
         override val key get() = "agent-$agentId"
+
+        /**
+         * This row as its line draws it (iOS 2932427fe): what only orders or
+         * nests it ([activityAt], [parentId]) or only opens it elsewhere
+         * ([workspaceId]) left out, so a working agent's activity ticking
+         * redraws nothing.
+         */
+        fun drawn(): Conversation = if (activityAt == 0L && parentId == null && workspaceId == null) this else copy(activityAt = 0, parentId = null, workspaceId = null)
 
         /**
          * Desktop's `activity == "running"` (summaryActivity): a question
@@ -156,6 +166,8 @@ data class AgentFeed(val loaded: Boolean = false, val rows: List<AgentFeedRow> =
             intents: IntentOverlay = IntentOverlay(),
             /** The Feed's unread count; null where there is no Feed. */
             feedUnread: Int? = null,
+            /** Team members read so far ([TeamDirectory]), whose faces their tasks wear. */
+            users: Map<String, TeamUser> = emptyMap(),
         ): AgentFeed {
             if (!catalog.loaded) return Empty
             val removed = intents.removed
@@ -238,6 +250,7 @@ data class AgentFeed(val loaded: Boolean = false, val rows: List<AgentFeedRow> =
             section(AgentFeedSection.Places) {
                 rows += AgentFeedRow.Artifacts
                 feedUnread?.let { rows += AgentFeedRow.Feed(it) }
+                rows += AgentFeedRow.Todos
                 catalog.surfaces.values
                     .filter { it.string("status") != "archived" && it["archivedAt"].isNullish() }
                     .mapNotNull { surface ->
@@ -272,7 +285,18 @@ data class AgentFeed(val loaded: Boolean = false, val rows: List<AgentFeedRow> =
                     val agentId = (task["agent"] as? JsonObject)?.string("id") ?: return@forEach
                     val id = task.string("id")
                     if (id != null && id in removed) return@forEach
-                    agentRows(agentId, id?.let(intents.titles::get) ?: task.string("name"), ConversationKind.Task, 0, seed = id ?: agentId)
+                    // In a team a task wears its author's face (iOS a2597f4d6): the person's own from the profile,
+                    // another member's as read, else that member's placeholder.
+                    val author = task.string("ownerUserId")?.takeIf { catalog.userId != null }
+                    val photo = when (author) {
+                        null -> null
+                        catalog.userId -> catalog.profilePhoto
+                        else -> users[author]?.photo
+                    }
+                    agentRows(
+                        agentId, id?.let(intents.titles::get) ?: task.string("name"), ConversationKind.Task, 0,
+                        picture = author?.takeIf { photo != null }?.let(TeamUser::photoPath), thumbhash = photo, seed = author ?: id ?: agentId,
+                    )
                 }
             }
             if (!catalog.projectsHidden) section(AgentFeedSection.Projects) {

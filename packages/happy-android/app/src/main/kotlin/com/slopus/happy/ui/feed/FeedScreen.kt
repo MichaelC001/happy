@@ -1,7 +1,6 @@
 package com.slopus.happy.ui.feed
 
 import android.content.res.Resources
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -67,6 +66,7 @@ import com.slopus.happy.agent.FolderMark
 import com.slopus.happy.agent.string
 import com.slopus.happy.artifacts.DateBucket
 import com.slopus.happy.feed.FeedCluster
+import com.slopus.happy.feed.FeedActorName
 import com.slopus.happy.feed.FeedFace
 import com.slopus.happy.feed.FeedItem
 import com.slopus.happy.feed.FeedLibrary
@@ -78,6 +78,7 @@ import com.slopus.happy.ui.artifacts.PlaceScaffold
 import com.slopus.happy.ui.artifacts.PlaceTags
 import com.slopus.happy.ui.artifacts.rememberArtifactListWords
 import com.slopus.happy.ui.cards.CardHeading
+import com.slopus.happy.ui.cards.CardBlock
 import com.slopus.happy.ui.cards.CardListSpec
 import com.slopus.happy.ui.cards.CardNote
 import com.slopus.happy.ui.cards.cardPlaces
@@ -88,15 +89,12 @@ import com.slopus.happy.ui.components.HappySwitch
 import com.slopus.happy.ui.components.HomeCardPlace
 import com.slopus.happy.ui.components.Icon
 import com.slopus.happy.ui.components.Ionicon
-import com.slopus.happy.ui.components.hairline
 import com.slopus.happy.ui.connection.AgentTopBar
 import com.slopus.happy.ui.connection.BarIconButton
 import com.slopus.happy.ui.connection.ConversationMark
 import com.slopus.happy.ui.connection.FolderMarkView
 import com.slopus.happy.ui.connection.RowTile
 import com.slopus.happy.ui.conversation.ConversationScreenTags
-import com.slopus.happy.ui.layout.LocalWindowLayout
-import com.slopus.happy.ui.layout.contentMaxWidth
 import com.slopus.happy.ui.tablet.BackOrSidebarToggle
 import com.slopus.happy.ui.theme.HappyTheme
 import com.slopus.happy.ui.theme.happyTextStyle
@@ -176,6 +174,16 @@ class FeedWords(private val resources: Resources) {
     val peekEmpty: String = resources.getString(R.string.feed_peek_empty)
 
     fun follow(name: String): String = resources.getString(R.string.feed_follow, name)
+
+    /** Who acted, for TalkBack (iOS `FeedWords.actors`): one or two names in full, then how many more, counting those not known by name. */
+    fun actors(names: List<FeedActorName>, count: Int): String {
+        val shown = names.map { if (it is FeedActorName.Named) it.name else resources.getString(R.string.feed_you) }
+        val total = maxOf(count, shown.size)
+        val first = shown.firstOrNull() ?: return ""
+        if (total == 1) return first
+        if (total == 2 && shown.size >= 2) return resources.getString(R.string.feed_two, first, shown[1])
+        return resources.getQuantityString(R.plurals.feed_others, total - 1, first, total - 1)
+    }
     fun mute(name: String): String = resources.getString(R.string.feed_mute, name)
     fun followFailed(reason: String): String = resources.getString(R.string.feed_follow_failed, reason).trim()
 
@@ -574,7 +582,9 @@ private fun FeedEntryRow(item: FeedListItem.Row, onOpen: (FeedRow) -> Unit) {
                 .fillMaxWidth()
                 .padding(horizontal = CardListSpec.inset, vertical = CardListSpec.padding)
                 .semantics(mergeDescendants = true) {
-                    stateDescription = listOfNotNull(if (row.unread) words.unreadMark else null, item.summary, item.time).joinToString(", ")
+                    stateDescription = listOfNotNull(
+                        if (row.unread) words.unreadMark else null, item.summary, words.actors(row.actorNames, row.actorCount).ifEmpty { null }, item.time,
+                    ).joinToString(", ")
                 },
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -752,48 +762,19 @@ private fun FeedPlaceRow(item: FeedFollowingItem.Place, words: FeedWords, action
 }
 
 /**
- * One row's part of its card, as [com.slopus.happy.ui.cards.CardRow]
- * draws it, never under [minHeight], growing with its text: the card's
- * ground rounded at the card's ends, a press highlighted within them, a
- * hairline under every row but the last from [dividerStart].
+ * Feed content uses the shared card shell, growing above [minHeight] with
+ * its text, with a divider under every row but the last from [dividerStart].
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FeedCard(place: HomeCardPlace, minHeight: Dp, dividerStart: Dp, tag: String, onClick: (() -> Unit)?, content: @Composable BoxScope.() -> Unit) {
-    val colors = HappyTheme.colors
-    val radius = CardListSpec.radius
-    val shape = RoundedCornerShape(
-        topStart = if (place.first) radius else 0.dp,
-        topEnd = if (place.first) radius else 0.dp,
-        bottomStart = if (place.last) radius else 0.dp,
-        bottomEnd = if (place.last) radius else 0.dp,
-    )
-    Box(
-        Modifier
-            .contentMaxWidth(LocalWindowLayout.current)
-            .testTag(tag)
-            .padding(horizontal = CardListSpec.side),
-    ) {
+    CardBlock(place.copy(separated = !place.last), dividerStart = dividerStart, tag = tag) {
         Box(
             Modifier
                 .fillMaxWidth()
                 .heightIn(min = minHeight)
-                .clip(shape)
-                .background(colors.surfaceHigh)
                 .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier),
             contentAlignment = Alignment.CenterStart,
-        ) {
-            content()
-            if (!place.last) {
-                Box(
-                    Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(start = dividerStart)
-                        .fillMaxWidth()
-                        .height(hairline())
-                        .background(colors.divider),
-                )
-            }
-        }
+            content = content,
+        )
     }
 }

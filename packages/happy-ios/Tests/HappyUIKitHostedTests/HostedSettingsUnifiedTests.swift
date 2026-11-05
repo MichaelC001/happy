@@ -182,13 +182,14 @@ final class HostedSettingsUnifiedTests: XCTestCase {
         XCTAssertEqual(settings.shownRowIDs, [
             ["account:\(computer)", "account:\(happy)", SettingsIndex.connectAgent.id],
             ["profile"],
-            ["appearance", "data-storage"],
+            ["support-boba"],
+            ["appearance", "agent-voice", "data-storage"],
             ["support-us"],
             SettingsIndex.aboutRows.map(\.id),
             ["disconnect"],
         ])
-        // Voice runs on a Happy account's server and sessions; a computer
-        // has neither, so its page has no Voice that would do nothing.
+        // The relay's Voice runs on a Happy account's server and sessions; a
+        // computer has neither, so its page has the agent call's Voice instead.
         XCTAssertNil(settings.shownRow("voice"))
         for gone in Self.removed { XCTAssertNil(settings.shownRow(gone), "\(gone) is still on the page") }
         XCTAssertEqual(settings.shownRow("account:\(computer)")?.menu.map(\.title), [Strings.disconnect])
@@ -274,9 +275,9 @@ final class HostedSettingsUnifiedTests: XCTestCase {
         let opened = try await until { navigation.topViewController is VoiceSettingsViewController && navigation.transitionCoordinator == nil }
         XCTAssertTrue(opened, "Voice didn't open: \(navigation.viewControllers)")
         let voice = try XCTUnwrap(navigation.topViewController as? VoiceSettingsViewController)
-        _ = try await until { voice.shownRow("voice-usage-retry")?.action != nil }
-        XCTAssertEqual(voice.shownRowIDs, [["voice-usage-retry"], ["voice-upgrade"], ["voice-language"], ["voice-agent-id", "voice-direct"]])
-        XCTAssertEqual(voice.shownFooters.count, 4)
+        // Voice in a Happy account's sessions is off (`LegacyVoice`): said so, its settings kept.
+        XCTAssertEqual(voice.shownRowIDs, [["voice-off"], ["voice-language"], ["voice-agent-id", "voice-direct"]])
+        XCTAssertEqual(voice.shownFooters.count, 2)
 
         // A switch is kept.
         XCTAssertEqual(voice.shownRow("voice-direct")?.isOn, false)

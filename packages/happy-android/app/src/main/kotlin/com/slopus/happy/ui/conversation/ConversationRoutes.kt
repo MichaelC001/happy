@@ -1,5 +1,7 @@
 package com.slopus.happy.ui.conversation
 
+import com.slopus.happy.ui.backStackEntries
+
 import com.slopus.happy.connection.LinkState
 import com.slopus.happy.connection.networkPath
 import com.slopus.happy.ui.files.workspaceSource
@@ -42,6 +44,8 @@ import com.slopus.happy.conversation.ConversationApi
 import com.slopus.happy.conversation.ConversationApiException
 import com.slopus.happy.conversation.ConversationKeeper
 import com.slopus.happy.conversation.ConversationSignal
+import com.slopus.happy.conversation.HeldConversations
+import com.slopus.happy.conversation.RowTypesetter
 import com.slopus.happy.conversation.KeptMedia
 import com.slopus.happy.conversation.MediaItem
 import com.slopus.happy.conversation.NewTask
@@ -127,6 +131,23 @@ fun NavHostController.openConversation(connectionId: String, agentId: String, pr
 }
 
 /**
+ * A conversation a voice call opens (iOS's `CallNavigation`): in place of a
+ * conversation on top, so going from one to the next never piles them up
+ * behind each other; pushed over anything else (home, Settings, a profile),
+ * which stays under it.
+ */
+fun NavHostController.openConversationInPlace(connectionId: String, agentId: String) {
+    val current = currentBackStackEntry
+    if (current?.destination?.hasRoute<ConversationRoute>() == true) {
+        navigate(ConversationRoute(connectionId, agentId)) {
+            popUpTo(current.destination.id) { inclusive = true }
+        }
+    } else {
+        navigate(ConversationRoute(connectionId, agentId))
+    }
+}
+
+/**
  * Opens the connection's Chief of Staff chat with [prefix] in its
  * composer. The chief is looked up when the screen opens; once found the
  * chat takes this screen's place, so Back returns to where this was opened.
@@ -157,7 +178,7 @@ fun NavHostController.composeConversation(connectionId: String, attach: Boolean 
  */
 internal fun NavHostController.heldConversation(agentId: String): Conversation? {
     val none = object : ViewModelProvider.Factory {}
-    return currentBackStack.value.asReversed().asSequence()
+    return backStackEntries.value.asReversed().asSequence()
         .filter { it.destination.hasRoute<ConversationRoute>() }
         .mapNotNull { entry ->
             try {
@@ -186,6 +207,41 @@ internal fun AgentSession.conversationBytesRequest(): com.slopus.happy.conversat
         throw ConversationApiException(e.status, e.code, e.message, e.body as? kotlinx.serialization.json.JsonObject)
     }
 }
+
+/**
+ * [agentId]'s conversation as each of its holders has it
+ * ([AgentSession.conversations]): the connection's requests, keeper, read and
+ * references, laid out by the process's [typesetter]. Its [newTask] and the
+ * rest are a new chat's, when its screen makes it.
+ */
+internal fun AgentSession.makeConversation(
+    agentId: String,
+    typesetter: RowTypesetter?,
+    newTask: NewTask? = null,
+    initialDraft: String = "",
+    initialChoice: WorkChoice = WorkChoice(),
+    created: () -> Unit = {},
+): Conversation = Conversation(
+    api = ConversationApi(bytesRequest = conversationBytesRequest(), request = conversationRequest()),
+    signals = events.signalsFor(agentId),
+    // No screen's or call's: a send or draft save in flight finishes after they go.
+    scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    agentId = agentId,
+    newTask = newTask,
+    initialDraft = initialDraft,
+    // The row that was tapped already had a name: the bar has it from the first frame.
+    knownTitle = feed.value.title(agentId),
+    initialChoice = initialChoice,
+    onTaskCreated = { answer ->
+        created()
+        answer["task"].obj?.let { upsertTask(it, answer["membership"].obj) }
+        answer["bot"].obj?.let(::upsertBot)
+    },
+    keeper = conversationKeeper(agentId),
+    typesetter = typesetter,
+    read = ::markRead,
+    references = references,
+)
 
 /** Where [agentId]'s newest history is kept, beside the connection's catalog and gone with it. */
 internal fun AgentSession.conversationKeeper(agentId: String): ConversationKeeper = object : ConversationKeeper {
@@ -220,10 +276,9 @@ internal class ConversationHolder(
     /** Lays the rows' text out on the conversation's lane. */
     typesetter: Typesetter? = null,
 ) : ViewModel() {
-    /** Not viewModelScope: a send or draft save in flight finishes after the screen goes. */
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
-    val conversation: Conversation
+    /** This screen's claim on the connection's one conversation of its agent, which a call may share. */
+    val hold: HeldConversations.Hold
+    val conversation: Conversation get() = hold.conversation
     private val task: NewTask?
 
     init {
@@ -241,28 +296,22 @@ internal class ConversationHolder(
         )
         unsent?.let { setChoiceSaved(it.choice) }
         val agentId = route.agentId ?: task!!.agentId
-        // A send still on its way when this chat was last left: the same conversation, so it shows and never goes twice.
-        conversation = route.agentId?.let(session.parkedConversations::adopt) ?: Conversation(
-            api = ConversationApi(bytesRequest = session.conversationBytesRequest(), request = session.conversationRequest()),
-            signals = session.events.signalsFor(agentId),
-            scope = scope,
-            agentId = agentId,
-            newTask = task.takeIf { saved.get<Boolean>(CREATED) != true },
-            initialDraft = unsent?.draft.orEmpty(),
-            // The row that was tapped already had a name: the bar has it from the first frame.
-            knownTitle = route.agentId?.let(session.feed.value::title),
-            initialChoice = choice,
-            onTaskCreated = { answer ->
-                saved[CREATED] = true
-                answer["task"].obj?.let { session.upsertTask(it, answer["membership"].obj) }
-                answer["bot"].obj?.let(session::upsertBot)
-            },
-            keeper = session.conversationKeeper(agentId),
-            typesetter = typesetter,
-            read = session::markRead,
-            references = session.references,
-        )
-        conversation.start()
+        // The one a call holds, or a send still on its way when this chat was last left (new work's first message
+        // too): the same conversation, so it shows and never goes twice.
+        hold = session.conversations.hold(agentId) {
+            session.makeConversation(
+                agentId,
+                typesetter,
+                newTask = task.takeIf { saved.get<Boolean>(CREATED) != true },
+                initialDraft = unsent?.draft.orEmpty(),
+                initialChoice = choice,
+                created = {
+                    saved[CREATED] = true
+                    // Made, it is home's to open now, not the next compose's.
+                    if (session.unsentWork?.task?.agentId == agentId) session.unsentWork = null
+                },
+            )
+        }
         saved.takePrefill(route.prefill)?.let(conversation::prefill)
     }
 
@@ -280,12 +329,12 @@ internal class ConversationHolder(
     override fun onCleared() {
         val state = conversation.state.value
         val work = state.newWork
-        // Left unmade and not on its way: the next compose opens it as it was.
-        if (task != null && work != null && !work.making && saved.get<Boolean>(CREATED) != true) {
+        // Left unmade, its first message on its way or not: the next compose opens it as it was.
+        if (task != null && work != null && saved.get<Boolean>(CREATED) != true) {
             session.unsentWork = UnsentWork(task, work.choice, state.draft)
         }
-        // Closed unless a send is in hand: then it finishes in this conversation (desktop 01659140).
-        session.parkedConversations.park(conversation)
+        // Closed once nobody holds it, unless a send is in hand: then it finishes in this conversation (desktop 01659140).
+        hold.release()
     }
 
     private companion object {
@@ -347,8 +396,8 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
     val holder = viewModel(key = "conversation") { ConversationHolder(session, route, createSavedStateHandle(), typesetter) }
     val conversation = holder.conversation
     com.slopus.happy.ui.components.StartedEffect(conversation) {
-        conversation.setObserving(true)
-        try { kotlinx.coroutines.awaitCancellation() } finally { conversation.setObserving(false) }
+        holder.hold.observe(true)
+        try { kotlinx.coroutines.awaitCancellation() } finally { holder.hold.observe(false) }
     }
     val state by conversation.state.collectAsStateWithLifecycle()
     // The model label warns as its account runs low, so the readings are followed while the chat shows.
@@ -360,7 +409,7 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
     val status by session.status.collectAsStateWithLifecycle()
     val syncing by session.isSyncing.collectAsStateWithLifecycle()
     val settings by graph.settings.settings.collectAsStateWithLifecycle()
-    DisposableEffect(conversation) { onDispose { conversation.setVisible(false) } }
+    DisposableEffect(holder) { onDispose { holder.hold.show(false) } }
     // A link in this chat browses through this chat's agent's workspace (iOS's openBrowser(session:agentID:)).
     val context = LocalContext.current
     val network by remember(context) { context.networkPath() }.collectAsStateWithLifecycle(initialValue = true)
@@ -391,6 +440,7 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
                     onDetails = { nav.navigate(ConversationDetailsRoute(route.connectionId, conversation.agentId)) },
                     onDraftChange = conversation::setDraft,
                     onSend = { words, attachments -> conversation.send(words, attachments) },
+                    onSendPending = { words, attachments, pending -> conversation.send(words, attachments, pending) },
                     onModeChange = conversation::setMode,
                     onStop = conversation::stop,
                     onRetrySend = conversation::retrySend,
@@ -419,7 +469,7 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
                         )
                     },
                     kept = kept,
-                    onVisible = conversation::setVisible,
+                    onVisible = holder.hold::show,
                     onChoiceChange = holder::setChoice,
                     onCommand = conversation::runCommand,
                     onToggleTurn = conversation::toggleTurn,
@@ -435,11 +485,7 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
             },
         )
     } }
-    // New work that could not be made says why; nothing was sent, and the composer keeps it all.
-    val message = state.alert?.let { problemText(it) } ?: state.workFailure?.let { failure ->
-        stringResource(if (failure.kind == WorkKind.Bot) R.string.new_work_bot_failed else R.string.new_work_task_failed, problemText(failure.reason))
-    }
-    message?.let {
+    state.alert?.let { problemText(it) }?.let {
         val title = stringResource(R.string.common_error)
         val ok = stringResource(R.string.common_ok)
         HappyAlert(Alert(title, it, listOf(AlertButton(ok))), onDismiss = conversation::dismissAlert)
@@ -484,7 +530,7 @@ private fun ChiefOfStaffEntry(graph: AppGraph, nav: NavHostController, route: Ch
     }
     // Its name as the computer calls it, read live from the bot whose systemKey is chief_of_staff (desktop ca4c303f).
     val chief by remember(session) { session?.feed?.map { feed -> feed.chiefOfStaffName() } ?: flowOf(null) }
-        .collectAsStateWithLifecycle(initialValue = session?.feed?.value?.chiefOfStaffName())
+        .collectAsStateWithLifecycle(initialValue = remember(session) { session?.feed?.value?.chiefOfStaffName() })
     ChiefOfStaffScreen(problem, onRetry = { attempt++ }, onBack = { nav.popBackStack() }, name = chief)
 }
 

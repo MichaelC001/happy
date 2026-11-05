@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -82,6 +83,7 @@ import com.slopus.happy.ui.components.avatar.PlaceholderAvatar
 import com.slopus.happy.ui.components.rememberReduceMotion
 import com.slopus.happy.ui.components.rememberThumbHash
 import com.slopus.happy.ui.home.BlockedDotColor
+import com.slopus.happy.ui.home.LocalHomeRowObserver
 import com.slopus.happy.ui.home.UnreadDotColor
 import com.slopus.happy.ui.layout.LocalWindowLayout
 import com.slopus.happy.ui.layout.contentMaxWidth
@@ -102,6 +104,7 @@ object AgentHomeTags {
     const val SEARCH = "agentHome.search"
     const val SETTINGS = "agentHome.settings"
     const val COMPOSE = "agentHome.compose"
+    const val VOICE = "agentHome.voice"
     fun row(key: String) = "agentHome.row.$key"
     const val ROW_TITLE = "agentHome.rowTitle"
     const val ROW_MARK = "agentHome.rowMark"
@@ -151,6 +154,8 @@ object AgentHomeSpec {
     /** The compose button's margin from the window's corner, and the room under the last card to scroll it clear. */
     val fabMargin = 16.dp
     val fabClearance = 96.dp
+    /** Between the voice button and compose, immediately left of it. */
+    val fabGap = 12.dp
     const val TITLE_LINE = 22
     val title = happyTextStyle(fontSize = 17, lineHeight = TITLE_LINE)
     /** A time at a row's end, where a place lists one (home's rows show none). */
@@ -292,6 +297,9 @@ sealed interface AgentHomeItem {
         val last: Boolean,
     ) : AgentHomeItem {
         override val key get() = row.key
+
+        /** As its line draws it ([AgentFeedRow.Conversation.drawn]). */
+        fun drawn(): Row = (row as? AgentFeedRow.Conversation)?.drawn()?.takeIf { it !== row }?.let { copy(row = it) } ?: this
     }
 }
 
@@ -325,6 +333,7 @@ fun LazyListScope.agentHomeRows(
     /** The tablet sidebar's selection, what its main panel shows ([MainPanelKey]). */
     selected: String? = null,
     onOpenFeed: () -> Unit = {},
+    onOpenTodos: () -> Unit = {},
 ) {
     items(items, key = { it.key }, contentType = { (it as? AgentHomeItem.Row)?.row?.let { row -> row::class } ?: it::class }) { item ->
         val motion = if (reduceMotion) Modifier else Modifier.animateItem(
@@ -339,9 +348,10 @@ fun LazyListScope.agentHomeRows(
                     .height(if (item.first) AgentHomeSpec.contentTop else AgentHomeSpec.cardGap)
                     .testTag(AgentHomeTags.row(item.key)),
             )
+            // Drawn from what its line shows: a change to nothing on it composes nothing.
             is AgentHomeItem.Row -> AgentHomeCardRow(
-                item, motion, selected != null && selected == item.row.panelKey(), AgentHomeTags.row(item.key),
-                onOpen, onOpenArtifacts, onOpenSurface, onLeaveSurface, onHold, onOpenFeed,
+                item.drawn(), motion, selected != null && selected == item.row.panelKey(), AgentHomeTags.row(item.key),
+                onOpen, onOpenArtifacts, onOpenSurface, onLeaveSurface, onHold, onOpenFeed, onOpenTodos,
             )
         }
     }
@@ -364,6 +374,7 @@ internal fun AgentHomeCardRow(
     onLeaveSurface: ((AgentFeedRow.Surface) -> Unit)? = null,
     onHold: ((AgentFeedRow.Conversation, Rect) -> Unit)? = null,
     onOpenFeed: () -> Unit = {},
+    onOpenTodos: () -> Unit = {},
 ) {
     HomeCardRow(
         place = HomeCardPlace(item.first, item.last),
@@ -378,6 +389,7 @@ internal fun AgentHomeCardRow(
             is AgentFeedRow.Folder -> FolderRow(row)
             AgentFeedRow.Artifacts -> PlaceRow(stringResource(R.string.artifacts_title), Ionicon.DocumentTextOutline, RowTile.Purple, onOpenArtifacts)
             is AgentFeedRow.Feed -> FeedPlaceRow(row.unread, onOpenFeed)
+            AgentFeedRow.Todos -> PlaceRow(stringResource(R.string.agent_search_todos), Ionicon.CheckboxOutline, RowTile.Green, onOpenTodos)
             is AgentFeedRow.Surface -> SurfaceRow(row, { onOpenSurface(row) }, onLeaveSurface)
             is AgentFeedRow.Section -> Unit
         }
@@ -428,6 +440,7 @@ internal fun AgentFeedRow.panelKey(): String? = when (val row = this) {
     is AgentFeedRow.Surface -> MainPanelKey.surface(row.id)
     AgentFeedRow.Artifacts -> MainPanelKey.ARTIFACTS
     is AgentFeedRow.Feed -> MainPanelKey.FEED
+    AgentFeedRow.Todos -> MainPanelKey.TODOS
     else -> null
 }
 
@@ -436,7 +449,7 @@ private fun titleStart(row: AgentFeedRow): Dp {
     val (depth, marked) = when (row) {
         is AgentFeedRow.Conversation -> row.depth to AgentHomeSpec.hasMark(row.kind)
         is AgentFeedRow.Folder -> row.depth to (row.mark != null)
-        AgentFeedRow.Artifacts, is AgentFeedRow.Feed, is AgentFeedRow.Surface -> 0 to true
+        AgentFeedRow.Artifacts, is AgentFeedRow.Feed, AgentFeedRow.Todos, is AgentFeedRow.Surface -> 0 to true
         is AgentFeedRow.Section -> return 0.dp
     }
     return AgentHomeSpec.markInset + AgentHomeSpec.indent * depth + if (marked) AgentHomeSpec.mark + AgentHomeSpec.markGap else 0.dp
@@ -450,6 +463,7 @@ private fun titleStart(row: AgentFeedRow): Dp {
  */
 @Composable
 private fun ConversationRow(row: AgentFeedRow.Conversation, onOpen: (String) -> Unit, onHold: ((AgentFeedRow.Conversation, Rect) -> Unit)? = null) {
+    LocalHomeRowObserver.current?.let { observe -> SideEffect { observe(row.agentId) } }
     val colors = HappyTheme.colors
     val haptics = LocalHapticFeedback.current
     // Where the row is, for the preview to grow out of; read only when held.
@@ -668,6 +682,7 @@ fun AgentHomeList(
     bottom: @Composable () -> Unit = {},
     selected: String? = null,
     onOpenFeed: () -> Unit = {},
+    onOpenTodos: () -> Unit = {},
 ) {
     val reduceMotion = rememberReduceMotion()
     LazyColumn(
@@ -676,7 +691,7 @@ fun AgentHomeList(
         contentPadding = contentPadding,
     ) {
         header?.invoke(this)
-        agentHomeRows(items, reduceMotion, onOpen, onOpenArtifacts, onOpenSurface, onLeaveSurface, onHold, selected, onOpenFeed)
+        agentHomeRows(items, reduceMotion, onOpen, onOpenArtifacts, onOpenSurface, onLeaveSurface, onHold, selected, onOpenFeed, onOpenTodos)
         item(key = "bottom", contentType = "bottom") { bottom() }
     }
 }

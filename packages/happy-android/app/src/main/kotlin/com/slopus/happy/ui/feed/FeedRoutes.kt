@@ -21,9 +21,9 @@ import com.slopus.happy.feed.FeedRow
 import com.slopus.happy.feed.FeedRows
 import com.slopus.happy.feed.FeedTarget
 import com.slopus.happy.ui.artifacts.openArtifact
-import com.slopus.happy.ui.connection.AgentSurfaceRoute
 import com.slopus.happy.ui.conversation.openConversation
 import com.slopus.happy.ui.page
+import com.slopus.happy.ui.surfaces.openSurface
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,8 +46,21 @@ import kotlinx.serialization.Serializable
 
 /** The Feed's screen. AgentConnectionRoutes registers it with the agent's other places. */
 fun NavGraphBuilder.feedRoutes(graph: AppGraph, nav: NavHostController) {
-    page<AgentFeedRoute> { entry -> AgentFeed(graph, nav, entry.toRoute()) }
-    page<AgentFeedPeekRoute> { entry -> AgentFeedPeek(graph, nav, entry.toRoute()) }
+    page<AgentFeedRoute> { entry ->
+        val route = entry.toRoute<AgentFeedRoute>()
+        WithPictures(graph, route.connectionId) { AgentFeed(graph, nav, route) }
+    }
+    page<AgentFeedPeekRoute> { entry ->
+        val route = entry.toRoute<AgentFeedPeekRoute>()
+        WithPictures(graph, route.connectionId) { AgentFeedPeek(graph, nav, route) }
+    }
+}
+
+/** The connection's pictures for the faces drawn under [content] (a bot's avatar, a member's photo): without them only their ThumbHashes show. */
+@Composable
+internal fun WithPictures(graph: AppGraph, connectionId: String, content: @Composable () -> Unit) {
+    val session = remember(connectionId) { graph.agentSessions.session(connectionId) }
+    androidx.compose.runtime.CompositionLocalProvider(com.slopus.happy.ui.connection.LocalAgentPictures provides session?.pictures, content = content)
 }
 
 /**
@@ -135,11 +148,14 @@ private fun AgentFeed(graph: AppGraph, nav: NavHostController, route: AgentFeedR
     val catalog by session.catalog.collectAsStateWithLifecycle()
     val found by lookups.found.collectAsStateWithLifecycle()
     val places by following.state.collectAsStateWithLifecycle()
+    val photo = rememberProfilePhoto(session)
+    val users by session.team.users.collectAsStateWithLifecycle()
     // The newest page each time the Feed opens; what entries name that the catalog doesn't hold, as they come.
     LaunchedEffect(library) { library.refresh() }
     LaunchedEffect(state.items) { lookups.want(state.items) }
-    val rows by produceState(emptyList<FeedRow>(), state, catalog, found) {
-        value = withContext(Dispatchers.Default) { FeedRows.make(state.items, state::isUnread, catalog, found, route.connectionId) }
+    LaunchedEffect(state.items, catalog.userId) { session.team.want(FeedRows.people(state.items, catalog)) }
+    val rows by produceState(emptyList<FeedRow>(), state, catalog, found, photo, users) {
+        value = withContext(Dispatchers.Default) { FeedRows.make(state.items, state::isUnread, catalog, found, route.connectionId, photo, users) }
     }
     val scope = holder.viewModelScope
     FeedScreen(
@@ -152,7 +168,7 @@ private fun AgentFeed(graph: AppGraph, nav: NavHostController, route: AgentFeedR
                 onBack = { nav.popBackStack() },
                 onOpen = { row ->
                     library.state.value.items.firstOrNull { it.id == row.id }?.let { scope.launch { library.open(it) } }
-                    nav.openFeedTarget(route.connectionId, row.target)
+                    nav.openFeedTarget(graph, route.connectionId, row.target)
                 },
                 onRefresh = library::refresh,
                 onLoadMore = library::loadMore,
@@ -166,15 +182,23 @@ private fun AgentFeed(graph: AppGraph, nav: NavHostController, route: AgentFeedR
     )
 }
 
+/** The person's profile photo's ThumbHash, read and then followed, for their face on the Feed. */
+@Composable
+private fun rememberProfilePhoto(session: AgentSession): String? {
+    LaunchedEffect(session) { session.profile.refresh() }
+    val profile by session.profile.state.collectAsStateWithLifecycle()
+    return profile.thumbhash
+}
+
 /**
  * Where a Feed row goes (iOS `FeedOpening`): a task's or bot's chat, a
  * Surface's screen, an artifact's viewer. Chats count themselves read;
  * Surfaces and artifacts tell the Feed they were opened.
  */
-private fun NavHostController.openFeedTarget(connectionId: String, target: FeedTarget?) {
+private fun NavHostController.openFeedTarget(graph: AppGraph, connectionId: String, target: FeedTarget?) {
     when (target) {
         is FeedTarget.Chat -> openConversation(connectionId, target.agentId)
-        is FeedTarget.Surface -> navigate(AgentSurfaceRoute(connectionId, target.id, target.type, target.name))
+        is FeedTarget.Surface -> openSurface(graph, connectionId, target.id)
         is FeedTarget.Artifact -> openArtifact(connectionId, target.ref)
         null -> Unit
     }
@@ -198,10 +222,13 @@ private fun AgentFeedPeek(graph: AppGraph, nav: NavHostController, route: AgentF
     val peek by peeking.state.collectAsStateWithLifecycle()
     val catalog by session.catalog.collectAsStateWithLifecycle()
     val found by lookups.found.collectAsStateWithLifecycle()
+    val photo = rememberProfilePhoto(session)
+    val users by session.team.users.collectAsStateWithLifecycle()
     LaunchedEffect(peek.items) { lookups.want(peek.items) }
+    LaunchedEffect(peek.items, catalog.userId) { session.team.want(FeedRows.people(peek.items, catalog)) }
     // None carries the dot: a peek reads nothing.
-    val rows by produceState(emptyList<FeedRow>(), peek, catalog, found) {
-        value = withContext(Dispatchers.Default) { FeedRows.make(peek.items, { false }, catalog, found, route.connectionId) }
+    val rows by produceState(emptyList<FeedRow>(), peek, catalog, found, photo, users) {
+        value = withContext(Dispatchers.Default) { FeedRows.make(peek.items, { false }, catalog, found, route.connectionId, photo, users) }
     }
     // The place's own name, as it is now.
     val title = remember(catalog, words) { FeedPlace.of(route.feedCluster, catalog, words)?.name.orEmpty() }
@@ -213,7 +240,7 @@ private fun AgentFeedPeek(graph: AppGraph, nav: NavHostController, route: AgentF
         actions = remember(peeking, nav) {
             FeedActions(
                 onBack = { nav.popBackStack() },
-                onOpen = { row -> nav.openFeedTarget(route.connectionId, row.target) },
+                onOpen = { row -> nav.openFeedTarget(graph, route.connectionId, row.target) },
                 onRefresh = peeking::read,
             )
         },
