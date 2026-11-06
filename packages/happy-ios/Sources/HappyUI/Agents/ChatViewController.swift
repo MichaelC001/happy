@@ -207,7 +207,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
             planner = previewing ? ChatPlanner(syntax: session.syntax) : held.chat.planner
         } else {
             warm = nil
-            conversation = Conversation(client: session.client, store: session.store, agentId: agentId, newTask: newTask, mode: session.models.newWorkMode, persistence: session.engine)
+            conversation = Conversation(client: session.client, store: session.store, agentId: agentId, newTask: newTask, mode: session.newWorkMode, persistence: session.engine)
             planner = ChatPlanner(syntax: session.syntax)
         }
         tappedAt = previewing ? nil : session.warm.takeTap(agentId)
@@ -877,10 +877,10 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
 
     // MARK: Model
 
-    /// What the next message goes with: the conversation's, else what new
-    /// work starts on, else the computer's default.
+    /// What the next message goes with: the conversation's, else what the
+    /// person's new sessions start on.
     private var mode: AgentWire.Mode? {
-        picked ?? chat.mode ?? (opensFocused ? session.models.newWorkMode : nil) ?? session.models.catalog?.defaultMode()
+        picked ?? chat.mode ?? session.newWorkMode
     }
     /// A pick made here, until the conversation's own mode says it back.
     private var picked: AgentWire.Mode?
@@ -1043,6 +1043,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
     private func toggleTurn(_ turn: String) {
         if expandedTurns.remove(turn) == nil { expandedTurns.insert(turn) }
         followsNewest = false
+        ultra.holdPlace()
         foldMoved = true
         replan()
     }
@@ -1114,9 +1115,10 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
             let store = session.store
             Task { await store.readArtifacts(unread) }
         }
-        // An HTML artifact a call shows is read for whether it wants to be inline.
+        // An HTML artifact a call shows is read for whether it wants to be
+        // inline, or is an app, whose card opens it full screen.
         let pages = items.flatMap(\.pieces).compactMap { piece -> String? in
-            guard case .artifact(let artifact) = piece, artifact.type == "html", artifact.followsLatest, references.artifacts[artifact.id] == nil else { return nil }
+            guard case .artifact(let artifact) = piece, artifact.type == "html", references.artifacts[artifact.id] == nil else { return nil }
             return artifact.id
         }
         if !pages.isEmpty {
@@ -1274,6 +1276,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         card.onTurn = { [weak self] rowId in
             // The section opens under the finger, not pulled up to the newest row.
             self?.followsNewest = false
+            self?.ultra.holdPlace()
             Haptics.play(.fold)
             proposals.turn(artifactId, rowId: rowId)
         }
@@ -1331,9 +1334,10 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         composerScrim.setLayoutFrame(foot.scrim)
         jump.setLayoutFrame(foot.jump)
         // The transcript starts under the navigation bar and scrolls under
-        // it. The list is inverted: its top edge is the composer's edge.
+        // it; its foot is the composer's edge.
         if ultra.frame != view.bounds { ultra.frame = view.bounds }
-        ultra.setViewport(frame: screen.list, insets: UIEdgeInsets(top: screen.listBottom, left: 0, bottom: view.safeAreaInsets.top, right: 0),
+        ultra.followBudget = ChatFollow.budget(body: ChatTextStyles.text, scale: traitCollection.textEnvironment?.scale ?? .standard)
+        ultra.setViewport(frame: screen.list, insets: UIEdgeInsets(top: view.safeAreaInsets.top, left: 0, bottom: screen.listBottom, right: 0),
                           keyboard: insetMotion)
         layoutTranscript()
         updateHeaderEdge()
@@ -1370,8 +1374,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         previewPill.frame = layout.pill
         previewTitle.frame = layout.title.offsetBy(dx: -layout.pill.minX, dy: -layout.pill.minY)
         ultra.frame = view.bounds
-        // Inverted: the list's top edge is the card's foot.
-        ultra.setViewport(frame: view.bounds, insets: UIEdgeInsets(top: layout.listBottom, left: 0, bottom: layout.listTop, right: 0))
+        ultra.setViewport(frame: view.bounds, insets: UIEdgeInsets(top: layout.listTop, left: 0, bottom: layout.listBottom, right: 0))
         layoutTranscript()
         previewFade.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: layout.fadeOpaque)
         previewFade.clearFrom = layout.fadeClear / max(1, layout.fadeOpaque)
@@ -1530,12 +1533,9 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         let id = ClientID.make()
         if sendFlies {
             ultra.flight = ChatSendFlight(source: ChatSendFlight.source(from: card, in: view), host: view, message: id)
-            followsNewest = true
-            ultra.follow()
-        } else {
-            followsNewest = true
-            ultra.scrollToNewest(animated: !UIAccessibility.isReduceMotionEnabled)
         }
+        followsNewest = true
+        ultra.revealNextSend(animated: true)
         let conversation = conversation
         let store = session.store
         let staged = pictures
@@ -1717,6 +1717,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         if opened.remove(messageId) == nil { opened.insert(messageId) }
         // It opens where the finger is, not pulled up after the newest line.
         followsNewest = false
+        ultra.holdPlace()
         replan()
     }
 
@@ -1733,7 +1734,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
             }
             var artifact = Artifact(id: reference.id, version: reference.version ?? known.latest, type: known.type, title: known.title, followsLatest: reference.version == nil)
             artifact.pinned = reference.version != nil
-            navigationController?.pushViewController(ArtifactViewController(session: session, artifact: artifact), animated: true)
+            openArtifact(artifact, session: session)
             return
         }
         guard let entity = references.entity(reference) else { return }
@@ -1794,7 +1795,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
             // Here already: the ring is gone, so the tap opens it.
             if media.isDownloaded(key) { open(key) } else { media.toggleDownload(key) }
         case .openArtifact(let artifact):
-            navigationController?.pushViewController(ArtifactViewController(session: session, artifact: artifact), animated: true)
+            openArtifact(artifact, session: session)
         case .toggleTool(let messageId):
             toggle(messageId)
         case .openMessage(let itemId):
@@ -2047,8 +2048,7 @@ extension ChatViewController {
         @MainActor func report() {
             guard let screen else { return }
             let list = screen.ultra.list
-            // Inverted: the list's top inset is the composer's end.
-            list.accessibilityValue = "\(screen.timing) top=\(Int(list.contentInsets.bottom)) bottom=\(CGFloat(list.contentInsets.top)) keyboardFrames=\(keyboardFrames) keyboardGap=\(keyboardGap) guide=\(screen.keyboardTracker.frame.minY) cardBottom=\(screen.card.frame.maxY) popEdge=\(edgeSamples) popContent=\(contentSamples) popEdgeX=\(edgeTranslation) popContentX=\(contentTranslation)\(horizontalScrollers())"
+            list.accessibilityValue = "\(screen.timing) top=\(Int(list.contentInsets.top)) bottom=\(CGFloat(list.contentInsets.bottom)) keyboardFrames=\(keyboardFrames) keyboardGap=\(keyboardGap) guide=\(screen.keyboardTracker.frame.minY) cardBottom=\(screen.card.frame.maxY) popEdge=\(edgeSamples) popContent=\(contentSamples) popEdgeX=\(edgeTranslation) popContentX=\(contentTranslation)\(horizontalScrollers())"
         }
 
         @MainActor private func horizontalScrollers() -> String {

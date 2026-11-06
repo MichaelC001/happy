@@ -47,8 +47,8 @@ let package = Package(
         .package(url: "https://github.com/elevenlabs/elevenlabs-swift-sdk.git", exact: "3.4.0"),
         // Native Home and chat's optional renderer. Pin the pre-1.0 API used by
         // NodeRow and the custom keyframe scroller.
-        .package(url: "https://github.com/slopus/ultraview.git", revision: "6f0e75537c46b1d6a7c104b76b28330b5dfb031b"),
-        .package(url: "https://github.com/slopus/tailcat-swift.git", revision: "f62543179c9cd6621ca31db0a8f627d440224ce5"),
+        .package(url: "https://github.com/slopus/ultraview.git", revision: "c06ba489739fde00c56fb111f975a01758177fda"),
+        .package(url: "https://github.com/slopus/tailcat-swift.git", revision: "d6e59efe5b161478158cf172e9e8b8252f6c88e4"),
         // The state pictures (`StateSceneView`), desktop's Lottie scenes.
         // lottie-spm is Lottie's prebuilt xcframework, so it adds no source
         // build; scenes play on its Core Animation engine, off the main
@@ -139,7 +139,9 @@ let package = Package(
             // Needs UIKit to measure real views. Compiles to nothing on Linux;
             // runs in the iOS simulator through the XcodeGen project.
             name: "HappyUIKitTests",
-            dependencies: ["HappyUI", "HappyLayout", "HappyIcons", "HappyCore"]
+            dependencies: ["HappyUI", "HappyLayout", "HappyIcons", "HappyCore"],
+            // Read from the XcodeGen bundle, which copies them.
+            exclude: ["Fixtures"]
         ),
     ]
 )
