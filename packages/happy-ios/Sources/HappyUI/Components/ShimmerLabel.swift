@@ -26,12 +26,16 @@ final class ShimmerClock {
         didSet { if reduceMotionOverride != oldValue { changed() } }
     }
 
-    /// Asked for less motion, the text simply stays at its own colour.
-    var reducesMotion: Bool { reduceMotionOverride ?? UIAccessibility.isReduceMotionEnabled }
+    /// Asked for less motion, or saving power, the text simply stays at its
+    /// own colour: a sweep has the screen composed again every frame it runs.
+    var reducesMotion: Bool { reduceMotionOverride ?? (UIAccessibility.isReduceMotionEnabled || ProcessInfo.processInfo.isLowPowerModeEnabled) }
 
     private init() {
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(changed), name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
+        center.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.changed() }
+        }
         center.addObserver(self, selector: #selector(wentAway), name: UIApplication.didEnterBackgroundNotification, object: nil)
         center.addObserver(self, selector: #selector(cameBack), name: UIApplication.willEnterForegroundNotification, object: nil)
     }
@@ -190,7 +194,11 @@ final class ShimmerBand: UIView {
         } else {
             sweep.beginTime = ramp.convertTime(clock.epoch, from: nil)
         }
-        sweep.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        // For as long as an agent works the screen is composed again every
+        // frame this runs: the render server spent a quarter of a core on
+        // Home with four working rows, half that at 30 Hz. A soft band
+        // crossing in 1.6 s looks the same at 30.
+        sweep.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
         ramp.add(sweep, forKey: Self.key)
     }
 }

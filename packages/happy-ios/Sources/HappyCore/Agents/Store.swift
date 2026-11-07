@@ -25,6 +25,8 @@ public struct Snapshot: Equatable, Sendable {
     /// (`ChatPrefill`); nil until the bots have been read, or where the
     /// account has no Chief of Staff running.
     public var happyAgentId: String?
+    /// The bots' own conversations, by agent id.
+    public var botAgentIds: Set<String> = []
     /// The person's V2 setting, which runs Prioritizing; nil until read.
     public var prioritizing: Bool?
     /// The last act the daemon refused: its reason, empty when it gave none.
@@ -120,6 +122,10 @@ public actor Store {
     private var me: String?
     private var places = Places()
     private var placesReload: Task<Void, Never>?
+    private var placesDirty = false
+    /// An `agent.updated` the sidebar follows, drawn with the others that
+    /// come within 250 ms (`followAgentsSoon`).
+    private var followingAgents: Task<Void, Never>?
     /// Names given here whose rename no read has carried yet.
     private var titleIntents: [String: (title: String, base: String?)] = [:]
 
@@ -143,9 +149,13 @@ public actor Store {
     public func startExternal() async { await restoreOffline() }
 
     @discardableResult
-    public func externalResync(loadSidebar: Bool) async -> Bool {
-        for listener in listeners.values { listener.continuation.yield(.resync) }
-        for listener in typeListeners.values { listener.continuation.yield(.resync) }
+    public func externalResync(loadSidebar: Bool, resync: Bool = true) async -> Bool {
+        // A stream that picked up where it left off replays what they
+        // missed: nothing is read again.
+        if resync {
+            for listener in listeners.values { listener.continuation.yield(.resync) }
+            for listener in typeListeners.values { listener.continuation.yield(.resync) }
+        }
         snapshot.live = true
         if loadSidebar {
             await load()
@@ -156,14 +166,39 @@ public actor Store {
     }
 
     public func externalEvent(_ envelope: JSONValue) {
+        hand(envelope)
+        receive(envelope)
+    }
+
+    /// The event to whoever follows its conversation or Surface, and to
+    /// whoever follows its type: both found by key, not by asking every
+    /// follower, for every word an agent writes.
+    private func hand(_ envelope: JSONValue) {
         let payload = envelope["payload"]
         if let key = payload?["agentId"]?.stringValue ?? payload?["surfaceId"]?.stringValue ?? payload?["todo"]?["surfaceId"]?.stringValue {
-            for listener in listeners.values where listener.key == key { listener.continuation.yield(.event(envelope)) }
+            for id in keyed[key] ?? [] { listeners[id]?.continuation.yield(.event(envelope)) }
         }
-        if let type = envelope["type"]?.stringValue {
-            for listener in typeListeners.values where listener.prefixes.contains(where: type.hasPrefix) { listener.continuation.yield(.event(envelope)) }
+        guard let type = envelope["type"]?.stringValue, !prefixed.isEmpty else { return }
+        var heard = Set<UUID>()
+        for prefix in Self.prefixes(of: type) {
+            for id in prefixed[prefix] ?? [] where heard.insert(id).inserted {
+                guard let listener = typeListeners[id], listener.wanted?(envelope) ?? true else { continue }
+                listener.continuation.yield(.event(envelope))
+            }
         }
-        receive(envelope)
+    }
+
+    /// What `events(matching:)` may follow `type` by: it whole, and each
+    /// part of it up to a dot (`space.`, `space.sidebar.`, …).
+    static func prefixes(of type: String) -> [String] {
+        var prefixes = [type]
+        var index = type.startIndex
+        while let dot = type[index...].firstIndex(of: ".") {
+            let next = type.index(after: dot)
+            if next < type.endIndex { prefixes.append(String(type[..<next])) }
+            index = next
+        }
+        return prefixes
     }
 
     public func start() {
@@ -196,6 +231,7 @@ public actor Store {
         following?.cancel(); following = nil
         loading?.cancel(); loading = nil
         placesReload?.cancel(); placesReload = nil
+        followingAgents?.cancel(); followingAgents = nil
         attentionIdle?.cancel(); attentionIdle = nil
         keeping?.cancel(); keeping = nil
         continuation.finish()
@@ -210,7 +246,7 @@ public actor Store {
                 for try await frame in frames {
                     if frame.event == "hello" {
                         attempt = 0
-                        let hello = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8))
+                        let hello = try? JSONValue.decode(Data(frame.data.utf8))
                         let resumed = hello?["resumed"]?.boolValue == true && hello?["gap"]?.boolValue != true
                         if let next = hello?["cursor"]?.stringValue, !resumed || cursor == nil { cursor = next }
                         snapshot.live = true
@@ -222,14 +258,8 @@ public actor Store {
                         continue
                     }
                     if let id = frame.id { cursor = id }
-                    guard let envelope = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8)) else { continue }
-                    let payload = envelope["payload"]
-                    if let key = payload?["agentId"]?.stringValue ?? payload?["surfaceId"]?.stringValue ?? payload?["todo"]?["surfaceId"]?.stringValue {
-                        for listener in listeners.values where listener.key == key { listener.continuation.yield(.event(envelope)) }
-                    }
-                    if let type = envelope["type"]?.stringValue {
-                        for listener in typeListeners.values where listener.prefixes.contains(where: type.hasPrefix) { listener.continuation.yield(.event(envelope)) }
-                    }
+                    guard let envelope = try? JSONValue.decode(Data(frame.data.utf8)) else { continue }
+                    hand(envelope)
                     receive(envelope)
                 }
             } catch AgentClientError.revoked {
@@ -254,26 +284,44 @@ public actor Store {
     }
 
     private var listeners: [UUID: (key: String, continuation: AsyncStream<ConversationEvent>.Continuation)] = [:]
+    /// The followers of each key and of each type prefix (`hand`).
+    private var keyed: [String: Set<UUID>] = [:]
+    private var prefixed: [String: Set<UUID>] = [:]
 
     /// `key` is a conversation's agent ID, or a Surface's ID for its todos.
     public func conversationEvents(_ key: String) -> AsyncStream<ConversationEvent> {
         let id = UUID()
         let (stream, continuation) = AsyncStream.makeStream(of: ConversationEvent.self)
         listeners[id] = (key, continuation)
+        keyed[key, default: []].insert(id)
         continuation.onTermination = { [weak self] _ in Task { await self?.unlisten(id) } }
         return stream
     }
 
-    private func unlisten(_ id: UUID) { listeners.removeValue(forKey: id); typeListeners.removeValue(forKey: id) }
+    private func unlisten(_ id: UUID) {
+        if let key = listeners.removeValue(forKey: id)?.key {
+            keyed[key]?.remove(id)
+            if keyed[key]?.isEmpty == true { keyed[key] = nil }
+        }
+        for prefix in typeListeners.removeValue(forKey: id)?.prefixes ?? [] {
+            prefixed[prefix]?.remove(id)
+            if prefixed[prefix]?.isEmpty == true { prefixed[prefix] = nil }
+        }
+    }
 
-    private var typeListeners: [UUID: (prefixes: [String], continuation: AsyncStream<ConversationEvent>.Continuation)] = [:]
+    private var typeListeners: [UUID: (prefixes: [String], wanted: (@Sendable (JSONValue) -> Bool)?, continuation: AsyncStream<ConversationEvent>.Continuation)] = [:]
 
-    /// Every event whose type starts with one of `prefixes` (`"artifact."`),
-    /// for what no conversation or Surface key names. `resync` as above.
-    public func events(matching prefixes: [String]) -> AsyncStream<ConversationEvent> {
+    /// Every event whose type starts with one of `prefixes`, for what no
+    /// conversation or Surface key names. A prefix ends at a dot
+    /// (`"artifact."`) or is a whole type (`"agent.created"`): each is
+    /// found by key (`prefixes(of:)`). `wanted`, when given, picks among
+    /// them here, so what isn't wanted isn't handed over at all. `resync`
+    /// as above.
+    public func events(matching prefixes: [String], wanted: (@Sendable (JSONValue) -> Bool)? = nil) -> AsyncStream<ConversationEvent> {
         let id = UUID()
         let (stream, continuation) = AsyncStream.makeStream(of: ConversationEvent.self)
-        typeListeners[id] = (prefixes, continuation)
+        typeListeners[id] = (prefixes, wanted, continuation)
+        for prefix in prefixes { prefixed[prefix, default: []].insert(id) }
         continuation.onTermination = { [weak self] _ in Task { await self?.unlisten(id) } }
         return stream
     }
@@ -294,14 +342,10 @@ public actor Store {
     private func read() async {
         sidebarReadSucceeded = false
         do {
-            async let health = client.health()
-            async let sidebar = client.sidebar(widgets: true)
-            async let bots = client.bots()
-            async let tasks = client.tasks()
-            async let setting = client.userSetting(Self.settingKey)
-            async let surfaceList = client.surfaces()
-            async let profile = client.profileUser()
-            let capabilities = (try? await health)?.capabilities ?? AgentWire.Health.Capabilities()
+            // Spaces were removed from happy-agent (API.md): a daemon
+            // without `sidebarOperations` answers 404 there, so nothing of
+            // the sidebar document is asked before health says it exists.
+            let capabilities = (try? await client.health())?.capabilities ?? AgentWire.Health.Capabilities()
             self.capabilities = capabilities
             guard capabilities.sidebarOperations == true else {
                 snapshot.availability = .unsupported
@@ -309,6 +353,12 @@ public actor Store {
                 publish()
                 return
             }
+            async let sidebar = client.sidebar(widgets: true)
+            async let bots = client.bots()
+            async let tasks = client.tasks()
+            async let setting = client.userSetting(Self.settingKey)
+            async let surfaceList = client.surfaces()
+            async let profile = client.profileUser()
             let answer = try await sidebar
             let (botList, taskList) = try await (bots, tasks)
             snapshot.prioritizing = (try? await setting) == .bool(true)
@@ -372,13 +422,23 @@ public actor Store {
         publish()
     }
 
+    /// The bots and tasks are stale: read once things settle, and once
+    /// more for news that came during the read, as home's own loop does
+    /// (Proofs/: `Refresh`). Starting the wait again with each piece of
+    /// news, as this did, never read while news kept coming.
     private func schedulePlacesReload() {
-        placesReload?.cancel()
+        placesDirty = true
+        guard placesReload == nil else { return }
         placesReload = Task {
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            guard let (bots, tasks) = try? await (client.bots(), client.tasks()) else { return }
-            await adoptPlaces(bots: bots, tasks: tasks)
+            while placesDirty {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled else { return }
+                placesDirty = false
+                guard let (bots, tasks) = try? await (client.bots(), client.tasks()) else { placesDirty = true; break }
+                guard !Task.isCancelled else { return }
+                adoptPlaces(bots: bots, tasks: tasks)
+            }
+            placesReload = nil
         }
     }
 
@@ -514,6 +574,22 @@ public actor Store {
     }
 
 
+    /// A working agent's `agent.updated` comes with every word, and each
+    /// rebuilt the bots' and tasks' places through JSON and redrew the
+    /// sidebar: drawn together 250 ms on, as `SyncEngine` draws home, the
+    /// rows still move within a quarter of a second. Any other change
+    /// draws them at once with it.
+    private func followAgentsSoon() {
+        guard followingAgents == nil else { return }
+        followingAgents = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            followingAgents = nil
+            rebuildPlaces()
+            publish()
+        }
+    }
+
     // MARK: Events
 
     private func receive(_ event: JSONValue) {
@@ -531,9 +607,16 @@ public actor Store {
         case "space.sidebar.changed":
             sidebarChanged(payload)
         case "agent.updated":
-            guard let id = payload["agentId"]?.stringValue else { return }
+            // An agent no bot or task here holds draws nothing here; one
+            // that moved only its time within the minute, nothing either.
+            guard let id = payload["agentId"]?.stringValue, agents.holds(id) else { return }
+            let drawn = agents.drawn(id)
             let followed = agents.update(agentId: id, previousVersion: payload["previousVersion"]?.stringValue, version: payload["version"]?.stringValue, changes: payload["changes"]?.objectValue ?? [:])
-            if followed { rebuildPlaces() } else { schedulePlacesReload() }
+            if followed {
+                if agents.drawn(id) != drawn { followAgentsSoon() }
+                return
+            }
+            schedulePlacesReload()
         case "agent.created":
             if let agent = payload["agent"] { agents.created(agent); rebuildPlaces() }
         case "bot.created", "bot.updated", "task.created", "task.updated", "task.joined", "task.left":
@@ -671,6 +754,7 @@ public actor Store {
             snapshot.document = document
         }
         snapshot.happyAgentId = places.chiefOfStaffAgentId
+        snapshot.botAgentIds = Set(places.bots.compactMap { $0.agent?.id })
         var references = References.entities(owners: composedOwners)
         references.artifacts = artifactTitles
         references.pages = artifactPages

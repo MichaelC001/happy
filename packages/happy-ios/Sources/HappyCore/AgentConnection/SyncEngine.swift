@@ -75,11 +75,32 @@ public actor SyncEngine {
     private var refusedIds: Set<String> = []
     /// Reads of the computer begun (`reconcile`).
     private var reads = 0
+    /// The newest read home has taken: one begun before it is older in
+    /// every part and is dropped.
+    private var adopted = 0
+    /// News home couldn't apply (`scheduleReconcile`), counted, and how
+    /// much of it the newest read taken began after: home is stale while
+    /// they differ, a read cancelled on its way included.
+    private var signalled = 0
+    private var covered = 0
+    /// The newest journal event taken in, and the daemon process a read
+    /// verified: back on that process with nothing stale, the stream picks
+    /// up from there and nothing is read again.
+    private var streamCursor: String?
+    private var verifiedDaemon: String?
     private var intentsFollowing: Task<Void, Never>?
     private var noticeClearing: Task<Void, Never>?
     private let url: URL?
     private var storage: SyncStorage?
     private var desktop: DesktopSnapshot?
+    /// Where each agent of `desktop` stands (`AgentIndex`), made on the
+    /// first update after each read; nil until then.
+    private var agentIndex: AgentIndex?
+    /// Each agent's row among `snapshot.allRows`, and each row's place
+    /// among `snapshot.rows`, as `derive` last drew them: an update redraws
+    /// only its agent's row.
+    private var agentRows: [String: Int] = [:]
+    private var shownRows: [String: Int] = [:]
     private var snapshot = HomeSnapshot()
     private var listeners: [UUID: AsyncStream<HomeSnapshot>.Continuation] = [:]
     private var runner: Task<Void, Never>?
@@ -99,7 +120,6 @@ public actor SyncEngine {
     private var stopped = false
     private var cursor: String?
     private var dirty = false
-    private var revision = 0
     private var sidebarSyncing = false
     /// The team members the listed tasks belong to, as last read, kept
     /// beside the bootstrap (`TeamUser`); those asked for and not named,
@@ -110,6 +130,8 @@ public actor SyncEngine {
     private var usersDirty = false
     private var usersRead: Task<Void, Never>?
     private var gitWatcher: Task<Void, Never>?
+    /// Rows drawn again soon, after agents' updates (`deriveSoon`).
+    private var deriving: Task<Void, Never>?
     private var gitInterest: Set<String> = []
     private var gitSnapshots: [String: WorkspaceLineChanges] = [:]
 
@@ -199,6 +221,7 @@ public actor SyncEngine {
         await lookups.disconnected()
         gitWatcher = nil; gitInterest = []
         runner = nil; refresh = nil; delivery = nil; messageDelivery = nil; usersRead = nil
+        deriving?.cancel(); deriving = nil
         tasks.forEach { $0.cancel() }
         for task in tasks { await task.value }
         await intents.setOnline(false)
@@ -260,6 +283,7 @@ public actor SyncEngine {
             let database = try database()
             if desktop == nil, let cached = try await database.checkpoint("desktop") {
                 desktop = try JSONDecoder().decode(DesktopSnapshot.self, from: JSONEncoder().encode(cached.value))
+                agentIndex = nil
                 cursor = cached.cursor
             }
             if users.isEmpty, let kept = try await database.checkpoint("users"),
@@ -290,11 +314,20 @@ public actor SyncEngine {
                 sidebarSyncing = false
                 snapshot.syncing = true
                 publish()
-                try await reconcile(generation)
-                beginDelivery(generation)
-                beginMessageDelivery(generation)
-                await intents.setOnline(deliveryAllowed)
-                let stream = try await client.events(after: cursor)
+                // Back on the process a read verified, with nothing stale:
+                // the stream picks up after the last event taken in, and
+                // neither home nor any conversation is read again. A flapping
+                // network read the whole bootstrap, and every warm chat, on
+                // every reconnect (Proofs/: `Refresh.resume_is_current`).
+                let resuming = desktop != nil && verifiedDaemon != nil && streamCursor != nil && covered == signalled
+                if !resuming {
+                    try await reconcile(generation)
+                    streamCursor = cursor
+                    beginDelivery(generation)
+                    beginMessageDelivery(generation)
+                    await intents.setOnline(deliveryAllowed)
+                }
+                let stream = try await client.events(after: resuming ? streamCursor : cursor)
                 for try await frame in stream {
                     guard current(generation) else { return }
                     if frame.event == "hello" {
@@ -305,29 +338,47 @@ public actor SyncEngine {
                         publish()
                         // The bootstrap cursor precedes its reads. Opening from
                         // it is safe even after a crash, replay or daemon replacement.
-                        let hello = try JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8))
+                        let hello = try JSONValue.decode(Data(frame.data.utf8))
+                        let gap = hello["gap"] == .bool(true)
+                        let daemon = hello["daemonId"]?.stringValue
+                        // Everything since the cursor follows, from the same process.
+                        let continued = resuming && !gap && hello["resumed"] == .bool(true) && daemon != nil && daemon == verifiedDaemon
+                        if resuming {
+                            // Something was missed, or another process answered:
+                            // it is read, and its owner checked, before anything
+                            // is delivered.
+                            if continued { verified = true } else { verified = false; try await reconcile(generation) }
+                            beginDelivery(generation)
+                            beginMessageDelivery(generation)
+                            await intents.setOnline(deliveryAllowed)
+                        }
+                        verifiedDaemon = verified ? daemon : nil
+                        if gap || hello["resumed"] != .bool(true) { streamCursor = hello["cursor"]?.stringValue ?? streamCursor }
                         await documents.opened(hello)
-                        if hello["gap"] == .bool(true) { scheduleReconcile(generation) }
+                        // Resuming, the read above already came after the gap.
+                        if gap, !resuming { scheduleReconcile(generation) }
                         profileChanged()
                         // Reads the newest page each time, so a gap loses nothing.
                         await feed.connected()
-                        await lookups.connected(gap: hello["gap"] == .bool(true))
+                        await lookups.connected(gap: gap)
                         await wantReferences()
-                        // Faces may have changed while away.
+                        // Faces may have changed while away; picked up where
+                        // it left off, their `profile.updated` follows instead.
                         usersMissing = []
-                        readAuthors(generation, again: Set(users.keys))
-                        try await resyncSidebar(generation)
+                        if !continued { readAuthors(generation, again: Set(users.keys)) }
+                        // Conversations and lists read again only for what they missed.
+                        try await resyncSidebar(generation, resync: !continued)
                         continue
                     }
                     if DocumentStreams.isDocumentFrame(frame.event) {
                         await documents.frame(frame.event, data: frame.data)
                         continue
                     }
-                    guard let event = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8)) else { continue }
+                    guard let event = try? JSONValue.decode(Data(frame.data.utf8)) else { continue }
                     await spaces.externalEvent(event)
                     guard current(generation) else { return }
                     if event["type"]?.stringValue?.hasPrefix("feed.") == true { await feed.receive(event) }
-                    await lookups.receive(event)
+                    if FeedLookups.reads(event) { await lookups.receive(event) }
                     if event["type"] == .string("git.updated"),
                        let id = event["payload"]?["workspaceId"]?.stringValue,
                        gitInterest.contains(id), let value = event["payload"]?["git"],
@@ -347,9 +398,24 @@ public actor SyncEngine {
                     // Events are delivery hints, never a durable checkpoint.
                     // Coalesce catalog invalidations; message token events go
                     // straight to the open conversation without rereading Home.
-                    if let type = event["type"]?.stringValue,
+                    // A working agent's `agent.updated` comes with every word:
+                    // laid over the held bootstrap, it is read again only when a
+                    // version was missed (`AgentUpdate`).
+                    if event["type"] == .string("agent.updated"), desktop != nil {
+                        if agentIndex == nil, let desktop { agentIndex = AgentIndex(desktop) }
+                        // Changed where it is held: nothing else of it is copied.
+                        if let index = agentIndex {
+                            switch AgentUpdate.apply(event["payload"] ?? .null, to: &desktop!, index: index) {
+                            case .applied(let patches): agentsMoved(patches)
+                            case .unchanged: break
+                            case .reread: scheduleReconcile(generation)
+                            }
+                        }
+                    } else if let type = event["type"]?.stringValue,
                        ["project.", "workspace.", "bot.", "task.", "agent.", "surface.", "user_settings."].contains(where: type.hasPrefix),
                        type != "agent.draft.updated" { scheduleReconcile(generation) }
+                    // Taken in: applied, or home marked stale for it.
+                    if let id = frame.id { streamCursor = id }
                 }
             } catch AgentClientError.revoked {
                 snapshot.live = false
@@ -374,10 +440,10 @@ public actor SyncEngine {
 
     private func current(_ generation: Int) -> Bool { !stopped && !Task.isCancelled && self.generation == generation }
 
-    private func resyncSidebar(_ generation: Int) async throws {
+    private func resyncSidebar(_ generation: Int, resync: Bool) async throws {
         sidebarSyncing = true
         if !snapshot.syncing { snapshot.syncing = true; publish() }
-        let ready = await spaces.externalResync(loadSidebar: false)
+        let ready = await spaces.externalResync(loadSidebar: false, resync: resync)
         guard current(generation) else { throw CancellationError() }
         guard ready else { throw AgentClientError.invalidResponse }
         sidebarSyncing = false
@@ -387,7 +453,7 @@ public actor SyncEngine {
 
     private func scheduleReconcile(_ generation: Int) {
         dirty = true
-        revision += 1
+        signalled += 1
         guard refresh == nil else { return }
         refresh = Task {
             var failures = 0
@@ -415,7 +481,7 @@ public actor SyncEngine {
     }
 
     private func reconcile(_ generation: Int) async throws {
-        let revision = revision
+        let asOf = signalled
         reads += 1
         let read = reads
         let database = try database()
@@ -439,12 +505,20 @@ public actor SyncEngine {
         } else if desktop.userSettings != nil {
             throw AgentClientError.invalidResponse
         }
-        // An event during the read may be newer than part of this composed
-        // snapshot. The coalesced next read owns that invalidation.
-        guard self.revision == revision else { return }
+        // A read is taken even when news came while it was on its way: what
+        // of home is newer here (an agent laid over it by `AgentUpdate`)
+        // stays, and that news already marked home stale, so the next read
+        // follows. Dropping it instead, as this did, kept home at what it
+        // held before agents began working for as long as they worked:
+        // news came with every word. Only a read begun before the one
+        // last taken is older in every part (Proofs/: `Refresh`).
+        guard read > adopted else { return }
         try await database.commit(.init(value: value, cursor: desktop.cursor), named: "desktop", settings: desktop.userSettings ?? [], expectedSettingsRevision: settingRevision)
-        guard current(generation) else { return }
-        self.desktop = desktop
+        guard current(generation), read > adopted else { return }
+        adopted = read
+        covered = max(covered, asOf)
+        self.desktop = self.desktop.map { AgentUpdate.keepingNewer(desktop, than: $0) } ?? desktop
+        agentIndex = nil
         verified = true
         cursor = desktop.cursor
         await feed.bootstrap(unread: desktop.feedUnread, cursor: desktop.cursor)
@@ -549,10 +623,12 @@ public actor SyncEngine {
         try await database().claimConversation(key, owner: owner)
     }
 
-    func keepConversation(_ key: String, value: JSONValue, owner: SyncStorage.ConversationOwner) async throws -> Bool {
+    func keepConversation(_ key: String, value: Data, owner: SyncStorage.ConversationOwner) async throws -> Bool {
         guard !stopped else { throw CancellationError() }
-        return try await database().commitConversation(.init(value: value, cursor: nil), named: key, owner: owner)
+        return try await database().commitConversation(value, named: key, owner: owner)
     }
+
+    func keptConversation(_ key: String) async throws -> Data? { try await database().checkpointData(key) }
 
     public func setSetting(_ key: String, value: JSONValue) async throws {
         guard !stopped else { throw CancellationError() }
@@ -605,24 +681,80 @@ public actor SyncEngine {
         }
     }
 
-    private func derive() {
+    /// Home drawn whole a moment on, for an agent's update that takes its
+    /// row away or brings it back (`agentsMoved`); several drawn together,
+    /// and nothing reaches home when the rows came out the same.
+    private func deriveSoon() {
+        guard deriving == nil else { return }
+        deriving = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            deriving = nil
+            let before = snapshot
+            derive(publishing: false)
+            deriveDirectory()
+            if snapshot != before { publish() }
+        }
+    }
+
+    private func derive(publishing: Bool = true) {
         snapshot.loaded = desktop != nil
         if let desktop {
             snapshot.allRows = overlay.apply(SidebarRows.make(desktop, settings: snapshot.settings, users: users, feed: feedRow))
+            agentRows = [:]
             for index in snapshot.allRows.indices {
                 snapshot.allRows[index].lineChanges = snapshot.allRows[index].workspaceId.flatMap { gitSnapshots[$0]?.visible }
+                if SidebarRows.drawsAgent(snapshot.allRows[index]), let agentId = snapshot.allRows[index].agentId { agentRows[agentId] = index }
             }
             snapshot.rows = Rows.visible(snapshot.allRows)
+            shownRows = Dictionary(snapshot.rows.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
             snapshot.userId = desktop.profile?.userId
             snapshot.profilePhoto = desktop.profile?.photo?.thumbhash
         }
-        publish()
+        if publishing { publish() }
     }
 
-    private func publish() {
+    /// Agents' updates laid over the bootstrap (`AgentUpdate.Patch`): only
+    /// what their rows draw moving redraws anything, and then only their
+    /// rows and the rows above them, at once. A working agent's come with
+    /// every word, and drew home whole a few times a second for a time
+    /// that moves once a minute. A row coming or going draws it whole.
+    private func agentsMoved(_ patches: [AgentUpdate.Patch]) {
+        var titled = false
+        var moved: [AgentWire.Agent] = []
+        for patch in patches {
+            for (before, after) in zip(patch.before, patch.after) {
+                let was = SidebarRows.Drawn(before), now = SidebarRows.Drawn(after)
+                guard was != now else { continue }
+                if was.archived != now.archived { return deriveSoon() }
+                if was.title != now.title { titled = true }
+                moved.append(after)
+            }
+        }
+        // Titles are what the Feed's directory reads of agents.
+        if titled { deriveDirectory() }
+        guard !moved.isEmpty else { return }
+        var redrawn = false
+        for agent in moved {
+            guard let index = agentRows[agent.id], snapshot.allRows.indices.contains(index), snapshot.allRows[index].agentId == agent.id else { continue }
+            var row = snapshot.allRows[index]
+            SidebarRows.redraw(&row, for: agent)
+            // What the person did that the computer hasn't heard yet stays over it.
+            if overlay.read.contains(agent.id) { row.unread = false; row.isNew = false }
+            guard row != snapshot.allRows[index] else { continue }
+            snapshot.allRows[index] = row
+            if let shown = shownRows[row.id], snapshot.rows.indices.contains(shown), snapshot.rows[shown].id == row.id { snapshot.rows[shown] = row }
+            redrawn = true
+        }
+        if redrawn { publish(rowsMoved: false) }
+    }
+
+    /// `rowsMoved`: rows may have come or gone, so the workspaces whose
+    /// line counts are followed are looked at again.
+    private func publish(rowsMoved: Bool = true) {
         if !snapshot.live { gitWatcher?.cancel(); gitWatcher = nil; gitInterest = [] }
         for listener in listeners.values { listener.yield(snapshot) }
-        watchGit()
+        if rowsMoved { watchGit() }
     }
 
     /// One subscription set per open account, never one request per row.
@@ -646,7 +778,9 @@ public actor SyncEngine {
                     guard current(generation), gitInterest == ids else { return }
                     receiveGit(response.snapshots)
                 } catch { if Task.isCancelled { return } }
-                do { try await Task.sleep(for: .seconds(30)) } catch { return }
+                // Renewed within 30 seconds as before, but from 20 on with the
+                // computer's heartbeat, while the radio is up for it anyway.
+                do { try await RadioWake.shared.next(after: .seconds(20), by: .seconds(30)) } catch { return }
             }
         }
     }

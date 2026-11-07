@@ -24,6 +24,8 @@ enum SettingsIndex {
     static var language: Entry { Entry(id: "language", title: Strings.SettingsLanguage.title, glyph: "language-outline", tile: .green) }
     static var voice: Entry { Entry(id: "voice", title: Strings.Voice.title, glyph: "mic-outline", tile: .orange) }
     static var agents: Entry { Entry(id: "agents", title: Strings.Settings.agents, glyph: "options-outline", tile: .teal) }
+    /// On Agents, this phone's own: whether home's microphone opens the task it starts.
+    static var dictationOpensTask: Entry { Entry(id: "dictation-opens-task", title: Strings.Record.opensTask, glyph: "mic-outline", tile: .blue) }
     static var scanTerminal: Entry { Entry(id: "scan-terminal", title: Strings.connectTerminal, glyph: "qr-code-outline", tile: .indigo) }
     static var enterTerminal: Entry { Entry(id: "enter-terminal", title: Strings.enterTerminalURL, glyph: "link-outline", tile: .indigo) }
     /// An agent connection's Support Happy row, under Profile, and its Voice page.
@@ -31,6 +33,8 @@ enum SettingsIndex {
     static var agentVoice: Entry { Entry(id: "agent-voice", title: Strings.AgentVoice.title, glyph: "mic-outline", tile: .orange) }
     static var supportUs: Entry { Entry(id: "support-us", title: Strings.SupportUs.title, glyph: "heart-outline", tile: .red) }
     static var dataStorage: Entry { Entry(id: "data-storage", title: Strings.DataStorage.title, glyph: "server-outline", tile: .green) }
+    /// This phone's own Analytics switch, on every kind of account's page.
+    static var analytics: Entry { Entry(id: "device-analytics", title: Strings.SettingsAccount.analytics, glyph: "analytics-outline", tile: .blue) }
     static var appearance: Entry { Entry(id: "appearance", title: Strings.Settings.appearance, glyph: "color-palette-outline", tile: .purple) }
     static var about: Entry { Entry(id: "about", title: Strings.Settings.about, glyph: "information-circle-outline", tile: .gray) }
     static var connectAgent: Entry { Entry(id: "connect-agent", title: Strings.SettingsActions.addAgent, glyph: "add-outline", tile: .action) }
@@ -48,14 +52,14 @@ enum SettingsIndex {
     /// is Data and Storage's. Disconnect is left
     /// out: a search doesn't offer to take the computer away.
     static var computer: [Entry] {
-        [profile, changeAgentName, changeAgentAvatar, supportBoba, appearance, hideProjects, agentVoice, agents, dataStorage, connection, connectAgent, addAccount] + aboutRows
+        [profile, changeAgentName, changeAgentAvatar, supportBoba, appearance, hideProjects, agentVoice, agents, dictationOpensTask, dataStorage, connection, analytics, connectAgent, addAccount] + aboutRows
     }
 
     /// What a Happy account's settings show under its accounts card, in
     /// their order: the same places as a computer's, with the account's own
     /// pages beside them. Sign out is left out, as Disconnect is.
     static var happyAccount: [Entry] {
-        [account, backupRestore, appearance, language, voice, agents, dataStorage, connection, scanTerminal, enterTerminal, supportUs] + aboutRows
+        [account, backupRestore, appearance, language, voice, agents, dataStorage, connection, scanTerminal, enterTerminal, supportUs, analytics] + aboutRows
     }
 
     /// The About page's rows.

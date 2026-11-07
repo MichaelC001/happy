@@ -1,5 +1,6 @@
 #if canImport(UIKit)
 import AVKit
+import HappyAnalytics
 import HappyCore
 import HappyLayout
 import QuickLook
@@ -134,7 +135,18 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
     private var references = References()
     /// The messages' words looked through for references not read yet, by
     /// item, and what references read as then.
-    private var scanned = (references: References(), texts: [String: String]())
+    private var scanned = Scanned(references: References())
+    /// Each row's making looked into for the proposals it shows.
+    private var proposalsLooked: [String: UInt64] = [:]
+
+    private struct Scanned {
+        var references: References
+        /// Each row's making last looked into, and its words then.
+        var revisions: [String: UInt64] = [:]
+        var texts: [String: String] = [:]
+        /// The HTML artifacts rows show, read until their pages are known.
+        var pages: Set<String> = []
+    }
     /// Inline pages' heights as they measured themselves.
     private var pageHeights: [String: CGFloat] = [:]
     /// The references with this conversation's own subagents, which the
@@ -186,8 +198,9 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
     private let header = ChatHeaderView()
     private var titleView: ChatTitleView { header.titleView }
 
-    init(session: Session, agentId: String, title: String, spaceId: String?, intro: Intro?, newTask: NewTask? = nil, prefill: ChatPrefill? = nil, previewing: Bool = false) {
+    init(session: Session, agentId: String, title: String, spaceId: String?, intro: Intro?, newTask: NewTask? = nil, prefill: ChatPrefill? = nil, saying: String? = nil, previewing: Bool = false) {
         self.session = session
+        self.saying = previewing ? nil : saying
         self.spaceId = spaceId
         self.intro = intro
         self.previewing = previewing
@@ -244,10 +257,12 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        NotificationCenter.default.addObserver(self, selector: #selector(reportFailures), name: UIApplication.didBecomeActiveNotification, object: nil)
         view.backgroundColor = UIColor(Palette.surface)
         introView.accessibilityIdentifier = "intro"
         ultra.host = self
         ultra.onReachedOldest = { [weak self] in self?.loadOlder() }
+        ultra.onRowShown = { [weak self] id in self?.reportFailure(id) }
         view.addSubview(ultra)
         if !previewing {
             // The header's own edge: the ground at the top, easing out
@@ -263,6 +278,17 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         card.configuration.showsExpand = true
         card.configuration.addAccessibilityLabel = Strings.addPicture
         card.delegate = self
+        if !previewing {
+            // Telegram's microphone in send's place while the composer is
+            // empty: what is said goes as the next message, or, stopped
+            // while locked, waits typed in.
+            record.bar = { [weak self] in
+                guard let self, card.window != nil else { return nil }
+                return RecordBar(frame: card.convert(card.bounds, to: nil), cornerRadius: card.metrics.shellRadius)
+            }
+            record.onResult = { [weak self] result in self?.dictated(result) }
+            card.recordButton = record
+        }
         card.textView.accessibilityIdentifier = "composer"
         card.accessibilityIdentifier = "input"
         // A long press's Paste attaches a copied picture.
@@ -397,6 +423,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         // Pushed with the keyboard already coming (`KeyboardPush`), the
         // composer takes it once the push is over, not inside it.
         if !keyboardPushed { takeOpeningFocus() }
+        sendSaid()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -406,6 +433,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         #endif
         // In its window now, which a later layout may not follow.
         ultraKeyboard?.refresh()
+        reportFailures()
         guard !previewing, let navigationController else { return }
         _ = navigationController
         // New work: the keyboard comes up now if it couldn't with the push,
@@ -423,6 +451,12 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         #endif
         // A finger or a release holding the keyboard lets it go at once.
         if ultraKeyboard?.isDriving == true { ultraKeyboard?.dismissImmediately() }
+        // A swipe back let go of: the composer rides the keyboard where it
+        // is, not where the swipe's notifications left it.
+        transitionCoordinator?.animate(alongsideTransition: nil) { [weak self] context in
+            guard context.isCancelled, let self else { return }
+            self.keyboardStayed()
+        }
         // Leaving keeps a name being typed, as a tap away does.
         titleView.finishEditing()
         picker?.close(animated: false)
@@ -503,6 +537,23 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         if !ownsKeyboard || abs(keyboardTracker.frame.minY - min(keyboardTop, view.bounds.maxY)) < 1 {
             fingerOnKeyboard = false
         }
+    }
+
+    /// The swipe back was let go of and the keyboard is back with the
+    /// screen: where it rests is read off the layout guide, which the
+    /// swipe's notifications may have left behind (the hide the swipe
+    /// started may end after the keyboard is back up).
+    private func keyboardStayed() {
+        guard isViewLoaded, view.window != nil else { return }
+        ultraKeyboard?.resyncWithGuide()
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        // Resting on the safe area, the guide covers nothing.
+        let guideTop = keyboardTracker.frame.minY
+        keyboardTop = guideTop < view.bounds.maxY - view.safeAreaInsets.bottom - 0.5 ? guideTop : .greatestFiniteMagnitude
+        fingerOnKeyboard = false
+        updateBar(animated: false)
+        view.setNeedsLayout()
     }
 
     /// The composer goes with the keyboard: to the same place, in the same
@@ -796,6 +847,21 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
 
     /// The row's name as the sidebar has it, and whether it is one of its own.
     private var rowName: (label: String, titled: Bool)?
+    /// Each failure card on screen in the conversation the person is
+    /// looking at: the rows the transcript reports visible, as one comes on
+    /// and as the screen comes to the front.
+    @objc private func reportFailures() {
+        for id in ultra.onScreen.ids { reportFailure(id) }
+    }
+
+    private func reportFailure(_ id: String) {
+        guard !previewing, viewIfLoaded?.window != nil, UIApplication.shared.applicationState == .active,
+              navigationController?.topViewController === self,
+              // A sheet over it is in front instead.
+              presentedViewController == nil, navigationController?.presentedViewController == nil,
+              case .failure(let failure)? = chat.items.first(where: { $0.id == id })?.role else { return }
+        Analytics.shared.failureCardShown(failure, agentId: media.agentId, in: session.snapshot)
+    }
 
     /// The row's name, or, while it has none ("New"), the conversation's
     /// own title once the daemon has written one, as desktop's header reads it.
@@ -829,6 +895,10 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
     private var creating = false
     /// The task this conversation's first message makes, when it is one.
     private let newTask: NewTask?
+    /// Words said into home's microphone for new work, sent as it opens.
+    private var saying: String?
+    /// The microphone in the composer (`RecordButton`).
+    private let record = RecordButton(style: .composer)
     /// Waits for it to be made, then names this screen after its row.
     private var made: Task<Void, Never>?
 
@@ -863,7 +933,12 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
             if snapshot.draftUpdatedAt >= lastDraftEdit { showDraft(snapshot.draft) }
         }
         if snapshot.localDraftLoaded { showPrefill() }
-        proposals.want(snapshot.items.flatMap(\.proposalIds))
+        var wanted: [String] = []
+        for item in snapshot.items where item.revision == 0 || proposalsLooked[item.id] != item.revision {
+            proposalsLooked[item.id] = item.revision
+            wanted += item.proposalIds
+        }
+        proposals.want(wanted)
         updateHeaderStatus()
         if wasSettled != settled(snapshot), let intro { introView.configure(intro, settled: settled(snapshot)) }
         showIntro()
@@ -1004,6 +1079,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         guard let action = ChatPlanner.action(failure, target: switchTarget) else { return }
         let conversation = conversation
         let mode: AgentWire.Mode? = if case .switchTo(let target) = action { target.mode } else { nil }
+        Analytics.shared.failureActionClicked(failure, switchingModel: mode != nil)
         Task { [weak self] in
             do { try await conversation.resolveFailure(failure.messageId, switchTo: mode) }
             catch {
@@ -1106,9 +1182,22 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         }
         // Only words not looked through yet, as of what references read as
         // now: a long conversation isn't read again on every layout pass.
-        if scanned.references != references { scanned = (references, [:]) }
-        let fresh = items.filter { scanned.texts[$0.id] != $0.text }
-        for item in fresh { scanned.texts[item.id] = item.text }
+        if scanned.references != references { scanned = Scanned(references: references) }
+        // A row is looked into once per making of it (`ChatItem.revision`):
+        // its words aren't joined and compared again on every word that
+        // lands in another row.
+        var changed: [ChatItem] = []
+        for item in items where item.revision == 0 || scanned.revisions[item.id] != item.revision {
+            scanned.revisions[item.id] = item.revision
+            changed.append(item)
+        }
+        var fresh: [ChatItem] = []
+        for item in changed {
+            let text = item.text
+            guard scanned.texts[item.id] != text else { continue }
+            scanned.texts[item.id] = text
+            fresh.append(item)
+        }
         // Artifacts the messages name are read for their titles, once each.
         let unread = fresh.flatMap { references.unread(in: $0.text) }
         if !unread.isEmpty {
@@ -1117,13 +1206,13 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         }
         // An HTML artifact a call shows is read for whether it wants to be
         // inline, or is an app, whose card opens it full screen.
-        let pages = items.flatMap(\.pieces).compactMap { piece -> String? in
-            guard case .artifact(let artifact) = piece, artifact.type == "html", references.artifacts[artifact.id] == nil else { return nil }
-            return artifact.id
+        for piece in changed.lazy.flatMap(\.pieces) {
+            if case .artifact(let artifact) = piece, artifact.type == "html" { scanned.pages.insert(artifact.id) }
         }
+        let pages = scanned.pages.filter { references.artifacts[$0] == nil }
         if !pages.isEmpty {
             let store = session.store
-            Task { await store.readArtifacts(pages) }
+            Task { await store.readArtifacts(Array(pages)) }
         }
         // So are the names of the people they mention.
         let people = fresh.flatMap { references.unknownUsers(in: $0.text) }
@@ -1486,8 +1575,36 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
     private func updatePrimary() {
         let hasContent = !card.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pictures.images.isEmpty
         card.configuration.primaryAction = AgentInputPrimaryAction.resolve(
-            hasComposerContent: hasContent, isSendBlocked: false, isSendDisabled: false, showAbortButton: chat.working, canAbort: true
+            hasComposerContent: hasContent, isSendBlocked: false, isSendDisabled: false, showAbortButton: chat.working, canAbort: true,
+            canRecord: !previewing
         )
+    }
+
+    /// What the microphone heard, after anything already typed: sent as
+    /// the next message, or, as a draft, left in the composer to finish.
+    private func dictated(_ result: RecordButton.Result) {
+        let words: String
+        switch result {
+        case .send(let said), .draft(let said): words = said
+        }
+        let typed = card.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let combined = typed.isEmpty ? words : typed + " " + words
+        card.setText(combined, selection: NSRange(location: (combined as NSString).length, length: 0))
+        agentInputCardDidChangeText(card)
+        switch result {
+        case .send: send()
+        case .draft: card.focus()
+        }
+    }
+
+    /// New work said into home's microphone: its words go as the first
+    /// message the moment the screen comes in, which makes the task.
+    private func sendSaid() {
+        guard let saying, !previewing else { return }
+        self.saying = nil
+        card.setText(saying, selection: NSRange(location: (saying as NSString).length, length: 0))
+        agentInputCardDidChangeText(card)
+        send()
     }
 
     /// A send follows the transcript the person is actually reading.
@@ -1539,6 +1656,9 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         let conversation = conversation
         let store = session.store
         let staged = pictures
+        let sent = Analytics.shared.agentSend(to: media.agentId, in: session.snapshot, mode: mode, catalog: session.models.catalog,
+                                              newWork: chat.items.isEmpty ? newTask?.agentId : nil,
+                                              attachments: picked.count + previews.count, steering: chat.working)
         #if DEBUG
         composeTrace?.event("send choice=\(String(describing: newTask?.choice))")
         #endif
@@ -1552,6 +1672,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
             acceptingSend = false
             if !accepted, !newWorkPanelGone { newWorkPanel?.isLocked = false }
             if accepted {
+                sent()
                 if card.text.trimmingCharacters(in: .whitespacesAndNewlines) == text {
                     card.setText("", selection: NSRange(location: 0, length: 0))
                 }
@@ -1698,6 +1819,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
     }
 
     private func showFileUnavailable() {
+        Analytics.shared.fileLoadFailed()
         let alert = UIAlertController(title: nil, message: Strings.fileUnavailable, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: Strings.Common.ok, style: .default))
         present(alert, animated: true)

@@ -72,6 +72,10 @@ public final class AgentClient: Sendable {
 
     func decode<T: Decodable>(_ type: T.Type, _ method: String, _ path: String, json: JSONValue? = nil) async throws -> T {
         let response = try await send(method, path, json: json)
+        if T.self == JSONValue.self {
+            guard let value = try? JSONValue.decode(response.body) as? T else { throw AgentClientError.invalidResponse }
+            return value
+        }
         do { return try JSONDecoder().decode(T.self, from: response.body) }
         catch { throw AgentClientError.invalidResponse }
     }
@@ -578,12 +582,13 @@ public final class AgentClient: Sendable {
         return AsyncThrowingStream { continuation in
             let reader = Task {
                 var parser = ServerSentEventParser()
-                var watchdog = Self.watch(continuation, transport: transport)
+                let heard = Heard()
+                let watchdog = Self.watch(continuation, transport: transport, heard: heard)
                 defer { watchdog.cancel() }
                 do {
                     for try await bytes in body {
-                        watchdog.cancel()
-                        watchdog = Self.watch(continuation, transport: transport)
+                        heard.now()
+                        RadioWake.shared.noted()
                         for frame in parser.append(bytes) { continuation.yield(frame) }
                     }
                     continuation.finish()
@@ -598,9 +603,24 @@ public final class AgentClient: Sendable {
     /// so this long without a byte means it is gone, and so is the tunnel.
     static let silence: Duration = .seconds(40)
 
-    private static func watch(_ continuation: AsyncThrowingStream<ServerSentEvent, Error>.Continuation, transport: any AgentTransport) -> Task<Void, Never> {
+    /// When the stream last brought bytes.
+    private final class Heard: @unchecked Sendable {
+        private let lock = NSLock()
+        private var last = ContinuousClock.now
+        func now() { lock.withLock { last = .now } }
+        var lastHeard: ContinuousClock.Instant { lock.withLock { last } }
+    }
+
+    /// One sleeper for the stream's life, woken at the silence deadline and
+    /// put back to sleep if bytes came meanwhile: not a task made and
+    /// cancelled for every chunk.
+    private static func watch(_ continuation: AsyncThrowingStream<ServerSentEvent, Error>.Continuation, transport: any AgentTransport, heard: Heard) -> Task<Void, Never> {
         Task {
-            guard (try? await Task.sleep(for: silence)) != nil else { return }
+            while true {
+                let due = heard.lastHeard + silence
+                guard (try? await Task.sleep(until: due, clock: .continuous)) != nil else { return }
+                if ContinuousClock.now >= heard.lastHeard + silence { break }
+            }
             await transport.reset(.realtime)
             continuation.finish(throwing: PairingError.unavailable)
         }

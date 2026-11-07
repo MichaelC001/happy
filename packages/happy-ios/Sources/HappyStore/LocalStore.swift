@@ -434,9 +434,11 @@ public final class LocalStore: Sendable {
 
     /// Replaces the machine list with a full `GET /v1/machines` response,
     /// keeping newer versioned state already stored from live updates.
-    public func replaceMachines(_ incoming: [MachineRecord]) throws {
+    /// `keeping` are machines a live `new-machine` stored after the request
+    /// went out: a list read before they existed doesn't remove them.
+    public func replaceMachines(_ incoming: [MachineRecord], keeping: Set<String> = []) throws {
         let removed = try performWrite { db in
-            let ids = Set(incoming.map(\.id))
+            let ids = Set(incoming.map(\.id)).union(keeping)
             var removed = Set<String>()
             for id in try String.fetchAll(db, sql: "SELECT id FROM machine") where !ids.contains(id) {
                 if try MachineRecord.deleteOne(db, key: id) { removed.insert(id) }
@@ -632,6 +634,15 @@ public final class LocalStore: Sendable {
     @MainActor
     public func observeSettings(onChange: @escaping @MainActor (SettingsSnapshot) -> Void) -> StoreObservation {
         Self.deliverOnMain(settingsSnapshots(), onChange: onChange)
+    }
+
+    /// The settings in the store file at `url`, read once without opening
+    /// the store: an account that is signed in here but not open.
+    public nonisolated static func settingsSnapshot(at url: URL) async throws -> SettingsSnapshot {
+        var configuration = Configuration()
+        configuration.readonly = true
+        configuration.busyMode = .timeout(2)
+        return try await DatabaseQueue(path: url.path, configuration: configuration).read { db in try fetchSettingsSnapshot(db) }
     }
 
     static func fetchSettingsSnapshot(_ db: Database) throws -> SettingsSnapshot {

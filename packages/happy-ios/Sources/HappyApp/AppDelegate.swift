@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import HappyAnalytics
 import HappyCore
 import HappyUI
 import HappyGuest
@@ -16,6 +17,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         LegacyFonts.registerBundledFonts()
         PushNotifications.shared.install()
+        Analytics.shared.reportCrashes()
         // The store's transactions are listened for from the first moment: renewals, approvals, refunds.
         Offers.launch()
         return true
@@ -63,6 +65,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         coordinator.start()
         #if DEBUG || HAPPY_FIXTURES
         GymFrameMeter.installIfAsked(in: window)
+        ScreenFilm.startIfAsked()
         #endif
         PushNotifications.shared.attach(context: coordinator.context, coordinator: coordinator)
         if let response = connectionOptions.notificationResponse {
@@ -105,12 +108,18 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
+        Analytics.shared.appBecameActive()
         coordinator?.appStateChanged(active: true)
         activeGuest?.setActive(true)
         PushNotifications.shared.appBecameActive()
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
+        // The last flush gets the time a background task gives it.
+        let task = UIApplication.shared.beginBackgroundTask(withName: "happy.analytics")
+        Analytics.shared.appEnteredBackground {
+            if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
+        }
         coordinator?.appStateChanged(active: false)
         activeGuest?.setActive(false)
     }

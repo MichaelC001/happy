@@ -25,7 +25,10 @@ public final class AgentConnections {
     /// again, while `finishRemoval` forgets them.
     var hidden: Set<String> = []
     let makeTransport: @Sendable (AgentConnectionCredentials) -> any AgentTransport
-    var refreshInterval: Duration = .seconds(60)
+    /// How often each pairing's name, avatar and health are read again while
+    /// in the foreground. Coming back to the foreground reads them at once,
+    /// and an open account's own stream says whether its computer is there.
+    var refreshInterval: Duration = .seconds(600)
 
     public init(credentials: any AgentConnectionCredentialStore, directory: URL?, makeTransport: @escaping @Sendable (AgentConnectionCredentials) -> any AgentTransport = { AgentHTTPTransport(address: $0.address, port: $0.port, publicUrl: $0.publicUrl, tailcatAvailable: $0.tailcatAvailable != false) }) {
         storage = AgentConnectionStorage(credentials: credentials, directory: directory)
@@ -164,12 +167,13 @@ public final class AgentConnections {
     /// already there in again: same origin and person, same account, its
     /// grant replaced and its revocation lifted. `access` is the token the
     /// sign-in just got, so nothing is refreshed straight away.
-    public func addServer(_ origin: AgentOrigin, signIn: ServerSignInRecord, access: OAuthAccess, name: String) async throws -> AgentConnection {
+    public func addServer(_ origin: AgentOrigin, signIn: ServerSignInRecord, access: OAuthAccess, name: String, instanceId: String? = nil) async throws -> AgentConnection {
         if !loaded { try await restore() }
         let value = AgentConnectionCredentials.server(origin, signIn: signIn)
         let id = credentials.first { $0.value.signIn != nil && $0.value.publicUrl == origin.value && $0.value.signIn?.userId == signIn.userId }?.key ?? "server-\(UUID().uuidString.lowercased())"
         var account = accounts.first { $0.id == id } ?? AgentConnection(id: id, name: AgentName.friendly(name))
         account.server = origin.value
+        if let instanceId { account.instanceId = instanceId }
         account.revoked = false
         account.status = .connecting
         await stop(id)
@@ -234,11 +238,18 @@ public final class AgentConnections {
         }
         do { try await storage.remove(id) }
         catch { startConnections(); throw error }
-        credentials.removeValue(forKey: id); accounts.removeAll { $0.id == id }; meters.removeValue(forKey: id)
+        revokeIfCloud(credentials.removeValue(forKey: id)); accounts.removeAll { $0.id == id }; meters.removeValue(forKey: id)
         // What V2 kept to open on it offline goes with it.
         OfflineFile.remove(id)
         if activeID == id { activeID = nil }
         onChange?()
+    }
+
+    /// A removed cloud server's session is revoked at the accounts service,
+    /// not just forgotten here.
+    private func revokeIfCloud(_ removed: AgentConnectionCredentials?) {
+        guard let removed, HappyCloud.isCloud(removed.publicUrl), let grant = removed.signIn?.grant else { return }
+        Task.detached { await CloudAccount.revoke(grant) }
     }
 
     /// What `forget` took away, for its owner to stop off screen.
@@ -256,7 +267,7 @@ public final class AgentConnections {
         let job = jobs.removeValue(forKey: id)
         job?.cancel()
         let engine = engines.removeValue(forKey: id)
-        credentials.removeValue(forKey: id)
+        revokeIfCloud(credentials.removeValue(forKey: id))
         if let endpoint = endpoints.removeValue(forKey: id) { Task { await endpoint.retire() } }
         if let authorization = authorizations.removeValue(forKey: id) { Task { await authorization.signInRequired() } }
         meters.removeValue(forKey: id)
@@ -334,28 +345,34 @@ public final class AgentConnections {
             jobs[account.id] = Task.detached { [weak self] in
                 var current = account
                 var attempt = 0
+                var issue: (any Error)?
                 while !Task.isCancelled {
-                    let transport = AgentEndpointTransport(endpoint: endpoint, metrics: meter, make: make)
                     do {
                         current.status = attempt == 0 ? .connecting : .retrying
                         await self?.apply(current, generation: generation)
                         while !Task.isCancelled {
-                            current = try await AgentIdentity.refresh(current, transport: transport, token: credential.deviceToken)
+                            // A transport per check, closed after it: its tunnels
+                            // don't idle on the radio until the next one.
+                            let transport = AgentEndpointTransport(endpoint: endpoint, metrics: meter, make: make)
+                            do { current = try await AgentIdentity.refresh(current, transport: transport, token: credential.deviceToken) }
+                            catch { await transport.close(); throw error }
+                            await transport.close()
                             try Task.checkCancellation()
                             await self?.apply(current, generation: generation)
                             attempt = 0
-                            try await Task.sleep(for: interval)
+                            // In its last tenth, with traffic already moving.
+                            try await RadioWake.shared.next(after: interval * 9 / 10, by: interval)
                         }
                     } catch PairingError.revoked {
                         current.revoked = true; current.status = .revoked
-                        if !Task.isCancelled { await self?.apply(current, generation: generation) }
-                        await transport.close()
+                        if !Task.isCancelled { await self?.apply(current, generation: generation, issue: PairingError.revoked) }
                         return
-                    } catch { }
-                    await transport.close()
+                    } catch {
+                        issue = error
+                    }
                     if Task.isCancelled { return }
                     current.status = .retrying
-                    await self?.apply(current, generation: generation)
+                    await self?.apply(current, generation: generation, issue: issue)
                     let delay = Self.retryDelay(attempt)
                     attempt = min(attempt + 1, 5)
                     do { try await Task.sleep(for: .seconds(delay)) } catch { return }
@@ -366,9 +383,12 @@ public final class AgentConnections {
 
     nonisolated static func retryDelay(_ attempt: Int) -> Int { min(30, 1 << max(0, min(5, attempt))) }
 
-    private func apply(_ account: AgentConnection, generation: UInt64) async {
+    private func apply(_ account: AgentConnection, generation: UInt64, issue: (any Error)? = nil) async {
         guard !Task.isCancelled, self.generation == generation,
               let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
+        Happenings.post(.agentConnectionChanged(id: account.id, direct: account.server == nil,
+                                                 down: account.status == .retrying || account.status == .revoked,
+                                                 problem: issue.flatMap(Problem.init)))
         let previous = accounts[index]
         guard previous != account else { return }
         accounts[index] = account

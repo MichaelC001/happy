@@ -22,7 +22,7 @@ enum MigrationPath: String, Hashable, Sendable {
 }
 
 /// Whether the Happy CLI home shows a migration card, and which: none
-/// unless PostHog's flag is on for the account (`MigrationNoteFlag`), none
+/// unless PostHog's flag is on for this install (`MigrationNoteFlag`), none
 /// once this phone has a direct Happy Agent connection (paired and not
 /// revoked), nor once that path's card was closed here, which holds for
 /// every account on this phone.
@@ -129,9 +129,14 @@ final class DesktopMigrationViewController: UIViewController {
         for link in links.compactMap({ $0 }) {
             link.onTap = { UIApplication.shared.open(Strings.Onboarding.desktopURL) }
         }
-        for subview in [art, titleLabel, bodyLabel] + numbers + steps + links.compactMap({ $0 }) + details.compactMap({ $0 }) + [scan, learnMore] as [UIView] {
-            scroll.addSubview(subview)
-        }
+        // Built up in steps: Xcode 26.2 can't type-check it as one sum.
+        var subviews: [UIView] = [art, titleLabel, bodyLabel]
+        subviews += numbers as [UIView]
+        subviews += steps as [UIView]
+        subviews += links.compactMap { $0 } as [UIView]
+        subviews += details.compactMap { $0 } as [UIView]
+        subviews += [scan, learnMore] as [UIView]
+        for subview in subviews { scroll.addSubview(subview) }
     }
 
     override func viewDidLayoutSubviews() {

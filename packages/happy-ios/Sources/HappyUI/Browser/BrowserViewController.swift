@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import HappyAnalytics
 import HappyCore
 import HappyIcons
 import HappyLayout
@@ -254,6 +255,7 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
 
     private func fail(_ problem: BrowserProblem, url: URL?, beforeCommit: Bool) {
         self.problem = problem
+        Analytics.shared.browserLoadFailed(problem)
         failedURL = url ?? failedURL ?? originalURL
         failedBeforeCommit = beforeCommit
         setProgress { $0.hide() }

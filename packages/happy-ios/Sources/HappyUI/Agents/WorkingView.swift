@@ -200,6 +200,10 @@ final class BrailleView: UIView {
         NotificationCenter.default.addObserver(self, selector: #selector(foregrounded), name: UIApplication.willEnterForegroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(wentAway), name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(animate), name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
+        // Posted on any thread.
+        NotificationCenter.default.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.animate() }
+        }
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
@@ -252,7 +256,9 @@ final class BrailleView: UIView {
 
     @objc private func animate() {
         for dot in dots { dot.removeAnimation(forKey: "wave") }
-        guard running, window != nil, !backgrounded, !UIAccessibility.isReduceMotionEnabled else { return }
+        // In Low Power Mode it holds still, as with Reduce Motion: each frame
+        // it runs has the whole screen composed again.
+        guard running, window != nil, !backgrounded, !UIAccessibility.isReduceMotionEnabled, !ProcessInfo.processInfo.isLowPowerModeEnabled else { return }
         let start = CACurrentMediaTime()
         let cycle = Braille.cycle / 1000
         for (dot, phase) in zip(dots, Braille.phases) {
@@ -267,7 +273,9 @@ final class BrailleView: UIView {
             let lag = Double(phase) * Braille.frame / 1000
             wave.timeOffset = (cycle - lag).truncatingRemainder(dividingBy: cycle)
             wave.isRemovedOnCompletion = false
-            wave.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+            // Looping for as long as the agent works, at the shimmer's 30 Hz:
+            // its steps are 100 ms.
+            wave.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
             dot.add(wave, forKey: "wave")
         }
     }

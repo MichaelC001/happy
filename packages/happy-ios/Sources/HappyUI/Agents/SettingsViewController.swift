@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import HappyAnalytics
 import HappyCore
 import HappyLayout
 import HappyStore
@@ -474,7 +475,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
             let revoked = context.account.agentConnections.accounts.first { $0.id == id }?.revoked == true
             let serverRows: [[SettingsRow]] = server.map { origin in
                 [[
-                    Row(id: "server", title: Strings.ServerSignIn.server, value: URLComponents(string: origin)?.host ?? origin, accessory: .none),
+                    Row(id: "server", title: Strings.ServerSignIn.server, value: HappyCloud.handle(server: origin) ?? URLComponents(string: origin)?.host ?? origin, accessory: .none),
                     Row(id: "server-sign-in", title: revoked ? Strings.ServerSignIn.needsSignIn : Strings.ServerSignIn.signInAgain, accessory: .none, action: { [weak self] in
                         guard let self else { return }
                         let instanceId = context.account.agentConnections.accounts.first { $0.id == id }?.instanceId
@@ -496,6 +497,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
                     Row(Index.agents, action: { [weak self] in self?.open(.agents) }),
                     Row(Index.dataStorage, action: { [weak self] in self?.open(.dataStorage) }),
                 ],
+                [analyticsRow()],
                 aboutRows(),
             ] + removal
         }
@@ -517,6 +519,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
                 Row(Index.enterTerminal, accessory: .none, action: { [weak self] in self?.connectTerminal(scanning: false) }),
             ],
             [Row(Index.supportUs, action: { [weak self] in self?.open(.supportUs) })],
+            [analyticsRow()],
             aboutRows(),
             [Row(id: "sign-out", title: Strings.signOut, accessory: .none, destructive: true, action: { [weak self] in self?.remove(id, direct: false) })],
         ]
@@ -671,6 +674,11 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
             [start].withFooter(Text.startFooter(preferences.start)),
             [defaultModel, effort].withFooter(Text.modelFooter(preferences.start)),
             [permission].withFooter(Text.accessFooter),
+            // This phone's, not the computer's: where a task started from
+            // home's microphone leaves the person.
+            [Row(SettingsIndex.dictationOpensTask, accessory: .toggle, isOn: context.account.localSettings.dictationOpensTask, toggled: { [weak self] on in
+                self?.context.account.localSettings.dictationOpensTask = on
+            })].withFooter(Strings.Record.opensTaskFooter),
         ]
     }
 
@@ -693,6 +701,21 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
     private func updateModelPreferences(_ change: @escaping @Sendable (inout ModelPreferences) -> Void) {
         guard let id = shown?.id, let engine = context.account.agentConnections.syncEngine(for: id) else { return }
         Task { try? await engine.updateModelPreferences(change) }
+    }
+
+    /// This phone's own analytics switch, whatever is signed in: a phone
+    /// with only agent connections has no account setting to turn off.
+    /// Off deletes what was waiting to be sent.
+    private func analyticsRow() -> SettingsRow {
+        let entry = SettingsIndex.analytics
+        return SettingsRow(id: entry.id, title: entry.title, icon: (entry.glyph, entry.tile), accessory: .toggle,
+                    isOn: !Analytics.shared.deviceOptOut, toggled: { [weak self] on in
+            let kept = Analytics.shared.setDeviceOptOut(!on)
+            self?.rebuild()
+            if !kept, !on, let self {
+                Alerts.show(Strings.Common.error, Strings.SettingsAccount.analyticsNotSaved, on: self)
+            }
+        }, footer: Strings.SettingsAccount.privacyDescription)
     }
 
     private func aboutRows() -> [SettingsRow] {

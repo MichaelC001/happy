@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import HappyAnalytics
 import HappyCore
 import HappyLayout
 import HappyWire
@@ -170,8 +171,10 @@ final class ArtifactViewController: UIViewController, ChatMediaProviding {
             }
         } catch is CancellationError {
         } catch AgentClientError.status(404, _, _) {
+            Analytics.shared.artifactLoadFailed(nil, isFile: vault != nil)
             show(message: Strings.artifactDeleted)
         } catch {
+            Analytics.shared.artifactLoadFailed(error, isFile: vault != nil)
             show(message: Strings.artifactUnavailable)
         }
     }
