@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>HappyCallAgentID</key>
-	<string>$(HAPPY_CALL_AGENT_ID)</string>
+	<string>$(HAPPY_CALL_AGENT_V3_ID)</string>
 	<key>HappyRevenueCatAppleKey</key>
 	<string>$(HAPPY_REVENUE_CAT_APPLE_KEY)</string>
 	<key>HappyGuestPreviewInvites</key>
@@ -13,7 +13,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>Happy (preview)</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.0.0</string>
+	<string>2026.11.1</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

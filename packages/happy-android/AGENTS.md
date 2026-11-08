@@ -30,7 +30,8 @@ Preserve credential and push compatibility on upgrades.
   `vendor/elevenlabs` fixes audio focus, teardown and call-local mute.
 - **An agent connection's voice call** (`call/`, `ui/call/`), iOS's
   `HappyCore/Call` ported: apart from the relay's voice above, its own new
-  hosted ElevenLabs agent and four client tools (`CallTool`), no permission
+  hosted ElevenLabs agent, its system prompt sent from the phone
+  (`CallPrompt`) and v3's four client tools (`CallTool`), no permission
   or question tool, hearing only new words and stopping errors from the last
   four conversations visited. Home's three-bar button sits immediately left of compose
   (`ComposeFab(onVoice)`); the call's bar (`CallFrame`, after Telegram-iOS's
@@ -41,9 +42,9 @@ Preserve credential and push compatibility on upgrades.
   It ends when the app leaves the foreground, another account opens or the
   relay's voice starts. For launch it connects to a public agent by its ID
   (`PublicAgentCallGrants`), a connection mechanism and not authentication;
-  the ID comes from `HAPPY_CALL_AGENT_ID`, `-Phappy.callAgentId` or the
-  ignored `local.properties` into `BuildConfig.CALL_AGENT_ID`, and is never
-  committed. Without it the tap says "Voice isn't set up for this
+  the ID comes from `HAPPY_CALL_AGENT_V3_ID`, `-Phappy.callAgentV3Id` or the
+  ignored `local.properties` (`happy.callAgentV3Id`) into
+  `BuildConfig.CALL_AGENT_ID`, and is never committed. Without it the tap says "Voice isn't set up for this
   connection yet". Each device gets 20 free connected minutes in any
   rolling 30 days, 5 hours a month with the subscription (`CallAllowance`,
   local). The app's own sheet (`CallSheet`, no vendor UI) is the welcome,
@@ -52,7 +53,7 @@ Preserve credential and push compatibility on upgrades.
   what the store and RevenueCat say is on sale (`Offer.OnSale`), never a
   made-up price (`Preview` is a debug-only test screen). A `ModalBottomSheet` calls
   `SheetStatusIcons()` so the bar under its scrim keeps light icons.
-  `openSession` replaces a conversation on top and goes over anything else
+  `navigate` to a conversation replaces one on top and goes over anything else
   (`openConversationInPlace`). See
   `docs/agent-voice-call.md` at the repository root. The `happy.call.*`
   intent extras (`CallFixtures`), `CallProbe` and `CallLiveDeviceCheck`
@@ -834,8 +835,27 @@ ANDROID_SERIAL=<device> ./gradlew :benchmark:connectedBenchmarkBenchAndroidTest 
 
 ### Versions and signing
 
-- `versionName` is owned by `app/build.gradle.kts`. `HAPPY_VERSION_NAME` or
-  `-Phappy.versionName` overrides it.
+- `versionName` is CalVer `YYYY.M.C`: the UTC year, the month without a
+  leading zero, and a counter that starts at 1 each month (`2026.11.1`).
+  Every variant carries the same one, and every build of it differs only
+  by its versionCode. The checked-in default (`defaultVersionName` in
+  `app/build.gradle.kts`) is the upcoming release. `C` moves only when a
+  version is released publicly (a Play production rollout); uploads to a
+  test track, production builds included, don't move it. The next version
+  is the highest `C` this UTC month's release tags carry, plus one, else 1,
+  and a month without a release restamps it to the new month.
+- The build released publicly is tagged
+  `native-android-<versionName>-build<versionCode>` when its rollout
+  starts, never at upload; Android counts on its own, and tags of other
+  schemes (`2.0.0`) don't count. Uploads get no tag; their upload record
+  goes in the release report.
+- `node scripts/native-version.cjs next android` prints the upcoming
+  version from the tags; `check android` fails unless the default is it;
+  `set android` writes it. Before any store build run `check android`, and
+  if it fails, `set android`, commit and land that on `main` first.
+- `HAPPY_VERSION_NAME` or `-Phappy.versionName` overrides the default. A
+  signed release or preview build whose versionName isn't CalVer fails in
+  `pre<Variant>Build`.
 - `versionCode` is EAS's remote, auto-incremented build number
   (`eas.json` `appVersionSource: remote`). There is no counter in the repo:
   a store build passes the next number as `HAPPY_VERSION_CODE` or
@@ -1132,10 +1152,33 @@ change its wire behaviour on Android alone.
   server (`removeAgentConnection`) first revokes its session at the accounts
   service (`POST /revoke`, its refresh token and `client_id`, no account
   token; `CloudAccount.revoke`, best effort, not waited on). A cloud server's
-  Settings has Members (`CloudMembers.kt`: `GET /v1/servers/:id/members`, and
-  Leave server, `POST /v1/servers/:id/leave`, confirmed, then the server is
-  removed here too; its only owner gets `last_owner`), asking for the sign-in
-  when the pass is gone.
+  Settings has Members (`CloudMembers.kt`, `agent/AgentMembers.kt`). Since
+  the roles cutover the team is the server's (members contract): `GET
+  /v0/members` with each role's name from `GET /v0/roles` (a built-in one in
+  the app's words where roles can't be read), read again on every connect,
+  `member.*`, `role.*` and `profile.updated`, since a member's name is
+  their profile's (there is no `member.added`); Leave server is `POST
+  /v0/members/leave`, confirmed, then the server is removed here too, and
+  its last owner gets `409 last_owner`. No account pass is needed. The
+  accounts service lists servers without a role now (`CloudServer.role` is
+  optional; the picker shows a role only where one is listed).
+  A cloud server's team roles gate what shows (`agent/AgentPermissions.kt`):
+  `GET /v0/permissions`'s `granted`, read on every connect, `role.*` and
+  `member.updated`
+  event (`AgentSession.permissions`), and nothing granted until it is read
+  or when reading fails; any other server gates nothing. Without
+  `content.write` there is no compose, voice call, todo or document
+  editing, adding or moving calendar events, or vault changes, and a chat
+  says "your role can't send messages" in the composer's place; the Chief
+  of Staff's chat and settings' asks of it need `bots.manage`. A vault
+  Surface's `access` (`none` locks it: its name, and nothing asked;
+  `read` hides every change) and `policyVault` (its `Global` and
+  `Security` folders and their `AGENTS.md` / `SECURITY.md` keep their
+  names and places, `PolicyPlaces`; no retention settings) come with the
+  snapshot, read again on `vault.settings.updated`. A `403 forbidden`
+  reads "You don't have permission to do that." (`Problem.Forbidden`,
+  `IntentRefusal.FORBIDDEN`), never the server's words. Mobile edits no
+  roles or access rules; iOS matches field for field.
   People read a cloud server's address as `@name`, like a username, until
   Happy Cloud has its own domain (`HappyCloud.handle`: the picker, create,
   join, the server sign-in screen, the account menu); the URL is used as
@@ -1215,6 +1258,23 @@ change its wire behaviour on Android alone.
   connection; `openOutside` never hands a Happy URL to the system. Sharing a
   bundled artifact's page shares its external link, and isn't offered when the
   server has no `instanceId`. Chat doesn't render `happy://` links as links yet.
+- **Settings links and buttons** (API.md "Happy links", `ui/connection/SettingsLinks.kt`):
+  `happy://settings/<page>` is a closed list of pages (`HappyUrls.SETTINGS_PAGES`).
+  The Markdown parser splits a link's title from its destination; a well-formed
+  Happy link titled exactly `button` is lifted out of its paragraph, header or
+  list into a `MarkdownBlock.Buttons` after it, drawn as full-width RoundButtons
+  stacked in order. A malformed or blank-labelled settings link, and a
+  malformed button, are their label as inert text. Pages open as iOS maps them:
+  general → Settings, account → Profile, sharing, voice, servers → Happy Cloud's
+  servers (Settings elsewhere), members → Members on Happy Cloud; every other
+  page opens `https://<name>.HAPPY_CLOUD_WEB/#/settings/<page>` in a Custom Tab
+  on a Happy Cloud server and is inert anywhere else. A conversation's rows
+  are parsed for their connection (`AgentSession.settingsPages`, through
+  `ConversationRowBuilder.hasPage` and `LiveText`): a settings link to a page
+  it lacks is its words, inline, and a button its words in its place. Buttons
+  elsewhere ask `LinkOpener.opens` and show their words when nothing opens.
+  Unlocked `happy://settings…` from outside is still happy-app's path
+  (`DeepLinks`); only the instance form opens a settings link.
 
 ## Push
 

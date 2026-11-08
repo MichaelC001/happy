@@ -47,7 +47,8 @@ public enum SidebarRows {
                 status: muted ? .none : status(agent), unread: !muted && agent.unread != nil,
                 isHappy: owner?.systemKey == "chief_of_staff", agentId: agent.id, workspaceId: agent.workspaceId, targetKind: kind)
             row.targetId = owner?.id
-            row.canArchive = owner?.canArchive ?? false
+            // The Chief of Staff never, whatever an older server says.
+            row.canArchive = owner?.systemKey != "chief_of_staff" && owner?.canArchive == true
             row.activityTime = agent.activityAt.map(Rows.minute)
             row.muted = muted
             rows.append(row)
@@ -67,7 +68,7 @@ public enum SidebarRows {
         }.sorted { ($0.1, $0.0.id) < ($1.1, $1.0.id) }
         for (surface, _) in joined {
             var row = Row(id: "surface:\(surface.id)", nodeId: "surface:\(surface.id)", kind: .space,
-                label: surface.name, mark: .glyph(Rows.surfaceGlyph(surface.type)), agentId: surface.chatAgentId, targetKind: "surface")
+                label: surface.name, mark: .glyph(Rows.surfaceGlyph(surface.type, access: surface.access)), agentId: surface.chatAgentId, targetKind: "surface")
             row.targetId = surface.id
             row.surfaceType = surface.type
             rows.append(row)

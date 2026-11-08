@@ -170,6 +170,8 @@ class Conversation(
     private val read: (suspend (String) -> Unit)? = null,
     /** What the Happy references in its messages read as ([AgentSession.references][com.slopus.happy.agent.AgentSession.references]); null leaves the tags as written. */
     private val references: com.slopus.happy.references.ReferenceReader? = null,
+    /** Which settings pages its connection has: a link to any other reads as its words. Null leaves every link. */
+    private val hasSettingsPage: ((String) -> Boolean)? = null,
     /** The person's model preferences: a new chat opens on their start ([ModelPreferences.startMode]); null, on the catalog's default. */
     private val preferences: StateFlow<ModelPreferences>? = null,
     /** A new chat's first message went with this mode: it is the session's start. */
@@ -238,6 +240,7 @@ class Conversation(
         references = this@Conversation.references?.references?.value
         named = this@Conversation.references?.let { reader -> reader::read }
         pages = this@Conversation.references?.let { reader -> reader::readArtifacts }
+        hasPage = hasSettingsPage
     }
     private val runs = ArrayList<Pair<String, MutableList<String>>>()
     /** Each run's status, start and end as last read, so it is kept as it came. */
@@ -803,12 +806,14 @@ class Conversation(
     /**
      * A voice call's send (iOS's `send(id:text:)`): [text] exactly as given,
      * under the caller's [id], delivered in order with the composer's. The
-     * composer's draft is left as it is. False on a chat not made yet, and
-     * for an [id] this conversation already has, which goes only once.
+     * composer's draft is left as it is. A new chat's first message makes its
+     * task or bot, as the composer's does. False for an [id] this
+     * conversation already has, which goes only once.
      */
     suspend fun sendAs(id: String, text: String): Boolean = withContext(lane) {
-        if (!created || closed || text.isBlank()) return@withContext false
+        if (closed || text.isBlank()) return@withContext false
         if (outgoing.any { it.id == id } || id in messages) return@withContext false
+        if (!created) locked = true
         queue(Outgoing(id, text, emptyList(), voice = true, sentAt = now()))
         publish()
         pump()
@@ -1537,6 +1542,7 @@ class Conversation(
                     durationMs = info.startedAt?.let { maxOf(0, endedAt - it) },
                     tools = tools,
                     copyText = answer,
+                    endedAt = endedAt,
                 )
                 // Its copy is how the turn ended, as desktop's: the answer keeps no button of its own.
                 if (ended.complete && answer != null) turn[at] = (turn[at] as ConversationRow.Text).copy(copies = false)
@@ -1557,7 +1563,7 @@ class Conversation(
         for (send in outgoing) {
             val delivery = send.failure?.let(Delivery::Failed) ?: if (send.accepted) Delivery.Pending else Delivery.Sending
             val time = shownAt.getOrPut(send.id) { send.sentAt }
-            rows += ConversationRow.User("${send.id}:user", send.id, send.wire, com.slopus.happy.chat.markdown.parseMarkdown(send.wire), send.images + send.thumbnails, delivery, time)
+            rows += ConversationRow.User("${send.id}:user", send.id, send.wire, com.slopus.happy.chat.markdown.parseMarkdown(send.wire, hasSettingsPage), send.images + send.thumbnails, delivery, time)
         }
         if (opened.isNotEmpty()) rows.replaceAll { if (it is ConversationRow.User && it.key in opened) it.copy(opened = true) else it }
         builder.forget(messages.keys)
@@ -1603,7 +1609,14 @@ class Conversation(
         }
 
         /** Why [e] happened, for the person: the agent's own words where it gave some. */
-        fun describe(e: Exception): Problem = when (e) {
+        fun describe(e: Exception): Problem = when {
+            // Plain words of the phone's own, never the server's "This needs the … permission."
+            e is ConversationApiException && com.slopus.happy.agent.Permission.refused(e.status, e.code, e.message) -> Problem.Forbidden
+            e is com.slopus.happy.agent.AgentApiException && com.slopus.happy.agent.Permission.refused(e.status, e.code, e.message) -> Problem.Forbidden
+            else -> describeOther(e)
+        }
+
+        private fun describeOther(e: Exception): Problem = when (e) {
             is AgentConnectionException -> Problem.Link(e.reason)
             is ConversationApiException -> e.message?.takeIf { it.isNotBlank() }?.let(Problem::Said) ?: Problem.Refused(e.status)
             else -> e.message?.takeIf { it.isNotBlank() }?.let(Problem::Said) ?: Problem.Unknown

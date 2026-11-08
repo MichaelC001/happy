@@ -317,7 +317,7 @@ final class SplitAppHarness {
         }
         #endif
         if arguments.contains("-composeMachine") { SplitComposeMachine.install() }
-        let computer = DemoComputer(rounds: arguments.contains("-long") ? 60 : 0, live: option("-callLive") != nil)
+        let computer = DemoComputer(rounds: arguments.contains("-long") ? 60 : 0, live: option("-callLive") != nil || arguments.contains("-voiceTouch"))
         let controller = AccountController(
             serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/split-harness",
             credentialStore: InMemoryCredentialStore(), storeDirectory: nil,
@@ -398,6 +398,87 @@ final class SplitAppHarness {
                 try? await Task.sleep(for: .seconds(1.5))
                 _ = await targets.open("inbox-agent")
                 _ = await targets.open("cache-agent")
+                targets.close()
+            }
+            // The call's new work off screen by message, and navigate's destinations, through its own context, with no provider:
+            // each logs its result and the stack it left (`[call-nav]`), a pause between for screenshots.
+            if arguments.contains("-callNav"), let id = context.account.agentConnections.activeID, let session = Session.session(for: id, context: context) {
+                try? await Task.sleep(for: .seconds(2))
+                let targets = SessionCallTargets(session: session, shell: shell)
+                let call = CallContext(targets: targets)
+                var revision = 0
+                @MainActor func step(_ name: String, _ json: String) async -> [String: Any] {
+                    let result = await call.handle(CallToolCall(id: UUID().uuidString, name: name, parameters: Data(json.utf8)))
+                    let value = (try? JSONSerialization.jsonObject(with: Data(result.text.utf8))) as? [String: Any] ?? [:]
+                    if let next = value["focusRevision"] as? Int { revision = next }
+                    print("[call-nav] \(name) \(result.isError ? "refused" : "ok") \(result.text)")
+                    print("[call-nav] stack \(shell.stack.map { ($0 as? ChatViewController)?.shownAgentId ?? String(describing: type(of: $0)) })")
+                    try? await Task.sleep(for: .seconds(2.5))
+                    return value
+                }
+                let initial = await call.initial()
+                print("[call-nav] initial\n\(initial)")
+                _ = await step("navigate", "{\"to\":\"happy://conversation/s1\",\"focusRevision\":\(revision)}")
+                // No such place: it says which there are.
+                _ = await step("navigate", "{\"to\":\"happy://settings\",\"focusRevision\":\(revision)}")
+                // Started off screen with its first message: what is in front stays.
+                let task = await step("message", "{\"to\":\"new-task\",\"text\":\"Draft the release notes\"}")
+                let made = (task["ref"] as? String) ?? ""
+                _ = await step("readConversation", "{\"ref\":\"\(made)\"}")
+                _ = await step("listConversations", "{}")
+                _ = await step("navigate", "{\"to\":\"happy://conversation/\(made)\",\"focusRevision\":\(revision)}")
+                // No to: the conversation on screen.
+                _ = await step("message", "{\"text\":\"And the changelog\"}")
+                _ = await step("navigate", "{\"to\":\"happy://back\",\"focusRevision\":\(revision)}")
+                _ = await step("navigate", "{\"to\":\"happy://home\",\"focusRevision\":\(revision)}")
+                _ = await step("navigate", "{\"to\":\"happy://back\",\"focusRevision\":\(revision)}")
+                // Nothing on screen: the agent is told to ask which.
+                _ = await step("message", "{\"text\":\"Anyone?\"}")
+                _ = await step("readConversation", "{\"ref\":\"s1\"}")
+                print("[call-nav] done")
+                await call.close()
+                targets.close()
+            }
+            // What the call presses, as the person would (`VoiceTouch`): compose for new work, a row off
+            // screen and one on it, back, a sheet's close and home, each logged with when it began and
+            // ended (`[voice-touch]`), a pause between for the recording.
+            if arguments.contains("-voiceTouch"), let id = context.account.agentConnections.activeID, let session = Session.session(for: id, context: context) {
+                // Less motion, as the system's setting asks for it.
+                if arguments.contains("-reduceMotion") { ShimmerClock.shared.reduceMotionOverride = true }
+                try? await Task.sleep(for: .seconds(3))
+                let targets = SessionCallTargets(session: session, shell: shell)
+                let call = CallContext(targets: targets)
+                var revision = 0
+                let began = Date()
+                @MainActor func step(_ name: String, _ json: String) async -> [String: Any] {
+                    print("[voice-touch] \(String(format: "%.2f", Date().timeIntervalSince(began))) start \(name) \(json)")
+                    let result = await call.handle(CallToolCall(id: UUID().uuidString, name: name, parameters: Data(json.utf8)))
+                    let value = (try? JSONSerialization.jsonObject(with: Data(result.text.utf8))) as? [String: Any] ?? [:]
+                    if let next = value["focusRevision"] as? Int { revision = next }
+                    print("[voice-touch] \(String(format: "%.2f", Date().timeIntervalSince(began))) end \(name) \(result.isError ? "refused" : "ok") \(result.text.prefix(200))")
+                    try? await Task.sleep(for: .seconds(2))
+                    return value
+                }
+                _ = await call.initial()
+                let listed = await step("listConversations", "{}")
+                let conversations = listed["conversations"] as? [[String: Any]] ?? []
+                func ref(_ title: String) -> String { (conversations.first { $0["title"] as? String == title }?["ref"] as? String) ?? "" }
+                let far = (conversations.last { ($0["title"] as? String)?.hasPrefix("Fixture task") == true }?["title"] as? String) ?? ""
+                _ = await step("message", "{\"to\":\"new-task\",\"text\":\"Draft the release notes\"}")
+                _ = await step("navigate", "{\"to\":\"happy://conversation/\(ref(far))\",\"focusRevision\":\(revision)}")
+                _ = await step("navigate", "{\"to\":\"happy://back\",\"focusRevision\":\(revision)}")
+                _ = await step("navigate", "{\"to\":\"happy://conversation/\(ref("Research Assistant"))\",\"focusRevision\":\(revision)}")
+                _ = await step("navigate", "{\"to\":\"happy://home\",\"focusRevision\":\(revision)}")
+                // A sheet with its close at the leading end, as the app's sheets have it.
+                let settings = SettingsViewController(context: context, computer: id)
+                let sheet = UINavigationController(rootViewController: settings)
+                settings.navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak sheet] _ in sheet?.dismiss(animated: true) })
+                AppCoordinator.applyAppearance(to: sheet.navigationBar)
+                shell.present(sheet, animated: true)
+                try? await Task.sleep(for: .seconds(2))
+                _ = await step("navigate", "{\"to\":\"happy://back\",\"focusRevision\":\(revision)}")
+                print("[voice-touch] done")
+                await call.close()
                 targets.close()
             }
             // A sheet of the app's over home, left up, for the UI test that reads the bar through it.

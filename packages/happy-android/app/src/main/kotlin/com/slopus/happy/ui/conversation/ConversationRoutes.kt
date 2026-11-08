@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.conversation
 
+import com.slopus.happy.agent.Permission
 import com.slopus.happy.analytics.Analytics
 import com.slopus.happy.analytics.AnalyticsEvent
 import com.slopus.happy.analytics.ChatAddress
@@ -31,6 +32,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
@@ -78,6 +80,7 @@ import com.slopus.happy.ui.theme.HappyTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
@@ -178,6 +181,17 @@ fun NavHostController.composeConversation(connectionId: String, attach: Boolean 
     }
 }
 
+/** The conversation [entry] shows, once its screen holds one ([ConversationHolder]); null for any other page. */
+internal fun NavBackStackEntry.shownConversation(): Conversation? {
+    if (!destination.hasRoute<ConversationRoute>()) return null
+    val none = object : ViewModelProvider.Factory {}
+    return try {
+        ViewModelProvider.create(viewModelStore, none)["conversation", ConversationHolder::class].conversation
+    } catch (_: Exception) {
+        null
+    }
+}
+
 /**
  * The chat of [agentId] held on this back stack, if its screen's state is
  * still kept there: a page over it reads what it already shows instead of
@@ -248,10 +262,17 @@ internal fun AgentSession.makeConversation(
     typesetter = typesetter,
     read = ::markRead,
     references = references,
+    hasSettingsPage = settingsPages(),
     preferences = modelPreferences,
     onStarted = ::recordStart,
     address = { ChatAddress.of(catalog.value, agentId) },
 )
+
+/** Which settings pages this connection has ([com.slopus.happy.ui.connection.SettingsLinks]): a link to any other reads as its words. */
+internal fun AgentSession.settingsPages(): (String) -> Boolean {
+    val cloud = com.slopus.happy.connection.HappyCloud.isServer(server)
+    return { page -> com.slopus.happy.ui.connection.SettingsLinks.place(page, server, cloud) != null }
+}
 
 /** Where [agentId]'s newest history is kept, beside the connection's catalog and gone with it. */
 internal fun AgentSession.conversationKeeper(agentId: String): ConversationKeeper = object : ConversationKeeper {
@@ -435,14 +456,22 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
     val happyLinks = com.slopus.happy.ui.connection.LocalHappyLinks.current
     val references = remember(nav, session, happyLinks) { com.slopus.happy.ui.references.ReferenceOpener(nav, route.connectionId, session.references, happyLinks) }
     val links = remember(nav, computer, conversation.agentId, references) {
-        LinkOpener.agent(context, computer, app = references::open) { url -> nav.navigate(BrowserRoute(route.connectionId, url, conversation.agentId)) }
+        LinkOpener.agent(context, computer, app = references::open, opens = references::opens) { url -> nav.navigate(BrowserRoute(route.connectionId, url, conversation.agentId)) }
     }
     val kept = rememberKeptMedia(graph, session, conversation.agentId)
+    // A team's role writes content; the Chief of Staff, an admin bot, takes words only from those who manage bots.
+    val permissions by session.permissions.collectAsStateWithLifecycle()
+    val chief by remember(session, conversation.agentId) {
+        session.catalog.map { ChatAddress.of(it, conversation.agentId).chiefOfStaff }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(false)
+    val roleCanSend = permissions.allows(if (chief) Permission.BOTS_MANAGE else Permission.CONTENT_WRITE)
     // A command's artwork is read and kept as the agent's other pictures are.
     ProvideLinks(links) { androidx.compose.runtime.CompositionLocalProvider(com.slopus.happy.ui.connection.LocalAgentPictures provides session.pictures) {
         ConversationScreen(
             state = state,
             opensAttach = route.attach,
+            roleCanSend = roleCanSend,
+            roleCanCompose = permissions.canWrite,
             // Offline says why in words of its own; the link on its way spins (iOS 7aee3a9b8).
             connection = if (link == LinkState.Offline) linkStatusText(status) ?: stringResource(R.string.status_offline) else null,
             link = link,

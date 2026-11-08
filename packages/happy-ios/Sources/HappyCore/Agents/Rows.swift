@@ -273,8 +273,9 @@ public enum Rows {
         row.hasShownSessions = node.children.contains { spaces[$0.id] == nil && places.agent($0.id) != nil }
         if space.target.kind == "surface" { row.surfaceType = places.surface(space.target.id)?.type }
         row.activityTime = conversation?.activityAt.map(minute)
-        // A bot can always be archived; a task only where the daemon says so.
-        row.canArchive = space.target.kind == "bot" || places.task(space.target.id)?.canArchive == true
+        // A bot can be archived, but never the Chief of Staff; a task only
+        // where the daemon says so.
+        row.canArchive = (space.target.kind == "bot" && !places.isHappy(space)) || places.task(space.target.id)?.canArchive == true
         return [row] + children
     }
 
@@ -350,15 +351,17 @@ public enum Rows {
         }
         if space.title == nil { return .seedling(seed: space.id) }
         switch space.target.kind {
-        case "surface": return .glyph(surfaceGlyph(places.surface(space.target.id)?.type))
+        case "surface": return .glyph(surfaceGlyph(places.surface(space.target.id)?.type, access: places.surface(space.target.id)?.access))
         case "task", "bot", "agent": return .placeholder(seed: space.target.id)
         default: return .glyph("agents")
         }
     }
 
-    /// The glyph desktop's Create menu gives each kind of Surface.
-    public static func surfaceGlyph(_ type: String?) -> String {
-        switch type {
+    /// The glyph desktop's Create menu gives each kind of Surface; a vault
+    /// the person's role may not open (`access: "none"`) wears a lock.
+    public static func surfaceGlyph(_ type: String?, access: String? = nil) -> String {
+        if type == "vault", access == VaultAccess.Level.none.rawValue { return lockGlyph }
+        return switch type {
         case "todo": "tasks"
         case "calendar": "calendar"
         case "system_monitor": "pulse"
@@ -367,6 +370,8 @@ public enum Rows {
         default: "doc"
         }
     }
+
+    public static let lockGlyph = "lock-closed-outline"
 
     /// A row's conversation is live: its agent's own events end its work the
     /// moment a turn settles. The space's `working` is the daemon's reading

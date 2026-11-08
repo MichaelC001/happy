@@ -13,13 +13,12 @@ extension Palette {
         public static let middleWaveAlpha: CGFloat = 0.25
         /// Telegram's recording dot (`0xFF2D55`).
         public static let dot = ColorToken("#FF2D55", "#FF375F")
+        /// A cancel's bin, as Telegram tints its `BinRed` (`0xFF3B30`).
+        public static let bin = ColorToken("#FF3B30", "#FF453A")
         /// The glyph on the circle.
         public static let glyph = ColorToken("#FFFFFF")
         /// The lock and its chevron (`panelControlColor`).
         public static let lock = ColorToken("#8E8E93", "#8E8E93")
-        /// The bar's fill over the glass: solid, so the controls it covers
-        /// (the field, the toolbar's buttons) don't show through.
-        public static let barFill = ColorToken("#FFFFFF", "#1E1E1E")
     }
 }
 

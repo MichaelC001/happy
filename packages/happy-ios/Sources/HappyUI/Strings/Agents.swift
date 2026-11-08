@@ -44,6 +44,27 @@ extension Strings {
     public static let leaveSurface = "Leave"
     public static let archiveTask = "Archive task"
     public static let archiveBot = "Archive bot"
+    /// What a Happy Cloud server refused because of the person's role
+    /// (`403 forbidden`), or a bot it won't let go (`botRefusal`), in our
+    /// words, never the server's; nil for any other error.
+    public static func refusal(_ error: Error) -> String? {
+        if (error as? AgentClientError)?.isForbidden == true { return forbidden }
+        return botRefusal(error)
+    }
+    public static let forbidden = "You don’t have permission to do that."
+    /// In the composer's place where the person's role can't write.
+    public static let readOnlyConversation = "You can read this conversation, but your role can’t send messages."
+    /// A Happy Cloud server's refusals to take a bot away
+    /// (`409 system_bot_protected`, `409 last_admin_bot`), plainly; nil
+    /// for any other error.
+    public static func botRefusal(_ error: Error) -> String? {
+        guard case .status(409, let code?, _) = error as? AgentClientError else { return nil }
+        switch code {
+        case "system_bot_protected": return "The Chief of Staff can’t be archived, deleted or made a non-admin. You can still rename it or change its picture."
+        case "last_admin_bot": return "This is the last admin bot, so it has to stay an admin. Make another bot an admin first."
+        default: return nil
+        }
+    }
     public static let archiveSubtask = "Archive subtask"
     public static let deleteSection = "Delete section"
 

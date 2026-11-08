@@ -118,6 +118,7 @@ object CloudTags {
     const val LOGIN = "cloud.login"
     const val PASSWORD = "cloud.password"
     fun server(name: String) = "cloud.server.$name"
+    fun member(accountId: String) = "cloud.member.$accountId"
 }
 
 /** Sizes of the Happy Cloud screens, on the first screen's gradient and type ([com.slopus.happy.ui.start.StartScreen]). */
@@ -438,7 +439,15 @@ private fun ServerCard(server: CloudServer, onPhone: Boolean, image: suspend (St
             Text(server.title, style = happyTextStyle(fontSize = 18, lineHeight = 24, weight = FontWeight.SemiBold), color = colors.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("@${server.name}", style = happyTextStyle(fontSize = 15, lineHeight = 20), color = colors.textSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Text(stringResource(if (server.owner) R.string.cloud_role_owner else R.string.cloud_role_member), style = happyTextStyle(fontSize = 14, lineHeight = 18), color = colors.textSecondary)
+        // Roles are the server's since the roles cutover: an accounts service that still lists one shows it.
+        val role = when (server.role) {
+            null -> null
+            "owner" -> R.string.cloud_role_owner
+            "admin" -> R.string.cloud_role_admin
+            "viewer" -> R.string.cloud_role_viewer
+            else -> R.string.cloud_role_member
+        }
+        if (role != null) Text(stringResource(role), style = happyTextStyle(fontSize = 14, lineHeight = 18), color = colors.textSecondary)
         if (onPhone) Icon(Ionicon.CheckmarkCircle, 22.dp, colors.success)
     }
 }
@@ -553,6 +562,36 @@ fun CloudConnectingScreen(handle: String, failed: ServerAuthException.Reason?, i
     ) { Spinner() }
 }
 
+/**
+ * A new member's name on a Happy Cloud server, on the gradient as the
+ * screens before it (the team server sign-in's name step, restyled): the
+ * server has no profile for them until it is named (`userId: null`), and
+ * nothing is filled in for them.
+ */
+@Composable
+fun CloudNameScreen(handle: String, saving: Boolean, failed: Boolean, onSubmit: (String) -> Unit, onBack: () -> Unit) {
+    var name by rememberSaveable { mutableStateOf("") }
+    CloudFrame(
+        title = stringResource(R.string.team_server_name_title),
+        body = stringResource(R.string.team_server_name_detail, handle),
+        art = R.raw.state_sparkles,
+        primary = CloudAction(stringResource(R.string.common_continue), { onSubmit(name) }, enabled = name.isNotBlank() && !saving, loading = saving),
+        onBack = onBack,
+    ) {
+        CloudField(
+            name,
+            { name = it },
+            stringResource(R.string.team_server_name_placeholder),
+            ServerSignInTags.NAME,
+            !saving,
+            KeyboardType.Text,
+            ImeAction.Done,
+            capitalization = KeyboardCapitalization.Words,
+        )
+        if (failed) NotePill(stringResource(R.string.team_server_name_failed), HappyTheme.colors.textDestructive)
+    }
+}
+
 /** A large field on the gradient: the theme's surface, a little see-through, 18 type. */
 @Composable
 private fun CloudField(
@@ -564,6 +603,7 @@ private fun CloudField(
     keyboard: KeyboardType,
     ime: ImeAction,
     transformation: VisualTransformation = VisualTransformation.None,
+    capitalization: KeyboardCapitalization = KeyboardCapitalization.None,
 ) {
     Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(CloudSpec.fieldRadius)).background(HappyTheme.colors.surface.copy(alpha = CloudSpec.SURFACE_ALPHA))) {
         HappyTextField(
@@ -576,7 +616,7 @@ private fun CloudField(
             cornerRadius = CloudSpec.fieldRadius,
             singleLine = true,
             enabled = enabled,
-            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = keyboard, imeAction = ime),
+            keyboardOptions = KeyboardOptions(capitalization = capitalization, autoCorrectEnabled = false, keyboardType = keyboard, imeAction = ime),
             visualTransformation = transformation,
             modifier = Modifier.testTag(tag),
         )
@@ -611,7 +651,6 @@ internal fun cloudFailureText(reason: CloudException.Reason): Int = when (reason
     CloudException.Reason.Taken -> R.string.cloud_failed
     CloudException.Reason.Invalid -> R.string.cloud_name_rules
     CloudException.Reason.NotFound -> R.string.cloud_join_not_found
-    CloudException.Reason.LastOwner -> R.string.cloud_leave_last_owner
     CloudException.Reason.SignInRequired -> R.string.team_server_error_sign_in_required
     CloudException.Reason.Unreachable -> R.string.team_server_error_unreachable
     CloudException.Reason.Failed -> R.string.cloud_failed

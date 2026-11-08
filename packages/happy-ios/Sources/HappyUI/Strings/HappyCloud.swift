@@ -6,6 +6,8 @@ import HappyCore
 extension Strings {
     enum HappyCloud {
         static let signIn = "Sign In to Happy Cloud"
+        /// Settings' About footer on a Happy Cloud server.
+        static let aboutFooter = "Happy Cloud runs your team’s agents on your server in the cloud, where your conversations and files are kept. Not affiliated with Anthropic or OpenAI."
         static let yourServers = "Your Servers"
         static let connected = "Connected"
         static let owner = "Owner"
@@ -73,6 +75,7 @@ extension Strings {
             case CloudAccountError.refused(_, "invalid", _): return invalidName
             case CloudAccountError.refused(_, _, let message?): return message
             case CloudAccountError.signInRequired: return "Your Happy Cloud sign-in has ended. Sign in again."
+            case CloudAccountError.invalidResponse: return "Happy Cloud answered something unexpected. Try again, or update Happy."
             default: return Strings.ServerSignIn.failure(error)
             }
         }

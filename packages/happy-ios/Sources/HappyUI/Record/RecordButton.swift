@@ -4,6 +4,13 @@ import HappyIcons
 import HappyLayout
 import UIKit
 
+/// A view the microphone sits in that changes while it records: the
+/// composer card fades its row as the bar stretches over it.
+@MainActor
+protocol RecordButtonHosting: AnyObject {
+    func recordButton(_ button: RecordButton, isRecording: Bool)
+}
+
 /// The microphone, as Telegram's voice button: press and hold to talk,
 /// let go to send what was said, slide left to throw it away, slide up (or
 /// just tap) to keep talking hands-free, then send with the big circle or
@@ -22,7 +29,8 @@ final class RecordButton: UIControl {
     enum Style {
         /// A bar button: the toolbar draws the glass, this the glyph.
         case toolbar
-        /// The composer's round primary button, as send is drawn.
+        /// Over the composer's primary button: send's fill is that
+        /// button's, this the glyph, so the two morph in place.
         case composer
     }
 
@@ -40,16 +48,29 @@ final class RecordButton: UIControl {
 
     /// What was heard, when anything was.
     var onResult: ((Result) -> Void)?
-    /// Recording began (true) or ended (false), for the host to fade what
-    /// the bar covers, as Telegram's field fades under its recording panel.
+    /// The words so far, while recording and until the result: those the
+    /// recognizer has settled, then those it may still revise. Each call
+    /// replaces the last.
+    var onTranscript: ((_ finalized: String, _ volatile: String) -> Void)?
+    /// Thrown away, or nothing was heard: what `onTranscript` showed goes.
+    var onDiscard: (() -> Void)?
+    /// Recording began (true) or ended (false), for the host to make room
+    /// for the bar (home's toolbar morphs into it) or to fade what the bar
+    /// covers. Heard once the recording screen is up, and as it goes.
     var onRecording: ((Bool) -> Void)?
     /// Where the clock goes while recording, in the window's space.
     var bar: (() -> RecordBar?)?
+    /// What a cancel's bin stands in for while it plays (Telegram's
+    /// attach button); nil plays it where the dot was. Asked a turn after
+    /// the cancel, once the host is back at rest.
+    var binSpot: (() -> RecordBinSpot?)?
     /// Whether a press may record now.
     var canRecord: () -> Bool = { true }
+    /// Settings › Agents › Multilingual dictation, read at each press and
+    /// each time the button appears.
+    var multilingual: () -> Bool = { true }
 
     private let style: Style
-    private let fill = UIView()
     private let glyph: IconView
     private let spinner = UIActivityIndicatorView(style: .medium)
     private var gesture = RecordGesture()
@@ -67,11 +88,11 @@ final class RecordButton: UIControl {
         self.style = style
         glyph = IconView(nil, size: style == .toolbar ? 22 : AgentInputCardLayout.Metrics.primaryIconSize)
         super.init(frame: .zero)
+        // The keyboard's language is heard from the first microphone on,
+        // before any press: dictation starts in it.
+        DictationLanguages.observeKeyboard()
         isExclusiveTouch = true
         isMultipleTouchEnabled = false
-        fill.isUserInteractionEnabled = false
-        fill.isHidden = style != .composer
-        addSubview(fill)
         addSubview(glyph)
         spinner.hidesWhenStopped = true
         addSubview(spinner)
@@ -82,6 +103,9 @@ final class RecordButton: UIControl {
         applyColors()
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.applyColors() }
         dictation.onLevel = { [weak self] level in self?.overlay?.setLevel(level) }
+        dictation.onTranscript = { [weak self] finalized, volatile in
+            self?.onTranscript?(finalized, volatile)
+        }
         NotificationCenter.default.addObserver(self, selector: #selector(resigned), name: UIApplication.didEnterBackgroundNotification, object: nil)
     }
 
@@ -91,7 +115,13 @@ final class RecordButton: UIControl {
     var isRecording: Bool { phase != .idle }
 
     override var intrinsicContentSize: CGSize {
-        style == .toolbar ? CGSize(width: 44, height: 44) : CGSize(width: 42, height: 42)
+        switch style {
+        case .toolbar:
+            let side = RecordToolbarLayout.Metrics.button
+            return CGSize(width: side, height: side)
+        case .composer:
+            return CGSize(width: 42, height: 42)
+        }
     }
 
     override func sizeThatFits(_ size: CGSize) -> CGSize { intrinsicContentSize }
@@ -106,15 +136,12 @@ final class RecordButton: UIControl {
     }
 
     private func applyColors() {
-        fill.backgroundColor = UIColor(Palette.surfaceHighest)
         glyph.tintColor = UIColor(Palette.text)
         spinner.color = UIColor(Palette.text)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        fill.frame = bounds
-        fill.layer.cornerRadius = bounds.height / 2
         glyph.frame = bounds
         spinner.center = CGPoint(x: bounds.midX, y: bounds.midY)
     }
@@ -157,6 +184,7 @@ final class RecordButton: UIControl {
             return false
         }
         do {
+            dictation.multilingual = multilingual()
             try dictation.start()
         } catch {
             refuse(Strings.Record.unavailableTitle, Strings.Record.unavailableMessage, settings: false)
@@ -238,9 +266,9 @@ final class RecordButton: UIControl {
         overlay.present(button: frame, bar: bar, mode: mode)
         overlay.update(gesture)
         onRecording?(true)
+        hosting?.recordButton(self, isRecording: true)
         UIView.animate(withDuration: RecordMotion.Metrics.appearFade) {
             self.glyph.alpha = 0
-            self.fill.alpha = 0
         }
     }
 
@@ -258,16 +286,17 @@ final class RecordButton: UIControl {
         guard phase == .holding || phase == .locked else { return }
         phase = .finishing
         following = false
-        overlay?.dismiss(cancelled: ending == .cancel)
+        overlay?.dismiss(cancelled: ending == .cancel, bin: ending == .cancel ? binSpot : nil)
         onRecording?(false)
+        hosting?.recordButton(self, isRecording: false)
         UIView.animate(withDuration: RecordMotion.Metrics.disappearDuration) {
             self.glyph.alpha = 1
-            self.fill.alpha = 1
         }
         if ending == .cancel {
             dictation.cancel()
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
             phase = .idle
+            onDiscard?()
             return
         }
         glyph.isHidden = true
@@ -279,12 +308,17 @@ final class RecordButton: UIControl {
             glyph.isHidden = false
             phase = .idle
             guard !text.isEmpty else {
+                onDiscard?()
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
                 accessibilityValue = Strings.Record.nothingHeard
                 return
             }
             onResult?(ending == .send ? .send(text) : .draft(text))
         }
+    }
+
+    private var hosting: RecordButtonHosting? {
+        sequence(first: superview, next: { $0?.superview }).lazy.compactMap { $0 as? RecordButtonHosting }.first
     }
 
     /// Off the screen mid-recording: the words are kept, as a draft.
@@ -297,6 +331,7 @@ final class RecordButton: UIControl {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window == nil, phase == .holding || phase == .locked { finish(.draft) }
+        if window != nil { Dictation.prefetch(multilingual: multilingual()) }
     }
 
     private func refuse(_ title: String, _ message: String, settings: Bool) {

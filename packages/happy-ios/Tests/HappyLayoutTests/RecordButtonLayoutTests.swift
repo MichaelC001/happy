@@ -132,6 +132,13 @@ final class RecordMotionTests: XCTestCase {
         XCTAssertEqual(oneTwenty.lift, sixty.lift, accuracy: 1e-9)
     }
 
+    func testALateFrameStepsOnceAsTelegramsDisplayLinkDoes() {
+        var late = RecordMotion()
+        late.step(level: 0, lift: -100, slide: 0)
+        late.step(level: 0, lift: 0, slide: 0, frames: 5)
+        XCTAssertEqual(late.lift, -21, accuracy: 1e-9)
+    }
+
     func testTheAppearingSpringOvershootsAndSettles() {
         XCTAssertEqual(RecordMotion.appear(at: 0), 0)
         let peak = stride(from: 0.0, through: 0.5, by: 0.005).map { RecordMotion.appear(at: $0) }.max() ?? 0
@@ -140,6 +147,23 @@ final class RecordMotionTests: XCTestCase {
         XCTAssertEqual(RecordMotion.appear(at: 1), 1, accuracy: 0.01)
         XCTAssertFalse(RecordMotion.appearSettled(at: 0.5))
         XCTAssertTrue(RecordMotion.appearSettled(at: 0.75))
+    }
+
+    func testTheBarGrowsWithoutOvershootIn04Seconds() {
+        XCTAssertEqual(RecordMotion.barGrowth(at: 0), 0)
+        XCTAssertEqual(RecordMotion.barGrowth(at: 0.2), 0.821, accuracy: 0.001)
+        XCTAssertEqual(RecordMotion.barGrowth(at: 0.4), 0.986, accuracy: 0.001)
+        let steps = stride(from: 0.0, through: 1, by: 0.01).map { RecordMotion.barGrowth(at: $0) }
+        XCTAssertEqual(steps, steps.sorted(), "only ever grows")
+        XCTAssertLessThanOrEqual(steps.max() ?? 0, 1)
+    }
+
+    func testACancelThrowsTheDotInTelegramsBin() {
+        XCTAssertEqual(RecordMotion.Metrics.cancelClockScale, 0.5)
+        XCTAssertEqual(RecordMotion.Metrics.cancelFade, 0.25)
+        XCTAssertEqual(RecordMotion.Metrics.binTravel, 0.4)
+        XCTAssertEqual(RecordMotion.Metrics.binOut, 0.2)
+        XCTAssertEqual(RecordOverlayLayout.bin(around: CGPoint(x: 44, y: 820)), CGRect(x: 24, y: 800, width: 40, height: 40))
     }
 
     func testTheCirclesFadeInFromAFifthInATenth() {
@@ -177,7 +201,7 @@ final class RecordOverlayLayoutTests: XCTestCase {
     private let button = CGRect(x: 330, y: 780, width: 44, height: 44)
     private lazy var bar = RecordOverlayLayout.capsule(button: button, leading: 16)
 
-    private func layout(cancelTranslation: CGFloat = 0, lockness: CGFloat = 0) -> RecordOverlayLayout {
+    private func layout(cancelTranslation: CGFloat = 0, lockness: CGFloat = 0, growth: CGFloat = 1) -> RecordOverlayLayout {
         RecordOverlayLayout(.init(
             button: button,
             bar: bar,
@@ -186,7 +210,8 @@ final class RecordOverlayLayoutTests: XCTestCase {
             label: CGSize(width: 100, height: 18),
             cancel: CGSize(width: 56, height: 22),
             cancelTranslation: cancelTranslation,
-            lockness: lockness
+            lockness: lockness,
+            growth: growth
         ))
     }
 
@@ -205,20 +230,18 @@ final class RecordOverlayLayoutTests: XCTestCase {
         let layout = layout()
         XCTAssertEqual(layout.lockWrapper, CGRect(x: 332, y: 644, width: 40, height: 72))
         XCTAssertEqual(layout.lockPanel, CGRect(x: 0, y: 0, width: 40, height: 72))
-        XCTAssertEqual(layout.lockGlyph, CGRect(x: 0, y: 6, width: 40, height: 40))
-        XCTAssertEqual(layout.arrow, CGRect(x: 14, y: 50, width: 12, height: 12))
-        XCTAssertEqual(layout.arrowAlpha, 1)
+        XCTAssertEqual(layout.lockGlyph, CGRect(x: 0, y: 6, width: 40, height: 60))
     }
 
-    func testLockedThePillIsACircleAndTheChevronIsGone() {
+    func testLockedThePillIsACircleWithTheStopInItsMiddle() {
         let layout = layout(lockness: 1)
         XCTAssertEqual(layout.lockPanel, CGRect(x: 0, y: 40, width: 40, height: 40))
-        XCTAssertEqual(layout.lockGlyph, CGRect(x: 0, y: -5, width: 40, height: 40))
-        XCTAssertEqual(layout.arrow.minY, 11)
-        XCTAssertEqual(layout.arrowAlpha, 0)
+        XCTAssertEqual(layout.lockGlyph, CGRect(x: 0, y: -10, width: 40, height: 60))
+        // The animation's middle on the circle's, in the wrapper's space.
+        XCTAssertEqual(layout.lockPanel.minY + layout.lockGlyph.midY, layout.lockPanel.midY)
         let halfway = self.layout(lockness: 0.5)
         XCTAssertEqual(halfway.lockPanel, CGRect(x: 0, y: 20, width: 40, height: 56))
-        XCTAssertEqual(halfway.arrowAlpha, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(halfway.lockGlyph.minY, -2)
     }
 
     func testTheDotAndTheClockAtTheBarsLeftOnTheButtonsLine() {
@@ -227,45 +250,87 @@ final class RecordOverlayLayoutTests: XCTestCase {
         XCTAssertEqual(layout.clock, CGRect(x: 50, y: 793, width: 60, height: 18))
     }
 
-    func testSlideToCancelIsCentredInTheBar() {
+    func testSlideToCancelIsCentredBetweenTheClockAndTheCircle() {
         let layout = layout()
-        // Centred in the bar less 16: (358 - 16 - 120) / 2 in from its edge.
-        XCTAssertEqual(layout.cancelLine, CGRect(x: 127, y: 793, width: 120, height: 18))
-        XCTAssertEqual(layout.cancelArrow, CGRect(x: 127, y: 795, width: 14, height: 14))
-        XCTAssertEqual(layout.cancelLabel, CGRect(x: 147, y: 793, width: 100, height: 18))
+        // The clock ends at 110 and the circle starts at 297: (187 - 120) / 2 in.
+        XCTAssertEqual(layout.cancelLine, CGRect(x: 143, y: 793, width: 120, height: 18))
+        XCTAssertEqual(layout.cancelArrow, CGRect(x: 143, y: 795, width: 14, height: 14))
+        XCTAssertEqual(layout.cancelLabel, CGRect(x: 163, y: 793, width: 100, height: 18))
         XCTAssertEqual(layout.cancelLineAlpha, 1)
-        XCTAssertEqual(layout.cancelButton, CGRect(x: 159, y: 791, width: 56, height: 22))
+        XCTAssertEqual(layout.cancelButton, CGRect(x: 175, y: 791, width: 56, height: 22))
         XCTAssertLessThan(layout.cancelLine.maxX, layout.inner.minX, "clear of the circle")
     }
 
+    func testABarEndingUnderTheCircleCentresTheLineInWhatShows() {
+        // Home's toolbar: the bar's glass stops 12 short of the
+        // microphone's, under the circle.
+        let button = CGRect(x: 331, y: 803, width: 38, height: 38)
+        let layout = RecordOverlayLayout(.init(
+            button: button,
+            bar: CGRect(x: 28, y: 798, width: 286, height: 48),
+            clock: CGSize(width: 60, height: 18),
+            arrow: CGSize(width: 14, height: 14),
+            label: CGSize(width: 100, height: 18),
+            cancel: CGSize(width: 56, height: 22)
+        ))
+        XCTAssertEqual(layout.clock.maxX, 122)
+        XCTAssertEqual(layout.inner.minX, 295)
+        XCTAssertEqual(layout.cancelLine.minX, 148, "(295 - 122 - 120) / 2 past the clock")
+        XCTAssertEqual(layout.cancelButton.minX, 180)
+    }
+
     func testTheLineFollowsTheFingerAtHalfItsPaceAndFadesAtTheClock() {
-        XCTAssertEqual(layout(cancelTranslation: 8).cancelLine.minX, 127, "the first 8 points don't move it")
-        XCTAssertEqual(layout(cancelTranslation: 10).cancelLine.minX, 126)
-        XCTAssertEqual(layout(cancelTranslation: 48).cancelLine.minX, 107)
-        // The clock ends at 110; the line fades over the 10 before it.
+        XCTAssertEqual(layout(cancelTranslation: 8).cancelLine.minX, 143, "the first 8 points don't move it")
+        XCTAssertEqual(layout(cancelTranslation: 10).cancelLine.minX, 142)
+        XCTAssertEqual(layout(cancelTranslation: 48).cancelLine.minX, 123)
+        // The clock ends at 110; the line fades over the 10 after it.
         XCTAssertEqual(layout(cancelTranslation: 20).cancelLineAlpha, 1)
-        XCTAssertEqual(layout(cancelTranslation: 30).cancelLineAlpha, 0.6, accuracy: 1e-9)
-        XCTAssertEqual(layout(cancelTranslation: 31).cancelLineAlpha, 0.5, accuracy: 1e-9)
-        XCTAssertEqual(layout(cancelTranslation: 48).cancelLineAlpha, 0)
+        XCTAssertEqual(layout(cancelTranslation: 62).cancelLineAlpha, 0.6, accuracy: 1e-9)
+        XCTAssertEqual(layout(cancelTranslation: 64).cancelLineAlpha, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(layout(cancelTranslation: 74).cancelLineAlpha, 0)
+    }
+
+    func testTheBarGrowsOutOfTheButtonAlongItsLine() {
+        XCTAssertEqual(layout().bar, bar, "grown")
+        XCTAssertEqual(layout(growth: 0).bar, button, "the button's own circle")
+        XCTAssertEqual(layout(growth: 0.5).bar, CGRect(x: 173, y: 780, width: 201, height: 44))
+        XCTAssertEqual(layout(growth: 2).bar, bar, "never past the bar")
+        // What the bar holds stays where the grown bar puts it.
+        XCTAssertEqual(layout().barContent, CGRect(x: 0, y: 0, width: 358, height: 44))
+        XCTAssertEqual(layout(growth: 0.5).barContent, CGRect(x: -157, y: 0, width: 358, height: 44))
+        XCTAssertEqual(layout(growth: 0).barContent, CGRect(x: -314, y: 0, width: 358, height: 44))
+        XCTAssertEqual(layout(growth: 0.5).clock, layout().clock)
+        XCTAssertEqual(layout(growth: 0.5).cancelLine, layout().cancelLine)
     }
 }
 
-final class RecordLockGlyphTests: XCTestCase {
-    func testOpenTheShackleStandsHighWithItsRightLegShort() {
-        let glyph = RecordLockGlyph(lockness: 0, scale: 2)
-        XCTAssertEqual(glyph.shackle, CGRect(x: 14, y: 6, width: 12, height: 33))
-        XCTAssertEqual(glyph.leftLegEnd, 22.5)
-        XCTAssertEqual(glyph.rightLegEnd, 16.5)
-        XCTAssertEqual(glyph.body, CGRect(x: 12, y: 22, width: 16, height: 16))
-        XCTAssertEqual(glyph.keyhole, CGRect(x: 18, y: 28, width: 4, height: 4))
-        XCTAssertEqual(glyph.lineWidth, 1.5)
+final class RecordToolbarLayoutTests: XCTestCase {
+    func testTheMicrophoneStandsAsTallAsTheToolbarsGlassButtons() {
+        XCTAssertEqual(RecordToolbarLayout.Metrics.button, 38, "48 glass less 5 a side")
     }
 
-    func testShutTheShackleComesDownAndBothLegsMeetTheBody() {
-        let glyph = RecordLockGlyph(lockness: 1, scale: 3)
-        XCTAssertEqual(glyph.shackle.minY, 12)
-        XCTAssertEqual(glyph.rightLegEnd, glyph.leftLegEnd)
-        XCTAssertEqual(glyph.lineWidth, 5.0 / 3.0)
+    /// iPhone 17 Pro, as the simulator lays the toolbar out: the
+    /// microphone's view at 331, its glass 326 to 374.
+    func testTheBarRunsFromTheToolbarsEdgeTo12BeforeTheMicrophone() {
+        let layout = RecordToolbarLayout(width: 402, microphone: CGRect(x: 331, y: 803, width: 38, height: 38))
+        XCTAssertEqual(layout.bar, CGRect(x: 28, y: 798, width: 286, height: 48), "as far in as the microphone's glass")
+        XCTAssertEqual(layout.barView, CGSize(width: 276, height: 38))
+    }
+
+    /// The microphone before compose: its glass 266 to 314, compose's 326
+    /// to 374. The bar still starts 28 in, and stops 12 short of the
+    /// microphone.
+    func testWithComposeAfterTheMicrophoneTheBarStartsAsFarInAsComposeEnds() {
+        let layout = RecordToolbarLayout(width: 402, microphone: CGRect(x: 271, y: 803, width: 38, height: 38), after: 1)
+        XCTAssertEqual(layout.bar, CGRect(x: 28, y: 798, width: 226, height: 48))
+        XCTAssertEqual(layout.barView, CGSize(width: 216, height: 38))
+        XCTAssertEqual(RecordToolbarLayout.buttonRoom, 60)
+    }
+
+    func testANarrowToolbarStillHasAGlassButtonsWidth() {
+        let layout = RecordToolbarLayout(width: 100, microphone: CGRect(x: 40, y: 10, width: 38, height: 38))
+        XCTAssertEqual(layout.bar.width, 48)
+        XCTAssertEqual(layout.barView, CGSize(width: 38, height: 38))
     }
 }
 

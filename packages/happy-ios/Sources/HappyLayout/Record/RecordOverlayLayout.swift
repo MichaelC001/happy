@@ -15,9 +15,9 @@ import CoreGraphics
 ///                                             the waves' 244 square round it
 ///
 /// Every frame is in the overlay's space, the window's. The bar's line
-/// runs through the button's middle; "Slide to cancel" is centred in the
-/// bar (less 16, as Telegram's) and slides with the finger at half its
-/// pace, fading as it reaches the clock.
+/// runs through the button's middle; "Slide to cancel" is centred in what
+/// shows of the bar between the clock and the circle, and slides with the
+/// finger at half its pace, fading as it reaches the clock.
 public struct RecordOverlayLayout: Equatable, Sendable {
     public enum Metrics {
         public static let lockWidth: CGFloat = 40
@@ -26,17 +26,12 @@ public struct RecordOverlayLayout: Equatable, Sendable {
         public static let lockRaise: CGFloat = 122
         /// The pill shrinks by this much as it locks, to a circle.
         public static let lockShrink: CGFloat = 32
-        /// The lock glyph's box at the pill's top.
-        public static let lockGlyph: CGFloat = 40
-        public static let lockGlyphTop: CGFloat = 6
-        /// The glyph rises this much as it locks.
-        public static let lockGlyphRise: CGFloat = 11
-        /// The chevron under the lock.
-        public static let arrowSize: CGFloat = 12
-        public static let arrowTop: CGFloat = 50
-        /// The chevron rises this much and is gone by 1/1.6 of the way.
-        public static let arrowRise: CGFloat = 39
-        public static let arrowFade: CGFloat = 1.6
+        /// Telegram's `LockView`, its lock and chevron in one 40 by 60
+        /// animation, centred in the full pill.
+        public static let lockGlyphHeight: CGFloat = 60
+        /// It rises this much as it locks (`_lock.transform`), so its stop
+        /// lands in the middle of the circle the pill becomes.
+        public static let lockGlyphRise: CGFloat = 16
         public static let dotSize: CGFloat = 10
         public static let dotLeft: CGFloat = 16
         public static let clockLeft: CGFloat = 34
@@ -46,8 +41,6 @@ public struct RecordOverlayLayout: Equatable, Sendable {
         public static let cancelThreshold: CGFloat = 8
         /// The line fades out over its last points before the clock.
         public static let cancelFade: CGFloat = 10
-        /// Telegram centres the line in the bar less this.
-        public static let laneInset: CGFloat = 16
     }
 
     public struct Input: Equatable, Sendable {
@@ -65,8 +58,11 @@ public struct RecordOverlayLayout: Equatable, Sendable {
         public var cancelTranslation: CGFloat
         /// How closed the lock is, 0 to 1.
         public var lockness: CGFloat
+        /// How far the bar has grown out of the button, 0 to 1
+        /// (`RecordMotion.barGrowth`).
+        public var growth: CGFloat
 
-        public init(button: CGRect, bar: CGRect, clock: CGSize, arrow: CGSize, label: CGSize, cancel: CGSize, cancelTranslation: CGFloat = 0, lockness: CGFloat = 0) {
+        public init(button: CGRect, bar: CGRect, clock: CGSize, arrow: CGSize, label: CGSize, cancel: CGSize, cancelTranslation: CGFloat = 0, lockness: CGFloat = 0, growth: CGFloat = 1) {
             self.button = button
             self.bar = bar
             self.clock = clock
@@ -75,9 +71,17 @@ public struct RecordOverlayLayout: Equatable, Sendable {
             self.cancel = cancel
             self.cancelTranslation = cancelTranslation
             self.lockness = lockness
+            self.growth = growth
         }
     }
 
+    /// The bar as it grows out of the button: the button's circle
+    /// stretching left along its line into the full bar. Its corners stay
+    /// half its height.
+    public var bar: CGRect
+    /// What the bar holds, the full bar's size, in the growing bar's
+    /// space: it is uncovered as the bar grows, never squeezed.
+    public var barContent: CGRect
     /// The blue circle and the waves' square, before their transforms.
     public var inner: CGRect
     public var outer: CGRect
@@ -85,10 +89,8 @@ public struct RecordOverlayLayout: Equatable, Sendable {
     public var lockWrapper: CGRect
     /// The pill in the wrapper's space: 72 tall, a 40 circle when locked.
     public var lockPanel: CGRect
-    /// The lock glyph and the chevron in the panel's space.
+    /// The lock and its chevron (`LockView`) in the panel's space.
     public var lockGlyph: CGRect
-    public var arrow: CGRect
-    public var arrowAlpha: CGFloat
     public var dot: CGRect
     public var clock: CGRect
     /// "‹ Slide to cancel" as one, and its parts in the bar's space.
@@ -118,30 +120,38 @@ public struct RecordOverlayLayout: Equatable, Sendable {
         // Telegram's pill comes down 40 as it loses 32 of its height: the
         // circle it becomes sits a little below where the pill's foot was.
         lockPanel = CGRect(x: 0, y: M.lockWidth * lockness, width: M.lockWidth, height: M.lockHeight - M.lockShrink * lockness)
+        // Centred in the full pill once and left there as the pill
+        // shrinks under it, as Telegram adds it.
         lockGlyph = CGRect(
-            x: (M.lockWidth - M.lockGlyph) / 2,
-            y: M.lockGlyphTop - M.lockGlyphRise * lockness,
-            width: M.lockGlyph,
-            height: M.lockGlyph
+            x: 0,
+            y: (M.lockHeight - M.lockGlyphHeight) / 2 - M.lockGlyphRise * lockness,
+            width: M.lockWidth,
+            height: M.lockGlyphHeight
         )
-        arrow = CGRect(
-            x: (M.lockWidth - M.arrowSize) / 2,
-            y: M.arrowTop - M.arrowRise * lockness,
-            width: M.arrowSize,
-            height: M.arrowSize
-        )
-        arrowAlpha = max(0, 1 - lockness * M.arrowFade)
+
+        let growth = min(1, max(0, input.growth))
+        let start = input.button
+        func mix(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * growth }
+        let barMinX = mix(start.minX, input.bar.minX)
+        let barMinY = mix(start.minY, input.bar.minY)
+        bar = CGRect(x: barMinX, y: barMinY, width: mix(start.maxX, input.bar.maxX) - barMinX, height: mix(start.maxY, input.bar.maxY) - barMinY)
+        barContent = CGRect(x: input.bar.minX - barMinX, y: input.bar.minY - barMinY, width: input.bar.width, height: input.bar.height)
 
         let bar = input.bar
         dot = CGRect(x: bar.minX + M.dotLeft, y: center.y - M.dotSize / 2, width: M.dotSize, height: M.dotSize)
         clock = CGRect(x: bar.minX + M.clockLeft, y: center.y - input.clock.height / 2, width: input.clock.width, height: input.clock.height)
 
-        let lane = max(0, bar.width - M.laneInset)
+        // The lane is what shows of the bar between the clock and the
+        // circle: a toolbar's bar ends under the circle, short of the
+        // button's edge, so centring in the whole bar (Telegram's panel
+        // less 16) would run the line into the clock.
+        let laneStart = clock.maxX
+        let lane = max(0, min(bar.maxX, inner.minX) - laneStart)
         let lineWidth = input.arrow.width + M.cancelGap + input.label.width
         let lineHeight = max(input.arrow.height, input.label.height)
         let slide = max(0, input.cancelTranslation - M.cancelThreshold)
         cancelLine = CGRect(
-            x: bar.minX + ((lane - lineWidth - slide) / 2).rounded(.down),
+            x: laneStart + ((lane - lineWidth - slide) / 2).rounded(.down),
             y: center.y - lineHeight / 2,
             width: lineWidth,
             height: lineHeight
@@ -153,11 +163,19 @@ public struct RecordOverlayLayout: Equatable, Sendable {
             ? min(1, max(0, (cancelLine.minX - fadeStart) / M.cancelFade))
             : 1
         cancelButton = CGRect(
-            x: bar.minX + ((lane - input.cancel.width) / 2).rounded(.down),
+            x: laneStart + ((lane - input.cancel.width) / 2).rounded(.down),
             y: center.y - input.cancel.height / 2,
             width: input.cancel.width,
             height: input.cancel.height
         )
+    }
+
+    /// Telegram's bin (`BinRed`, drawn 40 square): it starts centred on
+    /// the dot it grows out of, then centres on the icon it stands in for.
+    public static let binSide: CGFloat = 40
+
+    public static func bin(around center: CGPoint) -> CGRect {
+        CGRect(x: center.x - binSide / 2, y: center.y - binSide / 2, width: binSide, height: binSide)
     }
 
     /// The bar a button in a toolbar records in: a capsule as tall as the
@@ -165,31 +183,5 @@ public struct RecordOverlayLayout: Equatable, Sendable {
     public static func capsule(button: CGRect, leading: CGFloat) -> CGRect {
         let x = min(leading, button.minX)
         return CGRect(x: x, y: button.minY, width: button.maxX - x, height: button.height)
-    }
-}
-
-/// Telegram's drawn lock (`TGModernConversationInputLockView`), in a 40
-/// square: a shackle over a round body with a keyhole. As it locks the
-/// shackle comes down 6 and its open leg reaches the body.
-public struct RecordLockGlyph: Equatable, Sendable {
-    /// The shackle's box: its arch's top, its legs' sides.
-    public var shackle: CGRect
-    /// Where the closed (left) leg ends, and the open (right) one.
-    public var leftLegEnd: CGFloat
-    public var rightLegEnd: CGFloat
-    public var body: CGRect
-    public var keyhole: CGRect
-    public var lineWidth: CGFloat
-
-    public init(side: CGFloat = RecordOverlayLayout.Metrics.lockGlyph, lockness: CGFloat, scale: CGFloat) {
-        let lockness = min(1, max(0, lockness))
-        let mid = side / 2
-        let box = CGRect(x: mid - 6, y: 6, width: 12, height: 33)
-        shackle = CGRect(x: box.minX, y: box.minY + lockness * 6, width: box.width, height: box.maxY - (box.minY + lockness * 6))
-        leftLegEnd = box.midY
-        rightLegEnd = box.midY - 6 * (1 - lockness)
-        body = CGRect(x: mid - 8, y: side - 18, width: 16, height: 16)
-        keyhole = CGRect(x: mid - 2, y: side - 12, width: 4, height: 4)
-        lineWidth = scale >= 3 ? 5.0 / 3.0 : 1.5
     }
 }

@@ -302,13 +302,21 @@ extension AgentWire {
         public var type: String
         public var name: String
         public var version: String?
+        /// A vault's on a Happy Cloud server: what the person may do in it
+        /// (`none`, `read`, `write`), and whether it is the Policy vault.
+        public var access: String?
+        public var policyVault: Bool?
 
-        public init(id: String, type: String, name: String, version: String? = nil) {
+        public init(id: String, type: String, name: String, version: String? = nil, access: String? = nil, policyVault: Bool? = nil) {
             self.id = id
             self.type = type
             self.name = name
             self.version = version
+            self.access = access
+            self.policyVault = policyVault
         }
+
+        public var vaultAccess: VaultAccess { VaultAccess(access: access, policyVault: policyVault) }
     }
 
     public struct Mode: Equatable, Sendable, Codable {
@@ -677,14 +685,17 @@ extension AgentWire {
 
     /// A message's public provenance (`metadata`): the agent that sent a
     /// message the daemon wrote on its behalf, and that agent's one line on
-    /// what it is.
+    /// what it is; on a team's computer, the member who wrote a person's
+    /// message (`userId`, named by `GET /v0/users`).
     public struct MessageMetadata: Equatable, Sendable, Codable {
         public var senderAgentId: String?
         public var senderAgentExplanation: String?
+        public var userId: String?
 
-        public init(senderAgentId: String? = nil, senderAgentExplanation: String? = nil) {
+        public init(senderAgentId: String? = nil, senderAgentExplanation: String? = nil, userId: String? = nil) {
             self.senderAgentId = senderAgentId
             self.senderAgentExplanation = senderAgentExplanation
+            self.userId = userId
         }
     }
 

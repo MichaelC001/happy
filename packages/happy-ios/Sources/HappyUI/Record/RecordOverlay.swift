@@ -2,13 +2,37 @@
 import HappyCore
 import HappyIcons
 import HappyLayout
+import Lottie
 import UIKit
 
 /// Where the clock and "Slide to cancel" show while recording: a part of
-/// the host's screen, in the window's space, and its corners.
+/// the host's screen, in the window's space, its corners, and who draws it.
 struct RecordBar: Equatable {
+    enum Ground: Equatable {
+        /// The host's own glass is the bar: home's toolbar morphs its
+        /// buttons into it, and only what is in it is drawn here.
+        case host
+        /// Drawn here in the button's fill, stretching out of the button
+        /// as it comes and back into it as it goes.
+        case grown
+    }
+
     var frame: CGRect
     var cornerRadius: CGFloat
+    var ground: Ground = .grown
+}
+
+/// What a cancel's bin stands in for while it plays, as Telegram's stands
+/// in for the attach button: hidden till the bin shuts, then growing back
+/// as the bin shrinks away.
+struct RecordBinSpot {
+    /// A view of the host's: the bin travels to its middle, and it is
+    /// hidden and grown back here.
+    var icon: UIView?
+    /// Or an icon only the host can reach (search's magnifier, drawn by
+    /// the system): the bin plays where the dot was, under which it sits,
+    /// and this hides it (true) and shows it again (false).
+    var hide: ((Bool) -> Void)?
 }
 
 /// Telegram's recording screen over everything, the keyboard included, in
@@ -31,8 +55,8 @@ final class RecordOverlay {
     private let window: RecordOverlayWindow
     private let root = UIView()
     private let bar = UIView()
-    private let barGlass = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
-    private let barFill = UIView()
+    /// What the bar holds, faded in over the host's glass as it morphs.
+    private let barContent = UIView()
     private let dot = UIView()
     private let clock = UILabel()
     private let cancelLine = UIView()
@@ -52,11 +76,16 @@ final class RecordOverlay {
     private let lockPanel = UIControl()
     private let lockGlass = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
     private let lockGlyph = RecordLockView()
-    private let lockArrow = IconView(.ionicons("chevron-up"), size: RecordOverlayLayout.Metrics.arrowSize, tint: Palette.Record.lock)
-    private let stopGlyph = StopGlyphView(glyphSize: 16)
+    /// A cancel's bin (Telegram's `BinRed`), while it plays, and the icon
+    /// it stands in for, hidden till it shuts.
+    private var bin: LottieAnimationView?
+    private var binSpot: RecordBinSpot?
 
     private var button: CGRect = .zero
     private var barShape = RecordBar(frame: .zero, cornerRadius: 0)
+    /// The bar's growth is stepped from this time on; nil once it has
+    /// grown (or the host draws the bar).
+    private var growing: CFTimeInterval?
     private var gesture = RecordGesture()
     private var level: CGFloat = 0
     private var motion = RecordMotion()
@@ -83,27 +112,25 @@ final class RecordOverlay {
     private func build() {
         bar.clipsToBounds = true
         bar.layer.cornerCurve = .continuous
-        bar.addSubview(barGlass)
-        barFill.backgroundColor = UIColor(Palette.Record.barFill)
-        bar.addSubview(barFill)
+        bar.addSubview(barContent)
         dot.backgroundColor = UIColor(Palette.Record.dot)
         dot.layer.cornerRadius = RecordOverlayLayout.Metrics.dotSize / 2
-        bar.addSubview(dot)
+        barContent.addSubview(dot)
         clock.font = .monospacedDigitSystemFont(ofSize: 15, weight: .regular)
         clock.textColor = UIColor(Palette.text)
-        bar.addSubview(clock)
+        barContent.addSubview(clock)
         cancelLabel.string = Strings.Record.slideToCancel
         cancelLine.addSubview(cancelArrow)
         cancelLine.addSubview(cancelLabel)
         cancelLine.isUserInteractionEnabled = false
-        bar.addSubview(cancelLine)
+        barContent.addSubview(cancelLine)
         cancelButton.setTitle(Strings.Record.cancel, for: .normal)
         cancelButton.titleLabel?.font = TextStyles.recordCancelButton.font
         cancelButton.tintColor = UIColor(Palette.Record.circle)
         cancelButton.accessibilityIdentifier = "record-cancel"
         cancelButton.alpha = 0
         cancelButton.addAction(UIAction { [weak self] _ in self?.onCancel?() }, for: .touchUpInside)
-        bar.addSubview(cancelButton)
+        barContent.addSubview(cancelButton)
         root.addSubview(bar)
 
         lockGlass.clipsToBounds = true
@@ -111,10 +138,6 @@ final class RecordOverlay {
         lockPanel.addSubview(lockGlass)
         lockGlyph.isUserInteractionEnabled = false
         lockPanel.addSubview(lockGlyph)
-        lockPanel.addSubview(lockArrow)
-        stopGlyph.tintColor = UIColor(Palette.Record.dot)
-        stopGlyph.alpha = 0
-        lockPanel.addSubview(stopGlyph)
         lockPanel.accessibilityLabel = Strings.Record.lock
         lockPanel.accessibilityIdentifier = "record-stop"
         lockPanel.isAccessibilityElement = true
@@ -157,13 +180,25 @@ final class RecordOverlay {
     // MARK: Presenting
 
     /// Comes in over `button` (in the window's space), the clock in `bar`:
-    /// the circles spring up from a fifth, the pill rises 100 into place
-    /// and the bar's line slides in from the right edge.
+    /// the circles spring up from a fifth, the pill rises 100 into place,
+    /// the bar stretches out of the button (or the host's glass morphs
+    /// into it) and its line slides in from the right edge.
     func present(button: CGRect, bar barShape: RecordBar, mode: RecordMode) {
+        clearBin()
         self.button = button
         self.barShape = barShape
         started = CACurrentMediaTime()
         lastTick = started
+        bar.layer.removeAllAnimations()
+        barContent.layer.removeAllAnimations()
+        switch barShape.ground {
+        case .host:
+            growing = nil
+            bar.backgroundColor = .clear
+        case .grown:
+            growing = started
+            bar.backgroundColor = UIColor(Palette.surfaceHighest)
+        }
         motion = RecordMotion()
         outerBlob = RecordBlob(seed: .random(in: 0...UInt64.max))
         middleBlob = RecordBlob(seed: .random(in: 0...UInt64.max))
@@ -180,8 +215,14 @@ final class RecordOverlay {
         // The bar's pieces, as `ChatTextInputPanelNode` brings them: the
         // bar under them, the dot popping in and then blinking, the clock
         // fading in and the line springing in from the right.
-        bar.alpha = 0
-        UIView.animate(withDuration: 0.15, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) { self.bar.alpha = 1 }
+        // Over the host's glass, what the bar holds waits for the morph to
+        // be well under way.
+        bar.alpha = 1
+        barContent.alpha = 0
+        dot.isHidden = false
+        clock.transform = .identity
+        let contentDelay = barShape.ground == .host ? 0.12 : 0
+        UIView.animate(withDuration: 0.15, delay: contentDelay, options: [.curveEaseOut, .allowUserInteraction]) { self.barContent.alpha = 1 }
         dot.alpha = 0
         dot.transform = CGAffineTransform(scaleX: 0.3, y: 0.3)
         UIView.animate(withDuration: 0.15, delay: 0, options: [.allowUserInteraction]) {
@@ -208,8 +249,6 @@ final class RecordOverlay {
         micGlyph.alpha = 1
         micGlyph.transform = .identity
         sendGlyph.alpha = 0
-        stopGlyph.alpha = 0
-        lockGlyph.alpha = 1
         startDisplayLink()
     }
 
@@ -223,9 +262,11 @@ final class RecordOverlay {
         middleBlob.hear(level)
     }
 
-    /// Hands-free (`animateLock`): the lock shuts, the pill becomes a
-    /// circle with stop in it, the glyph on the circle turns to send and
-    /// "Slide to cancel" gives way to Cancel.
+    /// Hands-free (`animateLock`): the lock shuts and its body turns into
+    /// stop (Telegram's `Lock`, played to its end over the pill's 0.2 s),
+    /// the pill becomes a circle round it, the glyph on the circle turns
+    /// to send and "Slide to cancel" gives way to Cancel. The circle, let
+    /// go of, settles back down onto the button.
     func lock() {
         guard !isLocked, !isDismissing else { return }
         isLocked = true
@@ -244,10 +285,6 @@ final class RecordOverlay {
             self.sendGlyph.alpha = 1
             self.micGlyph.alpha = 0
         }
-        UIView.animate(withDuration: 0.25, delay: 0.2, options: [.allowUserInteraction]) {
-            self.lockGlyph.alpha = 0
-            self.stopGlyph.alpha = 1
-        }
         lockPanel.accessibilityLabel = Strings.Record.stop
 
         // `updateIsDisplayingCancel`: the line rises and shrinks away as
@@ -263,38 +300,151 @@ final class RecordOverlay {
     }
 
     /// Goes (`animateOut`): the circles shrink back into the button in
-    /// 0.18 s, the pill drops away and the bar fades. A cancel throws the
-    /// dot away first.
-    func dismiss(cancelled: Bool, completion: (() -> Void)? = nil) {
+    /// 0.18 s and the pill drops away. Sent or stopped, the bar's content
+    /// fades and a bar drawn here shrinks back into the button.
+    ///
+    /// Cancelled, it goes as Telegram's does (`ChatTextInputPanelNode`,
+    /// `recordingToAttachButton`): "Slide to cancel" fades, the clock
+    /// shrinks to half as it fades, a bar drawn here fades where it is,
+    /// and the dot becomes Telegram's bin, which travels to `bin` (the
+    /// icon it stands in for, hidden meanwhile), jumps in and shuts, then
+    /// shrinks away as the icon grows back.
+    func dismiss(cancelled: Bool, bin spot: (() -> RecordBinSpot?)? = nil, completion: (() -> Void)? = nil) {
         guard !isDismissing else { return }
         isDismissing = true
         stopDisplayLink()
-        let small = CGAffineTransform(scaleX: RecordMotion.Metrics.appearScale, y: RecordMotion.Metrics.appearScale)
-        let drop = CGAffineTransform(translationX: 0, y: RecordMotion.Metrics.lockRise).scaledBy(x: 0.2, y: 0.2)
-        UIView.animate(withDuration: RecordMotion.Metrics.disappearDuration, delay: 0, options: [.beginFromCurrentState]) {
+        typealias M = RecordMotion.Metrics
+        let small = CGAffineTransform(scaleX: M.appearScale, y: M.appearScale)
+        let drop = CGAffineTransform(translationX: 0, y: M.lockRise).scaledBy(x: 0.2, y: 0.2)
+        let grown = barShape.ground == .grown
+        // Gone once the last of it is: the circles, a bar drawn here and a
+        // cancel's bin (the host's glass morphs back on its own). Nothing
+        // waits on a delay: a delayed animation's clock starts when it is
+        // made, so a busy main thread would put it on screen already over.
+        var parts = 1 + (grown ? 1 : 0) + (cancelled ? 1 : 0)
+        let done: (Bool) -> Void = { [weak self] _ in
+            parts -= 1
+            guard parts == 0, let self, self.isDismissing else { return }
+            self.dot.layer.removeAllAnimations()
+            self.cancelLine.layer.removeAllAnimations()
+            self.cancelLine.transform = .identity
+            self.clock.transform = .identity
+            self.window.isHidden = true
+            completion?()
+        }
+        UIView.animate(withDuration: M.disappearDuration, delay: 0, options: [.beginFromCurrentState]) {
             self.inner.transform = small
             self.waves.transform = small
             self.inner.alpha = 0
             self.waves.alpha = 0
             self.lockWrapper.transform = drop
             self.lockWrapper.alpha = 0
+        } completion: { done($0) }
+        guard cancelled else {
+            UIView.animate(withDuration: 0.1, delay: 0, options: [.beginFromCurrentState]) {
+                self.barContent.alpha = 0
+            }
+            guard grown else { return }
+            let back = layout(lockness: isLocked ? 1 : gesture.lockness, growth: 0)
+            UIView.animate(withDuration: M.barShrinkDuration, delay: 0, usingSpringWithDamping: M.barDamping, initialSpringVelocity: 0, options: [.beginFromCurrentState]) {
+                self.bar.frame = back.bar
+                self.barContent.frame = back.barContent
+            } completion: { done($0) }
+            return
         }
-        if cancelled {
+        cancelLine.layer.removeAllAnimations()
+        UIView.animate(withDuration: M.cancelFade, delay: 0, options: [.beginFromCurrentState]) {
+            self.cancelLine.alpha = 0
+            self.cancelButton.alpha = 0
+            if grown { self.bar.backgroundColor = self.bar.backgroundColor?.withAlphaComponent(0) }
+        } completion: { grown ? done($0) : () }
+        UIView.animate(withDuration: M.binTravel, delay: 0, usingSpringWithDamping: M.binDamping, initialSpringVelocity: 0, options: [.beginFromCurrentState]) {
+            self.clock.transform = CGAffineTransform(scaleX: M.cancelClockScale, y: M.cancelClockScale)
+            self.clock.alpha = 0
+        }
+        throwDot(to: spot) { done(true) }
+    }
+
+    /// The dot, become the bin where it is: it travels to the spot's icon,
+    /// if there is one on screen, plays once and shrinks away as the icon
+    /// grows back. The spot is asked for a turn later, once the host has
+    /// laid itself out again (home's toolbar is morphing back to search).
+    private func throwDot(to spot: (() -> RecordBinSpot?)?, completion: @escaping () -> Void) {
+        dot.layer.removeAllAnimations()
+        let start = root.convert(dot.center, from: dot.superview)
+        guard let animation = Self.binAnimation else {
             UIView.animate(withDuration: 0.15, delay: 0, options: [.beginFromCurrentState]) {
                 self.dot.transform = CGAffineTransform(scaleX: 0.3, y: 0.3)
+                self.dot.alpha = 0
+            } completion: { _ in completion() }
+            return
+        }
+        let bin = LottieAnimationView(animation: animation)
+        bin.contentMode = .scaleAspectFit
+        bin.isUserInteractionEnabled = false
+        bin.setValueProvider(ColorValueProvider(UIColor(Palette.Record.bin).resolvedColor(with: root.traitCollection).lottieColorValue), keypath: AnimationKeypath(keypath: "**.Color"))
+        bin.frame = RecordOverlayLayout.bin(around: start)
+        root.addSubview(bin)
+        self.bin = bin
+        dot.isHidden = true
+        DispatchQueue.main.async { [weak self, weak bin] in
+            guard let self, let bin, self.bin === bin, let spot = spot?() else { return }
+            self.binSpot = spot
+            spot.hide?(true)
+            guard let icon = spot.icon, icon.window != nil else { return }
+            icon.isHidden = true
+            let target = self.root.convert(CGPoint(x: icon.bounds.midX, y: icon.bounds.midY), from: icon)
+            typealias M = RecordMotion.Metrics
+            UIView.animate(withDuration: M.binTravel, delay: 0, usingSpringWithDamping: M.binDamping, initialSpringVelocity: 0, options: [.beginFromCurrentState]) {
+                bin.center = target
             }
         }
-        UIView.animate(withDuration: 0.2, delay: 0.05, options: [.beginFromCurrentState]) {
-            self.bar.alpha = 0
-        } completion: { [weak self] _ in
-            guard let self, self.isDismissing else { return }
-            self.dot.layer.removeAllAnimations()
-            self.cancelLine.layer.removeAllAnimations()
-            self.cancelLine.transform = .identity
-            self.window.isHidden = true
-            completion?()
+        bin.play { [weak self, weak bin] _ in
+            guard let self, let bin, self.bin === bin else { return completion() }
+            typealias M = RecordMotion.Metrics
+            let gone = CGAffineTransform(scaleX: M.binOutScale, y: M.binOutScale)
+            let icon = self.binSpot?.icon
+            self.binSpot?.hide?(false)
+            self.binSpot?.hide = nil
+            icon?.isHidden = false
+            icon?.alpha = 0
+            icon?.transform = gone
+            UIView.animate(withDuration: M.binOut, delay: 0, options: [.curveEaseInOut]) {
+                bin.alpha = 0
+                bin.transform = gone
+                icon?.alpha = 1
+                icon?.transform = .identity
+            } completion: { _ in
+                guard self.bin === bin else { return }
+                self.clearBin()
+                completion()
+            }
         }
     }
+
+    /// A bin still playing goes at once, and its icon comes back.
+    private func clearBin() {
+        bin?.stop()
+        bin?.removeFromSuperview()
+        bin = nil
+        binSpot?.hide?(false)
+        if let icon = binSpot?.icon {
+            icon.layer.removeAllAnimations()
+            icon.isHidden = false
+            icon.alpha = 1
+            icon.transform = .identity
+        }
+        binSpot = nil
+    }
+
+    /// Telegram's `BinRed`, read once.
+    private static let binAnimation: LottieAnimation? = {
+        guard let url = Bundle.module.url(forResource: "record-bin", withExtension: "json")
+            ?? Bundle.module.url(forResource: "record-bin", withExtension: "json", subdirectory: "Animations"),
+            let data = try? Data(contentsOf: url)
+        else { return nil }
+        return try? LottieAnimation.from(data: data)
+    }()
 
     // MARK: Frames
 
@@ -308,7 +458,7 @@ final class RecordOverlay {
         clock.text = RecordClock.text(0)
     }
 
-    private func layout(lockness: CGFloat) -> RecordOverlayLayout {
+    private func layout(lockness: CGFloat, growth: CGFloat = 1) -> RecordOverlayLayout {
         RecordOverlayLayout(.init(
             button: button,
             bar: barShape.frame,
@@ -317,7 +467,8 @@ final class RecordOverlay {
             label: measured.label,
             cancel: measured.cancel,
             cancelTranslation: isLocked ? 0 : gesture.cancelTranslation,
-            lockness: lockness
+            lockness: lockness,
+            growth: growth
         ))
     }
 
@@ -329,12 +480,16 @@ final class RecordOverlay {
         motion.step(level: level, lift: isLocked ? 0 : gesture.translation.y, slide: isLocked ? 0 : gesture.translation.x, frames: frames)
         let elapsed = now - started
         let lockness = lockStart.map { RecordMotion.lockness(from: $0.from, at: now - $0.time) } ?? gesture.lockness
-        let layout = layout(lockness: lockness)
+        var growth: CGFloat = 1
+        if let growing {
+            growth = RecordMotion.barGrowth(at: now - growing)
+            if growth >= 1 { self.growing = nil }
+        }
+        let layout = layout(lockness: lockness, growth: growth)
 
-        bar.frame = barShape.frame
+        bar.frame = layout.bar
         bar.layer.cornerRadius = barShape.cornerRadius
-        barGlass.frame = bar.bounds
-        barFill.frame = bar.bounds
+        barContent.frame = layout.barContent
         let origin = barShape.frame.origin
         func local(_ rect: CGRect) -> CGRect { rect.offsetBy(dx: -origin.x, dy: -origin.y) }
         place(dot, local(layout.dot))
@@ -356,9 +511,13 @@ final class RecordOverlay {
         let start = RecordMotion.Metrics.appearScale
         let lift = CGAffineTransform(translationX: 0, y: motion.lift)
 
+        // The waves are the circle's (Telegram's decoration takes the
+        // circle's transform): they shrink and slide with it as the finger
+        // drags it, and rise with it.
+        let slideScale = isLocked ? 1 : gesture.scale
         place(waves, layout.outer)
-        let grown = start + (1 - start) * appear
-        waves.transform = lift.scaledBy(x: grown, y: grown)
+        let grown = (start + (1 - start) * appear) * slideScale
+        waves.transform = lift.scaledBy(x: grown, y: grown).translatedBy(x: motion.slide, y: 0)
         waves.alpha = alpha
         outerBlob.advance(by: frames / 60)
         middleBlob.advance(by: frames / 60)
@@ -372,7 +531,7 @@ final class RecordOverlay {
 
         place(inner, layout.inner)
         inner.layer.cornerRadius = layout.inner.width / 2
-        let innerScale = (start + (1 - start) * appear) * (isLocked ? 1 : gesture.scale)
+        let innerScale = (start + (1 - start) * appear) * slideScale
         inner.transform = lift.scaledBy(x: innerScale, y: innerScale).translatedBy(x: motion.slide, y: 0)
         inner.alpha = alpha
         for glyph in [micGlyph, sendGlyph] {
@@ -388,9 +547,6 @@ final class RecordOverlay {
         lockGlass.layer.cornerRadius = lockPanel.bounds.width / 2
         lockGlyph.frame = layout.lockGlyph
         lockGlyph.lockness = lockness
-        lockArrow.frame = layout.arrow
-        lockArrow.alpha = layout.arrowAlpha
-        stopGlyph.frame = lockPanel.bounds
     }
 
     private static func path(_ curves: [RecordBlob.Curve]) -> CGPath {
@@ -491,23 +647,32 @@ final class RecordOverlayWindow: UIWindow {
     }
 }
 
-/// Telegram's drawn lock (`RecordLockGlyph`), stroked in the lock colour.
+/// Telegram's `LockView`: its `LockWait` bobbing while the lock is open
+/// and untouched, and its `Lock` following the finger up, the shackle
+/// closing and the chevron flying up and away as the body turns into
+/// stop. Both in the lock colour (`panelControlColor`).
 final class RecordLockView: UIView {
     var lockness: CGFloat = 0 {
-        didSet { if lockness != oldValue { redraw() } }
+        didSet { if lockness != oldValue { update() } }
     }
 
-    private let shape = CAShapeLayer()
-    private let keyhole = CAShapeLayer()
+    // Drawn on the main thread, as Telegram's are: `Lock` is scrubbed
+    // every frame the finger moves.
+    private let idle = LottieAnimationView(animation: RecordLockView.idleAnimation, configuration: LottieConfiguration(renderingEngine: .mainThread))
+    private let locking = LottieAnimationView(animation: RecordLockView.lockAnimation, configuration: LottieConfiguration(renderingEngine: .mainThread))
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        shape.fillColor = nil
-        shape.lineCap = .round
-        layer.addSublayer(shape)
-        layer.addSublayer(keyhole)
-        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.redraw() }
-        redraw()
+        for view in [idle, locking] {
+            view.contentMode = .scaleAspectFit
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+            addSubview(view)
+        }
+        idle.loopMode = .autoReverse
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.paint() }
+        paint()
+        update()
     }
 
     @available(*, unavailable)
@@ -515,30 +680,45 @@ final class RecordLockView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        redraw()
+        idle.frame = bounds
+        locking.frame = bounds
     }
 
-    private func redraw() {
-        let glyph = RecordLockGlyph(side: max(bounds.width, 1), lockness: lockness, scale: traitCollection.displayScale)
-        let color = UIColor(Palette.Record.lock).resolvedColor(with: traitCollection).cgColor
-        let path = CGMutablePath()
-        let box = glyph.shackle
-        let radius = box.width / 2
-        path.move(to: CGPoint(x: box.minX, y: glyph.leftLegEnd))
-        path.addArc(tangent1End: CGPoint(x: box.minX, y: box.minY), tangent2End: CGPoint(x: box.midX, y: box.minY), radius: radius)
-        path.addArc(tangent1End: CGPoint(x: box.maxX, y: box.minY), tangent2End: CGPoint(x: box.maxX, y: glyph.leftLegEnd), radius: radius)
-        path.addLine(to: CGPoint(x: box.maxX, y: glyph.rightLegEnd))
-        path.addEllipse(in: glyph.body)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        shape.frame = bounds
-        shape.path = path
-        shape.strokeColor = color
-        shape.lineWidth = glyph.lineWidth
-        keyhole.frame = bounds
-        keyhole.path = CGPath(ellipseIn: glyph.keyhole, transform: nil)
-        keyhole.fillColor = color
-        CATransaction.commit()
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        update()
+    }
+
+    /// `updateLockness`: the idle loop only while the lock is untouched.
+    private func update() {
+        let still = lockness <= 0
+        idle.isHidden = !still
+        locking.isHidden = still
+        if still, window != nil {
+            if !idle.isAnimationPlaying { idle.play() }
+        } else if idle.isAnimationPlaying {
+            idle.stop()
+        }
+        locking.currentProgress = min(1, max(0, lockness))
+    }
+
+    private func paint() {
+        let color = UIColor(Palette.Record.lock).resolvedColor(with: traitCollection).lottieColorValue
+        for view in [idle, locking] {
+            view.setValueProvider(ColorValueProvider(color), keypath: AnimationKeypath(keypath: "**.Color"))
+        }
+    }
+
+    /// Telegram's `Lock` and `LockWait`, read once.
+    private static let lockAnimation = animation("record-lock")
+    private static let idleAnimation = animation("record-lock-wait")
+
+    private static func animation(_ name: String) -> LottieAnimation? {
+        guard let url = Bundle.module.url(forResource: name, withExtension: "json")
+            ?? Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Animations"),
+            let data = try? Data(contentsOf: url)
+        else { return nil }
+        return try? LottieAnimation.from(data: data)
     }
 }
 #endif

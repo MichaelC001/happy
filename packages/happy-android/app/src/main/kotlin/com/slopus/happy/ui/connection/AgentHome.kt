@@ -1,5 +1,11 @@
 package com.slopus.happy.ui.connection
 
+import com.slopus.happy.ui.conversation.refusalText
+import androidx.compose.ui.platform.LocalResources
+import com.slopus.happy.ui.call.voiceTouch
+import com.slopus.happy.ui.call.rememberVoiceTouchSource
+import com.slopus.happy.call.CallControl
+import androidx.compose.material3.FloatingActionButtonDefaults
 import com.slopus.happy.BuildConfig
 import androidx.compose.ui.platform.LocalContext
 import com.slopus.happy.ui.voice.rememberMicrophonePermission
@@ -79,6 +85,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.slopus.happy.AppGraph
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.navigation.NavHostController
+import androidx.navigation.NavDestination.Companion.hasRoute
+import com.slopus.happy.connection.AgentConnection
+import com.slopus.happy.ui.HomeRoute
 import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 import com.slopus.happy.R
@@ -162,6 +175,10 @@ class AgentHomeActions(
     val onVoice: (() -> Unit)? = null,
     /** Opens a vault's folder ([folder]) or file that search found. */
     val onOpenVaultItem: (surfaceId: String, itemId: String, folder: Boolean, name: String) -> Unit = { _, _, _, _ -> },
+    /** The person's role starts work: compose, its picture and the voice call show; a viewer's home has none of them. */
+    val canCompose: Boolean = true,
+    /** The person's role writes to the Chief of Staff, so settings' asks of it are found by search. */
+    val canAskChief: Boolean = true,
 )
 
 /** The colours of every bar on an agent connection's screens: the page's own [container], scrolled or not. */
@@ -409,7 +426,7 @@ fun AgentHomeScreen(
                             art = if (statusMessage(status, profileRequired) == null) StateArt.Make else null,
                             title = stringResource(R.string.agent_home_empty_title),
                             body = statusMessage(status, profileRequired) ?: stringResource(R.string.agent_home_empty_body),
-                            action = signInAction(status, actions, profileRequired) ?: (stringResource(R.string.session_new_chat) to actions.onCompose),
+                            action = signInAction(status, actions, profileRequired) ?: (stringResource(R.string.session_new_chat) to actions.onCompose).takeIf { actions.canCompose },
                             modifier = Modifier.padding(top = barFoot),
                         )
                         HomePhase.List -> AgentHomeList(
@@ -459,7 +476,7 @@ fun AgentHomeScreen(
                         )
                     }
                 }
-                if (sidebar == null && feed.loaded && !searching) {
+                if (sidebar == null && feed.loaded && !searching && actions.canCompose) {
                     ComposeFab(actions.onCompose, AgentHomeTags.COMPOSE, stringResource(R.string.agent_search_new_task), onVoice = actions.onVoice)
                 }
                 // While search is open the sidebar's field holds still at its rest, Cancel beside it, whatever the list did.
@@ -517,19 +534,20 @@ fun AgentHomeScreen(
                 }
                 // The sidebar's foot stands over home and search's results alike.
                 if (sidebar != null) {
-                    SidebarFootBar(if (feed.loaded) stringResource(R.string.agent_search_new_task) else null, actions.onSettings, compose, onVoice = actions.onVoice)
+                    SidebarFootBar(if (feed.loaded && actions.canCompose) stringResource(R.string.agent_search_new_task) else null, actions.onSettings, compose, onVoice = actions.onVoice)
                 }
             }
         }
         // Over the bar too: the whole screen blurs under a held row's preview.
         if (preview != null) ChatPreviewOverlay(chatPreview, actions.onOpenConversation, preview)
     }
+    val refusals = LocalResources.current
     LeaveSurfaceDialogs(
         confirming = confirmingLeave,
         refused = leaveRefused,
         onConfirm = { surface ->
             actions.onLeaveSurface?.let { leave ->
-                scope.launch { leave(surface)?.let { reason -> leaveRefused = surface.name to reason } }
+                scope.launch { leave(surface)?.let { reason -> leaveRefused = surface.name to refusals.refusalText(reason) } }
             }
         },
         onDismissConfirm = { confirmingLeave = null },
@@ -657,14 +675,14 @@ private fun rememberSearchEntries(actions: AgentHomeActions, endSearch: () -> Un
     return remember(actions, newTask, newTaskPicture, connect, scan, openSettings, index) {
         // happy-ios HomeViewController.quickActions (7a605f6ce). Connect and Scan both open the
         // scanner here: Android's one Add scanner takes a computer's, a terminal's or an agent's code.
-        listOf(
+        listOfNotNull(
             // New work takes the screen, so the search gives it back first.
-            AgentSearchEntry("new-work", newTask, Ionicon.CreateOutline) { end(); actions.onCompose() },
-            AgentSearchEntry("new-work-picture", newTaskPicture, Ionicon.ImageOutline) { end(); actions.onComposeWithPicture() },
+            AgentSearchEntry("new-work", newTask, Ionicon.CreateOutline) { end(); actions.onCompose() }.takeIf { actions.canCompose },
+            AgentSearchEntry("new-work-picture", newTaskPicture, Ionicon.ImageOutline) { end(); actions.onComposeWithPicture() }.takeIf { actions.canCompose },
             AgentSearchEntry("connect-agent", connect, Ionicon.LaptopOutline, actions.onAdd),
             AgentSearchEntry("scan", scan, Ionicon.QrCodeOutline, actions.onAdd),
             AgentSearchEntry("settings", openSettings, Ionicon.SettingsOutline, actions.onSettings),
-        ) to index.map { row -> AgentSearchEntry(row.id, row.title, row.icon) { actions.onSettingsRow(row) } }
+        ) to index.filter { it.place != AgentSettingsPlace.Ask || actions.canAskChief }.map { row -> AgentSearchEntry(row.id, row.title, row.icon) { actions.onSettingsRow(row) } }
     }
 }
 
@@ -692,8 +710,13 @@ internal fun BoxScope.ComposeFab(onClick: () -> Unit, tag: String, label: String
                     VoiceGlyph(24.dp, LocalContentColor.current)
                 }
             }
-            FloatingActionButton(onClick = onClick, modifier = Modifier.testTag(tag)) {
-                Icon(Ionicon.CreateOutline, 24.dp, LocalContentColor.current, contentDescription = label)
+            // The call's press of compose ([VoiceTouch]): its light inside the button, and the button's own press.
+            val voice = rememberVoiceTouchSource()
+            val shape = FloatingActionButtonDefaults.shape
+            FloatingActionButton(onClick = onClick, modifier = Modifier.testTag(tag), shape = shape, interactionSource = voice) {
+                Box(Modifier.size(56.dp).voiceTouch(CallControl.Compose, shape, voice), contentAlignment = Alignment.Center) {
+                    Icon(Ionicon.CreateOutline, 24.dp, LocalContentColor.current, contentDescription = label)
+                }
             }
         }
     }
@@ -715,7 +738,7 @@ private fun statusMessage(status: AgentLinkStatus, profileRequired: Boolean = fa
  */
 @Composable
 private fun noticeMessage(status: AgentLinkStatus, profileRequired: Boolean, refusal: String?): String? =
-    statusMessage(status, profileRequired) ?: refusal?.takeIf { it.isNotBlank() }
+    statusMessage(status, profileRequired) ?: refusal?.takeIf { it.isNotBlank() }?.let { LocalResources.current.refusalText(it) }
         ?: if (status == AgentLinkStatus.Offline) stringResource(R.string.agent_home_unanswered) else null
 
 /** The notice row's motion, the rows' own ([agentHomeRows]). */
@@ -775,8 +798,100 @@ fun AgentHome(
     onOpenTodos: () -> Unit = {},
     onOpenVaultItem: (surfaceId: String, itemId: String, folder: Boolean, name: String) -> Unit = { _, _, _, _ -> },
 ) {
-    val session = remember(id) { graph.agentSessions.session(id) } ?: return
     val agents by graph.agentConnections.accounts.collectAsStateWithLifecycle()
+    val connection = agents.firstOrNull { it.id == id } ?: return
+    // A team server whose session ended shows its Sign in and nothing else; signed in again, a new session opens.
+    if (connection.sessionEnded) {
+        val add = LocalAddFlow.current
+        AgentSignedOutHome(
+            name = connection.name.takeIf { it.isNotBlank() } ?: stringResource(R.string.account_kind_agent),
+            accounts = rememberAccountMenu(graph),
+            onSwitchAccount = rememberHomeAccountSwitch(graph),
+            onAdd = { add?.scan() },
+            onSignIn = { connection.server?.let(onSignIn) },
+        )
+        return
+    }
+    SignedInAgentHome(graph, id, agents, onOpenConversation, onCompose, onSettings, onSettingsRow, onComposeWithPicture, onOpenArtifacts, onOpenSurface, onOpenArtifact, onOpenFeed, onSignIn, onOpenTodos, onOpenVaultItem)
+}
+
+/**
+ * Home for a team server whose session ended ([AgentConnection.sessionEnded]):
+ * the account menu to go elsewhere, the server's name, and Sign in again.
+ * Nothing of the server shows, as nothing of it is kept.
+ */
+@Composable
+fun AgentSignedOutHome(
+    name: String,
+    accounts: AccountMenu,
+    onSwitchAccount: (String) -> Unit,
+    onAdd: () -> Unit,
+    onSignIn: () -> Unit,
+) {
+    val ground = HappyTheme.colors.surface
+    GlassBarLayout(
+        modifier = Modifier.fillMaxSize().background(ground),
+        ground = ground,
+        feathered = false,
+        bar = {
+            AgentTopBar(
+                tag = AgentHomeTags.BAR,
+                container = ground,
+                navigationIcon = { AccountMenuButton(accounts, onSwitchAccount, onAdd) },
+                title = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.testTag(AgentHomeTags.TITLE)) },
+                inset = HomeCardSpec.inset,
+            )
+        },
+    ) { top ->
+        StatePage(
+            tag = AgentHomeTags.SIGNED_OUT,
+            icon = Ionicon.LogIn,
+            title = null,
+            body = stringResource(R.string.team_server_error_sign_in_required),
+            action = stringResource(R.string.team_server_sign_in_again) to onSignIn,
+            modifier = Modifier.padding(top = top - GlassSpec.feather),
+        )
+    }
+}
+
+/**
+ * Back to home when the open connection [connectionId]'s team server
+ * session ends with a page of it over home: none stays up, as nothing of
+ * it is kept. Only on the change, so a sign-in under way stays.
+ */
+@Composable
+internal fun SessionEndedEffect(graph: AppGraph, nav: NavHostController, connectionId: String?) {
+    if (connectionId == null) return
+    LaunchedEffect(graph, nav, connectionId) {
+        graph.agentConnections.accounts
+            .map { list -> list.firstOrNull { it.id == connectionId }?.sessionEnded == true }
+            .distinctUntilChanged()
+            .drop(1)
+            .collect { ended ->
+                if (ended && nav.currentBackStackEntry?.destination?.hasRoute<HomeRoute>() == false) nav.popBackStack<HomeRoute>(inclusive = false)
+            }
+    }
+}
+
+@Composable
+private fun SignedInAgentHome(
+    graph: AppGraph,
+    id: String,
+    agents: List<AgentConnection>,
+    onOpenConversation: (agentId: String) -> Unit,
+    onCompose: () -> Unit,
+    onSettings: () -> Unit,
+    onSettingsRow: (AgentSettingsRow) -> Unit,
+    onComposeWithPicture: () -> Unit,
+    onOpenArtifacts: () -> Unit,
+    onOpenSurface: (AgentFeedRow.Surface) -> Unit,
+    onOpenArtifact: (ArtifactRef) -> Unit,
+    onOpenFeed: () -> Unit,
+    onSignIn: (server: String) -> Unit,
+    onOpenTodos: () -> Unit,
+    onOpenVaultItem: (surfaceId: String, itemId: String, folder: Boolean, name: String) -> Unit,
+) {
+    val session = remember(id) { graph.agentSessions.session(id) } ?: return
     val feed by session.feed.collectAsStateWithLifecycle()
     val status by session.status.collectAsStateWithLifecycle()
     val syncing by session.isSyncing.collectAsStateWithLifecycle()
@@ -790,7 +905,10 @@ fun AgentHome(
     val microphone = rememberMicrophonePermission()
     val voice = remember(graph, id, microphone) { { graph.calls.start(id) { microphone.request().granted } } }
     if (BuildConfig.DEBUG) CallLaunchHooks(graph, voice)
-    val actions = remember(graph, session, onOpenConversation, onCompose, onComposeWithPicture, onSettings, onSettingsRow, onOpenArtifacts, onOpenSurface, onOpenArtifact, onOpenFeed, add, switchAccount, onSignIn, onOpenTodos, voice, onOpenVaultItem) {
+    val permissions by session.permissions.collectAsStateWithLifecycle()
+    val canCompose = permissions.canWrite
+    val canAskChief = permissions.allows(com.slopus.happy.agent.Permission.BOTS_MANAGE)
+    val actions = remember(graph, session, onOpenConversation, onCompose, onComposeWithPicture, onSettings, onSettingsRow, onOpenArtifacts, onOpenSurface, onOpenArtifact, onOpenFeed, add, switchAccount, onSignIn, onOpenTodos, voice, onOpenVaultItem, canCompose, canAskChief) {
         AgentHomeActions(
             onOpenConversation = onOpenConversation,
             onCompose = onCompose,
@@ -806,8 +924,10 @@ fun AgentHome(
             onOpenFeed = onOpenFeed,
             onLeaveSurface = { session.leaveSurface(it.id) },
             onSignIn = { graph.agentConnections.accounts.value.firstOrNull { it.id == id }?.server?.let(onSignIn) },
-            onVoice = voice,
+            onVoice = voice.takeIf { canCompose },
             onOpenVaultItem = onOpenVaultItem,
+            canCompose = canCompose,
+            canAskChief = canAskChief,
         )
     }
     CompositionLocalProvider(LocalAgentPictures provides session.pictures) {

@@ -92,14 +92,18 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
     /// every word that arrives. Zero for an item not stamped, or changed
     /// since (any change clears it): compared field by field.
     public private(set) var revision: UInt64 = 0
+    /// On a team's computer, the member who wrote a person's message, by
+    /// their user ID; nil for one still on its way and outside a team.
+    public var author: String? { didSet { revision = 0 } }
 
-    public init(id: String, role: Role, pieces: [Piece], delivery: Delivery, turn: String? = nil, time: Double? = nil) {
+    public init(id: String, role: Role, pieces: [Piece], delivery: Delivery, turn: String? = nil, time: Double? = nil, author: String? = nil) {
         self.id = id
         self.role = role
         self.pieces = pieces
         self.delivery = delivery
         self.turn = turn
         self.time = time
+        self.author = author
     }
 
     /// This item stamped as a making of its own.
@@ -122,7 +126,7 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
 
     public static func == (lhs: ChatItem, rhs: ChatItem) -> Bool {
         if lhs.revision != 0, lhs.revision == rhs.revision { return true }
-        return lhs.id == rhs.id && lhs.role == rhs.role && lhs.pieces == rhs.pieces && lhs.delivery == rhs.delivery && lhs.turn == rhs.turn && lhs.time == rhs.time
+        return lhs.id == rhs.id && lhs.role == rhs.role && lhs.pieces == rhs.pieces && lhs.delivery == rhs.delivery && lhs.turn == rhs.turn && lhs.time == rhs.time && lhs.author == rhs.author
     }
 
     /// Stamps unique across the app, so items of two conversations are never
@@ -448,6 +452,12 @@ public actor Conversation {
     /// A mode the person chose here; what the daemon last ran with never
     /// replaces it.
     private var picked: AgentWire.Mode?
+    /// The agent's own mode, as the computer says it last ran: what the
+    /// composer shows unless the person picked one here. A draft always
+    /// carries a mode (the daemon requires one), picked or not, so a
+    /// draft's never stands over this.
+    private var agentMode: AgentWire.Mode?
+    private var modeRefresh: Task<Void, Never>?
     private var defaultMode: Task<AgentWire.Mode, Error>?
     /// The agent's own state, for the working line.
     private var status = "idle"
@@ -546,6 +556,7 @@ public actor Conversation {
         askingRead?.cancel(); askingRead = nil
         reading?.cancel(); reading = nil
         reloadSoon?.cancel(); reloadSoon = nil
+        modeRefresh?.cancel(); modeRefresh = nil
         publishing?.cancel(); publishing = nil
         deliveryWatch?.cancel(); deliveryWatch = nil
         let sends = Array(delivering.values)
@@ -697,10 +708,11 @@ public actor Conversation {
 
     private func adopt(_ start: AgentWire.Bootstrap, _ history: AgentWire.MessagesResponse) {
         reads += 1
-        // The draft carries the mode the next message goes with (the last
-        // pick, on any device), so it stands over what the agent last ran
-        // with; this phone's own draft coming back would otherwise drop it.
-        mode = picked ?? start.draft?.value?.mode ?? start.mode ?? mode
+        // The agent's own mode stands over the draft's: a draft carries
+        // whatever mode its device had, picked or not, and would otherwise
+        // keep one the agent no longer runs with.
+        if let current = start.mode { agentMode = current }
+        mode = picked ?? agentMode ?? start.draft?.value?.mode ?? mode
         snapshot.mode = mode
         if let draft = start.draft { adoptDraft(draft, publishes: false) }
         if mode == nil, defaultMode == nil { defaultMode = readDefaultMode() }
@@ -839,6 +851,7 @@ public actor Conversation {
             snapshot.working = true
             activeRun = (runId, payload["run"]?["startedAt"]?.numberValue)
             transcript.setTime(RunTime(payload["run"]), for: runId)
+            refreshAgentMode()
         case "run.boundary":
             guard let runId = payload["startedRun"]?["id"]?.stringValue else { return }
             transcript.accept(payload["acceptedMessageIds"]?.arrayValue?.compactMap(\.stringValue) ?? [], into: runId)
@@ -846,6 +859,7 @@ public actor Conversation {
             activeRun = (runId, payload["startedRun"]?["startedAt"]?.numberValue)
             if let finished = payload["finishedRun"]?["id"]?.stringValue { transcript.setTime(RunTime(payload["finishedRun"]), for: finished) }
             transcript.setTime(RunTime(payload["startedRun"]), for: runId)
+            refreshAgentMode()
         case "run.finished":
             if let finished = payload["run"]?["id"]?.stringValue { transcript.setTime(RunTime(payload["run"]), for: finished) }
             snapshot.working = false
@@ -1419,6 +1433,23 @@ public actor Conversation {
         saveDraftSoon(after: .zero)
     }
 
+    /// A run began, perhaps sent from elsewhere with another mode: the
+    /// agent's own is read again (`GET /v0/agents/:id/mode`) and shown
+    /// unless the person picked one here.
+    private func refreshAgentMode() {
+        guard creation == nil, modeRefresh == nil else { return }
+        modeRefresh = Task { [client, agentId] in
+            let current = try? await client.agentMode(agentId)
+            modeRefresh = nil
+            guard let current else { return }
+            agentMode = current
+            guard picked == nil, mode != current else { return }
+            mode = current
+            snapshot.mode = current
+            publish()
+        }
+    }
+
     /// What a message goes with when nothing was picked: what the person's
     /// next session starts on (`ModelPreferences`), read from this
     /// computer's settings as this phone last has them.
@@ -1562,9 +1593,9 @@ public actor Conversation {
         draftSave?.cancel()
         draftRevision += 1
         draft = Draft(text: text, updatedAt: stamp, synced: true)
-        // Newer than anything picked here: its mode is the one now.
-        if let mode = remote.value?.mode {
-            if picked != nil { picked = mode }
+        // Its mode only fills in for an agent whose own isn't known, and
+        // never replaces a pick made here.
+        if let mode = remote.value?.mode, picked == nil, agentMode == nil {
             self.mode = mode
             snapshot.mode = mode
         }
@@ -1852,6 +1883,7 @@ public actor Conversation {
         var role: ChatItem.Role
         var delivery: ChatItem.Delivery
         var time: Double?
+        var author: String?
         var turn: String?
     }
 
@@ -1891,7 +1923,7 @@ public actor Conversation {
         // Ended: how, after how long, and the answer to copy (desktop's `turnStatus`).
         if let time = transcript.times[run.id], let ended = time.endedAt {
             let answer = lastAgent.map(\.text).flatMap { $0.isEmpty ? nil : $0 }
-            let turnEnd = ChatItem.TurnEnd(reason: time.reason ?? "completed", durationMs: time.startedAt.map { max(0, ended - $0) }, tools: tools, copyText: answer)
+            let turnEnd = ChatItem.TurnEnd(reason: time.reason ?? "completed", durationMs: time.startedAt.map { max(0, ended - $0) }, tools: tools, copyText: answer, endedAt: ended)
             let item = ChatItem(id: "\(run.id):status", role: .turnEnd(turnEnd), pieces: [], delivery: .sent, turn: run.id)
             if let kept = madeRuns[run.id]?.items.last, kept == item { made.items.append(kept) } else { made.items.append(item.stamped()) }
         }
@@ -2094,6 +2126,7 @@ public actor Conversation {
         let agentRole = role == .agent
         let delivery: ChatItem.Delivery = role == .user && message.status == "pending" ? .pending : .sent
         let time = role == .user ? message.createdAt : nil
+        let author = message.role == "user" ? message.metadata?.userId : nil
         let streaming = made.streaming || message.status == "streaming"
         var pieces: [ChatItem.Piece] = []
         // The words before the first call keep the message's ID; each run
@@ -2105,12 +2138,12 @@ public actor Conversation {
         var proposedBefore: Set<String> = []
         func flush(next: String) {
             if !pieces.isEmpty {
-                let key = SegmentKey(blocks: segmentBlocks, proposed: proposedBefore, manager: manager, streaming: streaming, role: role, delivery: delivery, time: time, turn: turn)
+                let key = SegmentKey(blocks: segmentBlocks, proposed: proposedBefore, manager: manager, streaming: streaming, role: role, delivery: delivery, time: time, author: author, turn: turn)
                 let item: ChatItem
                 if !segmentLayout, let kept = old?.segments[segment], kept.key == key {
                     item = kept.item
                 } else {
-                    item = ChatItem(id: segment, role: role, pieces: pieces, delivery: delivery, turn: turn, time: time).stamped()
+                    item = ChatItem(id: segment, role: role, pieces: pieces, delivery: delivery, turn: turn, time: time, author: author).stamped()
                 }
                 // Made from shown media, which may move: made again each time.
                 if !segmentLayout { made.segments[segment] = (key, item) }
