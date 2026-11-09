@@ -18,6 +18,12 @@ object Permission {
     const val CONTENT_WRITE = "content.write"
     /** Admin bots, the Chief of Staff among them, and messages to them. */
     const val BOTS_MANAGE = "bots.manage"
+    /** Adding providers to one's own connection ("My account"). */
+    const val PROVIDERS_OWN = "providers.own"
+    /** Adding providers to the team's connections. */
+    const val PROVIDERS_MANAGE = "providers.manage"
+    /** Monitoring pools and managing their nodes and enrollment commands. */
+    const val POOLS_MANAGE = "pools.manage"
 
     /**
      * A team server's refusal for want of a permission (`403 { "error":

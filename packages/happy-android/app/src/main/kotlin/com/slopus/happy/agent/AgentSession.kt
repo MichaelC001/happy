@@ -69,7 +69,7 @@ import kotlin.random.Random
 
 /** How an agent connection's live link stands, as its home and chats show it. */
 enum class AgentLinkStatus {
-    Connecting, Connected, Offline, Revoked, UpdateRequired,
+    Connecting, Connected, Revoked, UpdateRequired,
     /** A team server's sign-in expired (edge SSO): the person signs in again, then the link resumes. */
     SignInRequired,
 }
@@ -109,7 +109,7 @@ class AgentSession internal constructor(
      * The transport is made once; the bearer is asked for on every request,
      * so a team server's access token is refreshed as it nears expiry.
      */
-    val client: AgentClient = AgentClient.lazy {
+    val client: AgentClient = AgentClient.lazy(cloud = com.slopus.happy.connection.HappyCloud.isServer(connections.accounts.value.firstOrNull { it.id == connectionId }?.server)) {
         val (credentials, transport) = linkLock.withLock {
             route ?: run {
                 val credentials = connections.linkCredentials(connectionId) ?: throw AgentConnectionException(AgentConnectionException.Reason.Revoked)
@@ -134,6 +134,8 @@ class AgentSession internal constructor(
     private val redials = MutableStateFlow(0)
     /** Whether the live link runs now (the connection open, the app in front, signed in). */
     @Volatile private var linking = false
+    /** Kept through the last background, its tunnels not resumed since ([backgrounded]). */
+    private val suspended = AtomicBoolean(false)
     val status: StateFlow<AgentLinkStatus> = statusState.asStateFlow()
 
     private val reads = MutableStateFlow(0)
@@ -640,6 +642,9 @@ class AgentSession internal constructor(
                 when {
                     !signedIn -> statusState.value = AgentLinkStatus.SignInRequired
                     on -> coroutineScope {
+                        // Kept through a background: its tunnels check every way to the
+                        // agent before the stream asks them for anything.
+                        if (suspended.getAndSet(false)) linkLock.withLock { route?.second }?.resumed()
                         launch { watchGit() }
                         live()
                     }
@@ -661,16 +666,23 @@ class AgentSession internal constructor(
     /**
      * The phone has a network again (iOS's `SyncEngine.reconnect`): a link
      * not live starts over now, not when its backoff says, and an attempt
-     * made without a network is dropped. What failed meanwhile says nothing
-     * of the computer, so the header says connecting until this try answers.
+     * made without a network is dropped.
      */
     fun networkReturned() {
-        val status = statusState.value
-        if (!linking) return
-        if (status != AgentLinkStatus.Connecting && status != AgentLinkStatus.Offline) return
-        statusState.value = AgentLinkStatus.Connecting
-        redials.update { it + 1 }
+        // Every tunnel kept checks its relay and every path first, replacing only what doesn't answer.
+        scope.launch {
+            linkLock.withLock { route?.second }?.networkChanged()
+            if (!linking || statusState.value != AgentLinkStatus.Connecting) return@launch
+            redials.update { it + 1 }
+        }
     }
+
+    /**
+     * The app went to the background (iOS's `AgentConnections.suspended`):
+     * the next time the link runs, open now or later, its tunnels are
+     * resumed first ([Transport.resumed]). Not on a cold start.
+     */
+    fun backgrounded() = suspended.set(true)
 
     /** Stops the link and lets go of the tunnel. */
     suspend fun close() {
@@ -690,11 +702,7 @@ class AgentSession internal constructor(
         var snapshotRead = catalogState.value.let { it.loaded && it.cursor != null }
         while (true) {
             awaitSignedIn()
-            // A computer that did not answer stays offline while it's asked again (iOS's `Session.headerState`):
-            // home's notice says so until the stream opens, rather than coming and going with every retry.
-            if (statusState.value != AgentLinkStatus.Connected && statusState.value != AgentLinkStatus.Offline) {
-                statusState.value = AgentLinkStatus.Connecting
-            }
+            if (statusState.value != AgentLinkStatus.Connected) statusState.value = AgentLinkStatus.Connecting
             // The sign-in this attempt runs under: a refusal it meets signs out only that one.
             val grant = connections.grant(connectionId)
             try {
@@ -723,23 +731,28 @@ class AgentSession internal constructor(
                         backoff = INITIAL_BACKOFF
                         continue
                     }
-                    else -> unanswered()
+                    else -> reconnecting()
                 }
             } catch (e: AgentApiException) {
                 // A 409 cursor_unavailable or any refused read: read the snapshot again.
                 snapshotRead = false
-                unanswered()
+                reconnecting()
             } catch (_: Exception) {
-                unanswered()
+                reconnecting()
             }
             delay(backoff + (backoff * JITTER * (random.nextDouble() * 2 - 1)).toLong())
             backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF)
         }
     }
 
-    /** An attempt failed: a stream that was open is on its way back; one that never opened did not answer. */
-    private fun unanswered() {
-        statusState.value = if (statusState.value == AgentLinkStatus.Connected) AgentLinkStatus.Connecting else AgentLinkStatus.Offline
+    /**
+     * An attempt failed, however it failed: the link is asked again with
+     * backoff for as long as it is open, so it is on its way back, as a Happy
+     * account's socket is (iOS's `HomeSnapshot.reconnecting`). No link is
+     * ever offline: its headers say connecting.
+     */
+    private fun reconnecting() {
+        statusState.value = AgentLinkStatus.Connecting
     }
 
     /**
@@ -855,6 +868,8 @@ class AgentSession internal constructor(
 
     /** One renewing subscription per foreground account; rows never start network work. */
     private suspend fun watchGit() {
+        // Happy Cloud has no folders, so no git.
+        if (client.cloud) return
         combine(feed.map(::gitWorkspaceIds).distinctUntilChanged(), gitRenewal, status) { ids, renewal, status ->
             Triple(ids, renewal, status == AgentLinkStatus.Connected)
         }.distinctUntilChanged().collectLatest { (ids, _, connected) ->
@@ -911,6 +926,8 @@ class AgentSession internal constructor(
             }
             return
         }
+        // Happy Cloud has no folders to read.
+        if (stale.kind == "workspace" && client.cloud) return
         reads.update { it + 1 }
         val (path, key) = when (stale.kind) {
             "project" -> "/v0/projects/${AgentClient.escape(stale.id)}" to "project"

@@ -28,7 +28,7 @@ data class MediaRef(val toolCallId: String, val index: Int, val item: MediaItem)
 
 /**
  * A tool call as its line reads it (iOS `ChatItem.Tool`): its name, where it
- * stands (`running`, `completed` or `failed`) and what it presented.
+ * stands (`running`, `completed` or `failed`), its short label and what it presented.
  */
 @Immutable
 data class ToolUse(
@@ -41,6 +41,8 @@ data class ToolUse(
     val id: String? = null,
     /** What its arguments say for its line where no presentation does (a plan's progress, a page's address). */
     val hint: ToolHint? = null,
+    /** Short builtin label, projected before raw arguments leave the row state; never MCP input. */
+    val summary: String? = null,
 ) {
     val running: Boolean get() = status == "running"
     val failed: Boolean get() = status == "failed"
@@ -53,7 +55,7 @@ data class ToolUse(
  * One row of a conversation as the phone draws it. A message becomes one
  * row per block it shows, keyed by message and block, so a streaming block
  * recomposes alone. Tool data is never shown: a tool call is the one line
- * its name, status and presentation give.
+ * its bounded label, name, status and presentation give.
  */
 @Immutable
 sealed interface ConversationRow {
@@ -335,6 +337,8 @@ class ConversationRowBuilder(
                 val text = message.content.filterIsInstance<Block.Text>().joinToString("\n") { it.text }
                     .let { if (fromManager && sender != null) inboundText(it, sender) else it }.trim()
                     .let { plain(it, references) }
+                    // Its Happy Cloud files read as a computer's uploads do: listed under its words.
+                    .let { WorkspaceUploads.listed(it, message.content.filterIsInstance<Block.File>().map(Block.File::name)) }
                 val pictures = message.content.filterIsInstance<Block.Image>()
                 if (text.isEmpty() && pictures.isEmpty()) return emptyList()
                 val delivery = if (message.status == "pending") Delivery.Pending else Delivery.Sent
@@ -356,7 +360,7 @@ class ConversationRowBuilder(
                     }
                     is Block.Image -> rows += ConversationRow.Picture(key, block)
                     is Block.ToolCall -> rows += toolRows(key, block, references)
-                    is Block.Compaction, is Block.Unknown -> Unit
+                    is Block.Compaction, is Block.File, is Block.Unknown -> Unit
                 }
             }
             return rows
@@ -379,7 +383,7 @@ class ConversationRowBuilder(
                 if (answered != null) return listOf(ConversationRow.Ask(askKey(call.id), answered, AskPhase.Answered))
             }
             val skill = if (call.name == Conversation.READ_SKILL) (call.arguments as? JsonObject)?.get("name").str else null
-            val tool = ToolUse(call.name, call.status, call.presentation, skill, call.id, ToolHint.of(call))
+            val tool = ToolUse(call.name, call.status, call.presentation, skill, call.id, ToolHint.of(call), ToolSummary.of(call.name, call.arguments))
             return when (val p = call.presentation) {
                 is Presentation.Media -> if (call.id == null || p.items.isEmpty()) {
                     listOf(ConversationRow.Tool(key, call.id, tool))

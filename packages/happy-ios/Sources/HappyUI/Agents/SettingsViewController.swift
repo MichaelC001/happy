@@ -105,6 +105,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
     /// followed while its page shows, for New Sessions.
     private var modelPreferences = ModelPreferences()
     private var modelsWatch: Watch?
+    private var accessWatch: Watch?
     /// The person's own profile on the computer shown, for its row.
     private var profileWatch: (id: String, watch: Watch)?
     private var profileName = ""
@@ -375,6 +376,8 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         modelPreferences = ModelPreferences()
         modelsWatch?.invalidate()
         modelsWatch = nil
+        accessWatch?.invalidate()
+        accessWatch = nil
         prioritizingWatch?.invalidate()
         prioritizingWatch = nil
         prioritizing = nil
@@ -392,6 +395,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
             return
         }
         guard let session = Session.session(for: profile.id, context: context) else { return }
+        accessWatch = session.watchAccess { [weak self] in self?.rebuild() }
         connectionSettingsWatch = Task { [weak self, engine = session.engine] in
             for await snapshot in await engine.snapshots() {
                 guard !Task.isCancelled, let self else { return }
@@ -490,15 +494,23 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
             let removal: [[SettingsRow]] = [[
                 Row(id: "disconnect", title: server == nil ? Strings.disconnect : Strings.ServerSignIn.signOut, accessory: .none, destructive: true, action: { [weak self] in self?.remove(id, direct: true) }),
             ]]
+            let computeRows: [[SettingsRow]]
+            if let session = Session.session(for: id, context: context), ComputeViewController.offered(session) {
+                computeRows = [[Row(Index.computes, action: { [weak self] in
+                    guard let self, ComputeViewController.offered(session) else { return }
+                    navigationController?.pushViewController(ComputeViewController(session: session), animated: true)
+                })]]
+            } else { computeRows = [] }
             return [
                 accountRows(),
-            ] + serverRows + [
+            ] + serverRows + computeRows + [
                 [Row(Index.profile, image: profilePhoto, value: profileName.isEmpty ? nil : profileName, action: { [weak self] in self?.openProfile() })],
                 [supportRow()],
                 [
                     Row(Index.appearance, action: { [weak self] in self?.open(.appearance) }),
                     Row(Index.agentVoice, value: voiceValue(), action: { [weak self] in self?.open(.agentVoice) }),
                     Row(Index.agents, action: { [weak self] in self?.open(.agents) }),
+                ] + providersRows(id) + [
                     Row(Index.dataStorage, action: { [weak self] in self?.open(.dataStorage) }),
                 ],
                 [analyticsRow()],
@@ -619,9 +631,10 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         navigationController?.pushViewController(controller, animated: true)
     }
 
-    /// A computer's look on this phone: the theme, and whether home shows
+    /// A computer's look on this phone: the theme, whether home shows
     /// projects (desktop's account setting, which home follows; there is
-    /// deliberately no renderer or layout choice here).
+    /// deliberately no renderer or layout choice here), and whether a
+    /// shimmer runs in Low Power Mode (the phone's own, for every profile).
     private func appearanceRows() -> [[SettingsRow]] {
         typealias Row = SettingsRow
         guard let id = shown?.id else { return [] }
@@ -631,11 +644,15 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
             themes.map { theme in
                 Row(id: "theme-\(theme)", title: Self.themeName(theme), value: theme == current ? "✓" : nil, accessory: .none, action: { [weak self] in self?.setTheme(theme) })
             },
-            [Row(SettingsIndex.hideProjects, accessory: .toggle, isOn: projectsHidden, toggled: { [weak self] on in
-                guard let self, let engine = context.account.agentConnections.syncEngine(for: id) else { return }
+            HappyCloud.isCloud(context.account.agentConnections.server(for: id)) ? [] : [Row(SettingsIndex.hideProjects, accessory: .toggle, isOn: projectsHidden, toggled: { [weak self] on in
+                guard let self, shown?.id == id, !HappyCloud.isCloud(context.account.agentConnections.server(for: id)),
+                      let engine = context.account.agentConnections.syncEngine(for: id) else { return }
                 projectsHidden = on
                 Task { try? await engine.setProjectsHidden(on) }
             })],
+            [Row(SettingsIndex.shimmerInLowPower, accessory: .toggle, isOn: ShimmerClock.shared.shimmersInLowPower, toggled: { on in
+                ShimmerClock.shared.shimmersInLowPower = on
+            })].withFooter(Strings.LowPowerShimmer.description),
         ]
     }
 
@@ -748,6 +765,15 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
             Row(Index.eula, action: { [weak self] in self?.openBrowser(Strings.Links.eula) }),
             Row(Index.version, value: SettingsIndexModel.versionDetail(version: context.version, variant: context.variant), accessory: .none, action: { [weak self] in self?.versionTapped() }),
         ].withFooter(aboutFooter)
+    }
+
+    /// A Happy Cloud server's AI providers: the connections its chats run on.
+    private func providersRows(_ id: String) -> [SettingsRow] {
+        guard let session = Session.session(for: id, context: context), session.isCloud else { return [] }
+        return [SettingsRow(SettingsIndex.providers, action: { [weak self] in
+            guard let self else { return }
+            ProvidersViewController.open(.providers, session: session, from: self)
+        })]
     }
 
     /// The relay app's words, about keys kept on this phone, aren't true

@@ -110,20 +110,21 @@ data class AgentSettingsRow(val id: String, val title: String, val icon: Ionicon
  * connection away. The titles are the page's own (`AgentSettingsIndexTest`).
  */
 @Composable
-fun agentSettingsIndex(): List<AgentSettingsRow> {
+fun agentSettingsIndex(projectsAvailable: Boolean = true, notificationsAvailable: Boolean = false): List<AgentSettingsRow> {
     fun row(id: String, title: String, icon: Ionicon, place: AgentSettingsPlace = AgentSettingsPlace.Settings, ask: String? = null) =
         AgentSettingsRow(id, title, icon, place, ask)
-    return listOf(
+    return listOfNotNull(
         row(AgentSettingsTags.PROFILE, stringResource(R.string.settings_account_profile), Ionicon.PersonCircleOutline),
         row(AgentSettingsTags.ASK_NAME, stringResource(R.string.agent_settings_edit_name), Ionicon.CreateOutline, AgentSettingsPlace.Ask, stringResource(R.string.agent_settings_edit_name_prefix)),
         row(AgentSettingsTags.ASK_AVATAR, stringResource(R.string.agent_settings_edit_avatar), Ionicon.ImageOutline, AgentSettingsPlace.Ask, stringResource(R.string.agent_settings_edit_avatar_prefix)),
         row(AgentVoiceTags.SUPPORT, stringResource(R.string.agent_voice_support_title), Ionicon.Heart),
         row(AgentSettingsTags.APPEARANCE, stringResource(R.string.settings_appearance), Ionicon.ColorPaletteOutline),
-        row(AgentPagesTags.HIDE_PROJECTS_ROW, stringResource(R.string.settings_hide_projects), Ionicon.FolderOutline, AgentSettingsPlace.Appearance),
+        row(AgentPagesTags.HIDE_PROJECTS_ROW, stringResource(R.string.settings_hide_projects), Ionicon.FolderOutline, AgentSettingsPlace.Appearance).takeIf { projectsAvailable },
         row(AgentVoiceTags.ROW, stringResource(R.string.agent_voice_title), Ionicon.MicOutline),
         row(AgentAgentsTags.ROW, stringResource(R.string.settings_agents), Ionicon.OptionsOutline),
         row(DataStorageTags.ROW, stringResource(R.string.data_storage_title), Ionicon.ServerOutline),
         row(AgentSharingTags.ROW, stringResource(R.string.sharing_title), Ionicon.PeopleOutline),
+        row(CloudPushTags.ROW, stringResource(R.string.cloud_push_title), Ionicon.NotificationsOutline).takeIf { notificationsAvailable },
         row(SettingsPageTags.ADD_AGENT, stringResource(R.string.settings_add_agent), Ionicon.Add),
         row(SettingsTags.WHATS_NEW, stringResource(R.string.settings_whats_new), Ionicon.SparklesOutline),
         row(SettingsTags.GITHUB, stringResource(R.string.settings_github), Ionicon.LogoGithub),
@@ -177,6 +178,12 @@ class AgentSettingsActions(
     val onAgents: (() -> Unit)? = null,
     /** Members: who is on this Happy Cloud server, and leaving it; null for any other connection. */
     val onMembers: (() -> Unit)? = null,
+    /** AI providers: the Happy Cloud server's connections, and adding ChatGPT, Claude and API keys; null for any other connection. */
+    val onProviders: (() -> Unit)? = null,
+    /** Cloud pool monitoring and node management; absent without pools.manage. */
+    val onComputePools: (() -> Unit)? = null,
+    /** Every Cloud member can manage their own notifications, including read-only members. */
+    val onNotifications: (() -> Unit)? = null,
     /** Disconnects this connection; asked for only after the person confirmed. */
     val onRemove: () -> Unit = {},
     /** Opens this connection's Chief of Staff with [prefix] typed, unsent; null where the person's role can't write to it. */
@@ -278,11 +285,35 @@ fun AgentConnectionSettingsScreen(
                         onClick = open,
                     )
                 },
+                actions.onProviders?.let { open ->
+                    SettingsEntry(
+                        id = CloudProvidersTags.ROW,
+                        title = stringResource(R.string.cloud_providers_title),
+                        icon = { SettingsTile(Ionicon.SparklesOutline, SettingsTiles.orange) },
+                        onClick = open,
+                    )
+                },
                 actions.onMembers?.let { open ->
                     SettingsEntry(
                         id = CloudTags.MEMBERS,
                         title = stringResource(R.string.cloud_members),
                         icon = { SettingsTile(Ionicon.PeopleOutline, SettingsTiles.indigo) },
+                        onClick = open,
+                    )
+                },
+                actions.onComputePools?.let { open ->
+                    SettingsEntry(
+                        id = ComputePoolsTags.ROW,
+                        title = stringResource(R.string.compute_pools_title),
+                        icon = { SettingsTile(Ionicon.ServerOutline, SettingsTiles.indigo) },
+                        onClick = open,
+                    )
+                },
+                actions.onNotifications?.let { open ->
+                    SettingsEntry(
+                        id = CloudPushTags.ROW,
+                        title = stringResource(R.string.cloud_push_title),
+                        icon = { SettingsTile(Ionicon.NotificationsOutline, SettingsTiles.red) },
                         onClick = open,
                     )
                 },
@@ -367,7 +398,6 @@ internal fun statusText(status: AgentLinkStatus): String = stringResource(
     when (status) {
         AgentLinkStatus.Connected -> R.string.agent_settings_connected
         AgentLinkStatus.Connecting -> R.string.agent_settings_connecting
-        AgentLinkStatus.Offline -> R.string.agent_settings_offline
         AgentLinkStatus.Revoked -> R.string.agent_settings_revoked
         AgentLinkStatus.UpdateRequired -> R.string.agent_settings_update
         AgentLinkStatus.SignInRequired -> R.string.team_server_settings_signed_out
@@ -385,6 +415,7 @@ internal suspend fun removeAgentConnection(graph: AppGraph, id: String) = graph.
     val next = graph.accountStore.registry.value.ordered.firstOrNull()?.id
         ?: graph.agentConnections.accounts.value.filter { it.id != id }.minByOrNull { it.addedAt }?.id
     if (HappyCloud.isServer(graph.agentConnections.accounts.value.firstOrNull { it.id == id }?.server)) {
+        graph.cloudPush.beforeRemoval(id)
         graph.agentConnections.credentials(id)?.oauth?.let { graph.cloudAccount?.revoke(it) }
     }
     graph.agentConnections.remove(id)
@@ -434,7 +465,7 @@ internal fun AgentConnectionSettings(graph: AppGraph, nav: NavHostController, co
     // Disconnecting from here, the page stays as it was until the next account's takes its place.
     val agent = rememberLast(agents.firstOrNull { it.id == connectionId })?.takeIf { it.id == connectionId } ?: return
     val session = remember(connectionId) { graph.agentSessions.session(connectionId) }
-    val status = session?.status?.collectAsStateWithLifecycle()?.value ?: AgentLinkStatus.Offline
+    val status = session?.status?.collectAsStateWithLifecycle()?.value ?: AgentLinkStatus.Connecting
     val personState = session?.profile?.state?.collectAsStateWithLifecycle()?.value ?: AgentProfileState()
     val personPhoto = rememberPhoto(session?.profile?.photo?.collectAsStateWithLifecycle()?.value)
     val theme by graph.localSettings.themePreference.collectAsStateWithLifecycle()
@@ -447,8 +478,10 @@ internal fun AgentConnectionSettings(graph: AppGraph, nav: NavHostController, co
     val switcher = LocalAccountSwitcher.current
     val cloud = graph.cloudAccount != null && HappyCloud.isServer(agent.server)
     // The Chief of Staff is an admin bot: asking it needs a role that manages bots.
-    val askChief = session?.permissions?.collectAsStateWithLifecycle()?.value?.allows(Permission.BOTS_MANAGE) ?: true
-    val actions = remember(graph, nav, connectionId, switcher, cloud, askChief) {
+    val permissions = session?.permissions?.collectAsStateWithLifecycle()?.value
+    val askChief = permissions?.allows(Permission.BOTS_MANAGE) ?: true
+    val pools = canManagePools(cloud, permissions ?: com.slopus.happy.agent.ServerPermissions.Unknown)
+    val actions = remember(graph, nav, connectionId, switcher, cloud, askChief, pools) {
         AgentSettingsActions(
             onBack = { nav.popBackStack() },
             onProfile = { nav.navigate(AgentProfileRoute(connectionId)) },
@@ -458,6 +491,9 @@ internal fun AgentConnectionSettings(graph: AppGraph, nav: NavHostController, co
             onSharing = { nav.navigate(AgentSharingRoute(connectionId)) },
             onAgents = { nav.navigate(AgentAgentsRoute(connectionId)) },
             onMembers = if (cloud) ({ nav.navigate(CloudMembersRoute(connectionId)) }) else null,
+            onProviders = if (cloud) ({ nav.openCloudProviders(connectionId) }) else null,
+            onComputePools = if (pools) ({ nav.navigate(CloudComputePoolsRoute(connectionId)) }) else null,
+            onNotifications = if (cloud) ({ nav.navigate(CloudPushSettingsRoute(connectionId)) }) else null,
             onAskChief = if (askChief) ({ prefix -> nav.openChiefOfStaff(connectionId, prefix) }) else null,
             onRemove = {
                 if (switcher != null) switcher.removingFromSettings { removeAgentConnection(graph, connectionId) }
@@ -480,7 +516,7 @@ internal fun AgentConnectionSettings(graph: AppGraph, nav: NavHostController, co
         accountActions = rememberAccountsCardActions(graph),
         aboutActions = rememberAboutActions(graph, nav),
         person = AgentPerson(personState.name, personPhoto, rememberPersonSeed(graph, connectionId)),
-        appearance = agentAppearanceSections(theme, graph.localSettings::setThemePreference, projectsHidden, { session?.setProjectsHidden(it) }, sound, { session?.setCompletionSound(it) }).flatMap { it.rows },
+        appearance = agentAppearanceSections(theme, graph.localSettings::setThemePreference, projectsHidden, { session?.setProjectsHidden(it) }, sound, { session?.setCompletionSound(it) }, projectsAvailable = !cloud).flatMap { it.rows },
         scroll = scroll,
         voice = rememberAgentVoiceSummary(graph.offers, graph.subscription),
         daemonVersion = agent.daemonVersion,

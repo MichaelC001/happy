@@ -9,7 +9,7 @@ import UIKit
 /// navigates: nothing is changed, and no sign-in starts on its own.
 @MainActor
 enum SettingsLinks {
-    static func open(_ page: HappyLink.SettingsPage, session: Session, from controller: UIViewController) {
+    static func open(_ page: HappyLink.SettingsPage, options: HappyLink.ProviderOptions = .init(), session: Session, from controller: UIViewController) {
         guard let place = SettingsLinkPlace.place(page, server: session.server), let context = session.context else { return }
         switch place {
         case .general:
@@ -20,8 +20,13 @@ enum SettingsLinks {
             SettingsViewController.open(context: context, computer: session.accountID, reveal: SettingsIndex.agentVoice.id, from: controller)
         case .servers:
             AccountAdding.connectToCloud(context: context, from: controller)
+        case .computes:
+            guard ComputeViewController.offered(session) else { return }
+            controller.navigationController?.pushViewController(ComputeViewController(session: session), animated: true)
         case .web(let url):
             UIApplication.shared.open(url)
+        case .providers(let page):
+            ProvidersViewController.open(page, options: options, session: session, from: controller)
         }
     }
 }

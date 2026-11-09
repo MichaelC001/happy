@@ -171,7 +171,8 @@ final class RecordButton: UIControl {
             break
         case .needsAsking:
             // The system asks; the next press records.
-            Task { _ = await Dictation.ask() }
+            let multilingual = multilingual()
+            Task { _ = await Dictation.ask(multilingual: multilingual) }
             return false
         case .microphoneDenied:
             refuse(Strings.Record.microphoneTitle, Strings.Record.microphoneMessage, settings: true)

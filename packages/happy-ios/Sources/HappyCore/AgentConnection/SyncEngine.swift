@@ -9,12 +9,19 @@ public struct HomeSnapshot: Equatable, Sendable {
     public var syncing = true
     public var rows: [Row] = []
     public var allRows: [Row] = []
+    /// The active tasks the person isn't in, which search finds too.
+    public var unjoinedTasks: [Row] = []
     public var settings: [String: JSONValue] = [:]
     /// The person signed in as a team user; nil outside a team.
     public var userId: String?
     /// The person's own picture's ThumbHash, for the faces that are theirs.
     public var profilePhoto: String?
     public var error: String?
+    /// The stream is down and being opened again, however it failed: it is
+    /// asked again with backoff for as long as the engine runs, so it is on
+    /// its way back, "connecting…", as a Happy account's socket is, never
+    /// an `error` home says. Android's `AgentSession.reconnecting`.
+    public var reconnecting = false
     /// An action the computer refused, said for a moment while it rolls back.
     public var notice: String?
     public init() {}
@@ -308,7 +315,8 @@ public actor SyncEngine {
             await spaces.startExternal()
             await artifacts.start()
         } catch {
-            snapshot.error = Store.describe(error)
+            // What this phone keeps could not be read: nothing to do with the link.
+            snapshot.error = "Could not open this connection on this device."
             publish()
             return
         }
@@ -326,6 +334,8 @@ public actor SyncEngine {
                 let resuming = desktop != nil && verifiedDaemon != nil && streamCursor != nil && covered == signalled
                 if !resuming {
                     try await reconcile(generation)
+                    // The server answered: what is left is catching up.
+                    if snapshot.reconnecting { snapshot.reconnecting = false; publish() }
                     streamCursor = cursor
                     beginDelivery(generation)
                     beginMessageDelivery(generation)
@@ -337,7 +347,7 @@ public actor SyncEngine {
                     if frame.event == "hello" {
                         sidebarSyncing = true
                         snapshot.syncing = true
-                        snapshot.live = true; snapshot.error = nil; attempt = 0
+                        snapshot.live = true; snapshot.error = nil; snapshot.reconnecting = false; attempt = 0
                         watchGit()
                         publish()
                         // The bootstrap cursor precedes its reads. Opening from
@@ -422,18 +432,21 @@ public actor SyncEngine {
                     if let id = frame.id { streamCursor = id }
                 }
             } catch AgentClientError.revoked {
-                snapshot.live = false
+                snapshot.live = false; snapshot.reconnecting = false
                 snapshot.error = client.signsIn ? "Your sign-in to this server has ended. Sign in again." : "This device was disconnected. Pair it again."
                 publish()
                 return
             } catch {
                 guard current(generation) else { return }
-                snapshot.live = false; snapshot.error = Store.describe(error)
+                snapshot.live = false
+                snapshot.reconnecting = true
                 publish()
             }
             await documents.closed()
             guard current(generation) else { return }
-            snapshot.live = false; publish()
+            snapshot.live = false
+            snapshot.reconnecting = true
+            publish()
             // A signed-in server's edge closes idle connections; come back
             // quickly (edge SSO contract §5: 0.1 s doubling to 10 s).
             let delay: Duration = client.signsIn ? .milliseconds(min(10_000, 100 << min(attempt, 7))) : .seconds(min(30, 1 << min(attempt, 5)))
@@ -676,9 +689,13 @@ public actor SyncEngine {
             } catch {
                 // Retain the original timestamp and ID, including across
                 // suspension and relaunch. Reconnect retries the same intent.
-                snapshot.error = Store.describe(error)
-                publish()
-                if let error = error as? AgentClientError, error == .revoked || (error.status.map { (400..<500).contains($0) } ?? false) { return }
+                // A refusal is said; one that only didn't reach the computer
+                // is the link's, which the title says.
+                if let error = error as? AgentClientError, error == .revoked || (error.status.map { (400..<500).contains($0) } ?? false) {
+                    snapshot.error = Store.describe(error)
+                    publish()
+                    return
+                }
                 do { try await Task.sleep(for: .seconds(min(30, 1 << min(attempt, 5)))) } catch { return }
                 attempt += 1
             }
@@ -711,6 +728,7 @@ public actor SyncEngine {
                 if SidebarRows.drawsAgent(snapshot.allRows[index]), let agentId = snapshot.allRows[index].agentId { agentRows[agentId] = index }
             }
             snapshot.rows = Rows.visible(snapshot.allRows)
+            snapshot.unjoinedTasks = SidebarRows.unjoinedTasks(desktop)
             shownRows = Dictionary(snapshot.rows.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
             snapshot.userId = desktop.profile?.userId
             snapshot.profilePhoto = desktop.profile?.photo?.thumbhash
@@ -953,6 +971,18 @@ public actor SyncEngine {
         return try? await intents.enqueue(.leave, target: id, value: .object(["kind": .string(kind)]))
     }
 
+    /// Joins a Surface the person opened without being in it (desktop
+    /// de78af49's `happyAgentRouterSurfaceOpen`): its row comes once the
+    /// computer has it, as the `surface.updated` that says so reads home
+    /// again. One already in their list, or one home doesn't know, sends
+    /// nothing.
+    public func join(surfaceId: String) async {
+        guard !stopped, let desktop, let surface = desktop.surfaces?.first(where: { $0.id == surfaceId }),
+              !surface.members.contains(where: { $0.userId == desktop.profile?.userId }),
+              !waiting.contains(where: { $0.kind == .join && $0.target == surfaceId }) else { return }
+        _ = try? await intents.enqueue(.join, target: surfaceId, value: .object(["kind": .string("surface")]))
+    }
+
     /// Names a task or bot (`kind`): the row wears it at once.
     @discardableResult
     public func rename(kind: String, id: String, title: String) async -> Intent? {
@@ -1069,6 +1099,8 @@ public actor SyncEngine {
                 }
             case .leave:
                 if kind == "surface" { try await client.leaveSurface(intent.target, mutationId: intent.id) } else { try await client.leaveTask(intent.target, mutationId: intent.id) }
+            case .join:
+                try await client.joinSurface(intent.target, mutationId: intent.id)
             case .answer:
                 guard let agentId = intent.value["agentId"]?.stringValue, let answers = answers(intent.value) else { return }
                 _ = try await client.answerQuestion(agentId, questionId: intent.target, answers: answers, mutationId: intent.id)

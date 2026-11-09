@@ -214,6 +214,89 @@ final class HappyCloudUITests: XCTestCase {
     /// "Edit name" on the server's picture renames the server
     /// (`TEST_RUNNER_RENAME_SERVER`), then puts its name back; a viewer
     /// (`TEST_RUNNER_ROLE` `viewer`) isn't offered it.
+    /// AI providers on a live server (`PROVIDERS_SERVER`): the list, the
+    /// chooser offering what the server runs, and a refused key answered
+    /// with the server's words. The key is a made-up one.
+    func testGProvidersAreListedAndARefusedKeySaysWhy() throws {
+        guard let login = env["QA_LOGIN"], let password = env["QA_PASSWORD"], let server = env["PROVIDERS_SERVER"] else { throw XCTSkip("no providers run") }
+        app.launch()
+        signInWithTestAccount(login: login, password: password)
+        let card = element("cloud-server-\(server)")
+        require(card.waitForExistence(timeout: 30), "@\(server) isn't among \(login)'s servers")
+        card.tap()
+        let switcher = element("account-switcher")
+        require(switcher.waitForExistence(timeout: 120), "no home of @\(server)")
+        Thread.sleep(forTimeInterval: 4)
+        let gear = app.buttons["settings"].firstMatch
+        require(gear.waitForExistence(timeout: 5), "no settings on the home")
+        gear.tap()
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'AI providers'")).firstMatch
+        for _ in 0..<4 where !row.isHittable { app.swipeUp() }
+        require(row.waitForExistence(timeout: 10), "no AI providers in Settings")
+        capture("40-settings")
+        row.tap()
+        let free = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Happy (free)'")).firstMatch
+        require(free.waitForExistence(timeout: 20), "no Happy (free) connection")
+        Thread.sleep(forTimeInterval: 1)
+        capture("41-providers")
+        app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Add a provider'")).firstMatch.tap()
+        let key = app.buttons["Add API key · OpenAI"]
+        require(key.waitForExistence(timeout: 10), "no chooser")
+        XCTAssertTrue(app.buttons["Add API key · Grok"].exists, "no Grok key form in the chooser")
+        Thread.sleep(forTimeInterval: 1)
+        capture("42-chooser")
+        key.tap()
+        let mine = app.buttons["My account"]
+        if mine.waitForExistence(timeout: 5) {
+            capture("43-save-to")
+            mine.tap()
+        }
+        let field = app.secureTextFields["provider-secret"]
+        require(field.waitForExistence(timeout: 10), "no key field")
+        field.tap()
+        field.typeText("sk-not-a-real-key")
+        capture("44-key")
+        app.alerts.buttons["Connect"].tap()
+        let refused = app.alerts["Couldn’t add the key"]
+        require(refused.waitForExistence(timeout: 40), "no refusal")
+        Thread.sleep(forTimeInterval: 1)
+        capture("45-refused")
+        refused.buttons["Cancel"].tap()
+
+        // ChatGPT's device sign-in, on the server: a code to enter at
+        // OpenAI, then cancelled. No token ever reaches the phone.
+        let add = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Add a provider'")).firstMatch
+        require(add.waitForExistence(timeout: 10), "no Add after the refusal")
+        add.tap()
+        let chatGPT = app.buttons["Sign in with ChatGPT"]
+        require(chatGPT.waitForExistence(timeout: 10), "the server's ChatGPT sign-in isn't offered")
+        chatGPT.tap()
+        if mine.waitForExistence(timeout: 5) { mine.tap() }
+        let code = app.staticTexts["provider-device-code"]
+        require(code.waitForExistence(timeout: 20), "no device screen")
+        let shown = NSPredicate(format: "label MATCHES '[A-Z0-9]{3,}-[A-Z0-9]{3,}'")
+        require(XCTWaiter.wait(for: [expectation(for: shown, evaluatedWith: code)], timeout: 120) == .completed, "no code from OpenAI: \(code.label)")
+        XCTAssertTrue(app.buttons["provider-device-open"].isEnabled, "Open OpenAI is off")
+        capture("46-device-code")
+        app.buttons["provider-device-cancel"].tap()
+        require(add.waitForExistence(timeout: 10), "cancel didn't come back to the list")
+
+        // Claude's: its page to open, and a field for the code it shows.
+        add.tap()
+        let claude = app.buttons["Sign in with Claude"]
+        require(claude.waitForExistence(timeout: 10), "the server's Claude sign-in isn't offered")
+        claude.tap()
+        if mine.waitForExistence(timeout: 5) { mine.tap() }
+        let open = app.buttons["provider-claude-open"]
+        require(open.waitForExistence(timeout: 20), "no Claude screen")
+        require(XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)], timeout: 120) == .completed, "Claude's page never came")
+        XCTAssertTrue(app.textFields["provider-claude-code"].exists, "no code field")
+        XCTAssertTrue(app.buttons["provider-claude-token"].exists, "the live server offers setup tokens")
+        capture("47-claude")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        require(add.waitForExistence(timeout: 10), "back didn't come to the list")
+    }
+
     func testEServerIsRenamedFromItsSettings() throws {
         guard let login = env["QA_LOGIN"], let password = env["QA_PASSWORD"], let server = env["RENAME_SERVER"] else { throw XCTSkip("no rename run") }
         let owner = env["ROLE"] != "viewer"
@@ -734,5 +817,182 @@ final class HappyCloudUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 2)
         XCTAssertNotEqual(switcher.value as? String, title, "the home is still @\(server)")
         capture("18-home-after")
+    }
+
+    // MARK: The link in the headers
+
+    /// Settings › Developer › Network Link Conditioner: `profile` on, or
+    /// off for nil, then the app in front again. The runner talks to the
+    /// phone over its cable, so it is never cut off itself.
+    private func condition(_ profile: String?) {
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settings.terminate()
+        settings.launch()
+        let enable = settings.switches["Enable"].firstMatch
+        if !enable.waitForExistence(timeout: 2) {
+            let developer = settings.staticTexts["Developer"].firstMatch
+            for _ in 0..<14 where !developer.isHittable { settings.swipeUp() }
+            require(developer.isHittable, "no Developer in Settings")
+            developer.tap()
+            let conditioner = settings.staticTexts["Network Link Conditioner"].firstMatch
+            for _ in 0..<6 where !conditioner.isHittable { settings.swipeUp() }
+            require(conditioner.waitForExistence(timeout: 5), "no Network Link Conditioner")
+            conditioner.tap()
+            require(enable.waitForExistence(timeout: 5), "no Enable on the conditioner")
+        }
+        if let profile {
+            let row = settings.staticTexts[profile].firstMatch
+            for _ in 0..<6 where !row.isHittable { settings.swipeUp() }
+            require(row.waitForExistence(timeout: 5), "no \(profile) profile")
+            row.tap()
+            for _ in 0..<6 where !enable.isHittable { settings.swipeDown() }
+        }
+        if (enable.value as? String == "1") != (profile != nil) { enable.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap() }
+        Thread.sleep(forTimeInterval: 0.5)
+        let shot = XCTAttachment(screenshot: settings.screenshot())
+        shot.name = "conditioner-\(profile ?? "off")"
+        shot.lifetime = .keepAlways
+        add(shot)
+        app.activate()
+        _ = app.wait(for: .runningForeground, timeout: 5)
+    }
+
+    /// Pictures every 0.6 s for `seconds`, each named for what `of` says
+    /// then, and whether `words` was seen.
+    private func watch(_ name: String, _ of: XCUIElement, for seconds: TimeInterval, until words: String? = nil, read: (XCUIElement) -> String) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        var index = 0, seen = false
+        while Date() < deadline {
+            let said = of.exists ? read(of) : ""
+            let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            attachment.name = "\(name)-\(String(format: "%02d", index))-\(said)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            index += 1
+            if let words, said.contains(words) { seen = true; break }
+            Thread.sleep(forTimeInterval: 0.6)
+        }
+        return seen
+    }
+
+    /// A real Happy Cloud server (`TEST_RUNNER_LINK_SERVER`, holding the
+    /// task `TEST_RUNNER_LINK_TASK`) on a phone, its link cut and slowed with
+    /// the Network Link Conditioner: home's title and the chat's subtitle
+    /// say "Connecting…" while the server doesn't answer, for as long as it
+    /// doesn't (never offline with a notice, as a computer that didn't
+    /// answer is), and "Updating…" while it catches up after.
+    func testFLinkSaysConnectingAndUpdatingOnARealServer() throws {
+        guard let login = env["QA_LOGIN"], let password = env["QA_PASSWORD"], let server = env["LINK_SERVER"] else { throw XCTSkip("no link run") }
+        let taskName = env["LINK_TASK"] ?? "Link check"
+        condition(nil)
+        app.launch()
+        signInWithTestAccount(login: login, password: password)
+        let card = element("cloud-server-\(server)")
+        require(card.waitForExistence(timeout: 30), "@\(server) isn't among \(login)'s servers")
+        card.tap()
+        let switcher = element("account-switcher")
+        require(switcher.waitForExistence(timeout: 90), "no home of @\(server)")
+        let title = { (element: XCUIElement) in element.value as? String ?? "" }
+        let task = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", taskName)).firstMatch
+        require(task.waitForExistence(timeout: 60), "no \(taskName) on home")
+        Thread.sleep(forTimeInterval: 5)
+        capture("30-real-home-online")
+        tree("30-real-home-online", app)
+
+        // Cut off while the phone keeps its network: connecting, and still
+        // connecting once every try meanwhile has failed.
+        condition("100% Loss")
+        let connecting = watch("31-real-home", switcher, for: 20, until: "Connecting", read: title)
+        require(connecting, "home never said Connecting…")
+        Thread.sleep(forTimeInterval: 75)
+        XCTAssertTrue(title(switcher).contains("Connecting"), "home's title after 75 s: \(title(switcher))")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'didn’t answer' OR label CONTAINS[c] \"didn't answer\"")).firstMatch.exists, "a notice says the server didn't answer")
+        capture("32-real-home-connecting-75s")
+        task.tap()
+        let status = element("chat-status")
+        let chatConnecting = watch("33-real-chat", status, for: 10, until: "connecting", read: { $0.label })
+        require(chatConnecting, "the chat never said connecting…")
+        capture("34-real-chat-connecting")
+
+        // Back, slowly: the chat catches up, "updating…".
+        condition("Very Bad Network")
+        let chatUpdating = watch("35-real-chat", status, for: 40, until: "updating", read: { $0.label })
+        capture("36-real-chat-after")
+        XCTAssertTrue(chatUpdating, "the chat never said updating…")
+        goBack(switcher)
+        // Again from home: Settings and back starts the link over.
+        condition("Very Bad Network")
+        let homeUpdating = watch("37-real-home", switcher, for: 40, until: "Updating", read: title)
+        capture("38-real-home-after")
+        XCTAssertTrue(homeUpdating, "home never said Updating…")
+        condition(nil)
+        _ = watch("39-real-home-back", switcher, for: 6, read: title)
+    }
+
+    /// Waits for the host script's `phase` file under `TEST_RUNNER_LINK_PHASES`
+    /// (a simulator shares the Mac's files), then says `done` there.
+    private func phase(_ name: String, timeout: TimeInterval = 120) {
+        guard let folder = env["LINK_PHASES"] else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, !FileManager.default.fileExists(atPath: folder + "/" + name) { Thread.sleep(forTimeInterval: 0.3) }
+        require(FileManager.default.fileExists(atPath: folder + "/" + name), "the host never reached \(name)")
+    }
+
+    private func said(_ name: String) {
+        guard let folder = env["LINK_PHASES"] else { return }
+        FileManager.default.createFile(atPath: folder + "/" + name, contents: Data())
+    }
+
+    /// The same real server in the simulator, the Mac's pf cutting it off
+    /// and then slowing it, step by step with the host script
+    /// (`TEST_RUNNER_LINK_PHASES`): "Connecting…" while it doesn't answer,
+    /// "Updating…" while a cold start catches up slowly.
+    func testGLinkOnARealServerInTheSimulator() throws {
+        guard let login = env["QA_LOGIN"], let password = env["QA_PASSWORD"], let server = env["LINK_SERVER"], env["LINK_PHASES"] != nil else { throw XCTSkip("no simulator link run") }
+        let taskName = env["LINK_TASK"] ?? "Link check"
+        app.launch()
+        signInWithTestAccount(login: login, password: password)
+        let card = element("cloud-server-\(server)")
+        require(card.waitForExistence(timeout: 30), "@\(server) isn't among \(login)'s servers")
+        card.tap()
+        let switcher = element("account-switcher")
+        require(switcher.waitForExistence(timeout: 90), "no home of @\(server)")
+        let title = { (element: XCUIElement) in element.value as? String ?? "" }
+        let task = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", taskName)).firstMatch
+        require(task.waitForExistence(timeout: 60), "no \(taskName) on home")
+        Thread.sleep(forTimeInterval: 5)
+        capture("40-sim-home-online")
+        said("ready")
+
+        // The host blocks the server; the Mac keeps its network.
+        phase("blocked")
+        let connecting = watch("41-sim-home", switcher, for: 75, until: "Connecting", read: title)
+        require(connecting, "home never said Connecting…")
+        Thread.sleep(forTimeInterval: 30)
+        XCTAssertTrue(title(switcher).contains("Connecting"), "home's title after 30 s more: \(title(switcher))")
+        capture("42-sim-home-connecting-30s")
+        tree("42-sim-home-connecting-30s", app)
+        task.tap()
+        let status = element("chat-status")
+        let chatConnecting = watch("43-sim-chat", status, for: 15, until: "connecting", read: { $0.label })
+        capture("44-sim-chat-connecting")
+        XCTAssertTrue(chatConnecting, "the chat never said connecting…")
+        said("cut-done")
+
+        // The host lets it through, slowly: the open chat comes back and
+        // catches up, then a cold start catches up from home.
+        phase("slow")
+        let chatUpdating = watch("45-sim-chat", status, for: 75, until: "updating", read: { $0.label })
+        capture("46-sim-chat-after")
+        XCTAssertTrue(chatUpdating, "the chat never said updating…")
+        app.terminate()
+        app.launch()
+        require(switcher.waitForExistence(timeout: 30), "no home after the relaunch")
+        let homeUpdating = watch("47-sim-home", switcher, for: 60, until: "Updating", read: title)
+        capture("48-sim-home-after")
+        XCTAssertTrue(homeUpdating, "home never said Updating…")
+        said("slow-done")
+        phase("clear")
+        _ = watch("49-sim-home-back", switcher, for: 15, read: title)
     }
 }

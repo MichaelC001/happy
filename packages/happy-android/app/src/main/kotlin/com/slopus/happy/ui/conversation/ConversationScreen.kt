@@ -235,7 +235,6 @@ class ConversationScreenActions(
 @Composable
 fun ConversationScreen(
     state: ConversationState,
-    connection: String?,
     actions: ConversationScreenActions,
     modifier: Modifier = Modifier,
     bubbleColor: String? = null,
@@ -265,10 +264,10 @@ fun ConversationScreen(
     val bubble = userMessageBubblePalette(bubbleColor, colors.dark)
     val workspaceId = state.agent?.workspaceId
     val workspace = remember(actions, workspaceId) { workspaceId?.let { id -> actions.workspace?.invoke(id) } }
-    // "/" opens the agent's commands over the composer, as desktop's palette does.
+    // "/" opens the agent's commands over the composer, as desktop's palette does; a new chat's, the computer's skills.
     val commands by rememberUpdatedState(state.commands)
     val onCommand by rememberUpdatedState(actions.onCommand)
-    val commandSource = remember(state.agent?.id) { state.agent?.id?.let { id -> ConversationCommands(id, { commands }) { command -> onCommand(command.name, null) } } }
+    val commandSource = remember(state.agent?.id) { ConversationCommands(state.agent?.id, { commands }) { command -> onCommand(command.name, null) } }
     val autocomplete = com.slopus.happy.ui.autocomplete.rememberComposerAutocomplete(
         text,
         onTextChange = {
@@ -382,15 +381,15 @@ fun ConversationScreen(
                         title = {
                             RecomposeProbe.mark(ConversationScreenTags.PROBE_BAR)
                             // One status line, under the title and nowhere else: the
-                            // connection while it isn't live, otherwise what the agent
+                            // link while it isn't live, otherwise what the agent
                             // is doing. Its room is always kept, so neither the title nor
                             // the transcript moves when the link or the work changes.
                             val working = activityLabel(state.activity)
                             val syncing = state.syncing || (state.created && !state.loaded)
                             // The link on its way, or the chat still catching up: said with the spinner, as home's title says it.
-                            val linkWords = if (connection != null) null else linkStatusWords(if (link == LinkState.Online && syncing) LinkState.Syncing else link)
+                            val linkWords = linkStatusWords(if (link == LinkState.Online && syncing) LinkState.Syncing else link)
                             val dot = when {
-                                connection != null || linkWords != null -> null
+                                linkWords != null -> null
                                 state.activity == null -> colors.status.connected
                                 state.activity == Activity.AwaitingAnswer -> SessionStatusColors.attention
                                 else -> SessionStatusColors.thinking
@@ -422,10 +421,10 @@ fun ConversationScreen(
                             ) {
                                 TitleWithStatus(
                                     status = BarStatus(
-                                        connection ?: linkWords ?: working ?: stringResource(R.string.status_online),
+                                        linkWords ?: working ?: stringResource(R.string.status_online),
                                         dot,
-                                        connection == null && linkWords == null && state.activity != null,
-                                        shimmer = connection == null && linkWords == null && running,
+                                        linkWords == null && state.activity != null,
+                                        shimmer = linkWords == null && running,
                                         spins = linkWords != null,
                                     ),
                                     statusStyle = style,
@@ -567,7 +566,7 @@ fun ConversationScreen(
                                 maxHeight = minOf(ConversationQuestionSpec.maxHeight, androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp / 2),
                             )
                         }
-                        if (state.created && state.canSend && roleCanSend) {
+                        if (state.canSend && roleCanSend) {
                             // Over the transcript, in the pill's width and 8 above it (the composer's own margin under it).
                             Box(
                                 Modifier
@@ -601,8 +600,9 @@ fun ConversationScreen(
                                 text = text,
                                 onTextChange = onComposerText,
                                 onSend = { words, attachments ->
-                                    // "/name" and what follows runs that command; its words are never a message.
-                                    val invoked = if (attachments.isEmpty()) SlashCommands.invocation(words.trim(), state.commands) else null
+                                    // "/name" and what follows runs that command; its words are never a message. A new chat's
+                                    // first skill is its first message, drawn as one while the agent is made (Conversation.send).
+                                    val invoked = if (attachments.isEmpty() && state.created) SlashCommands.invocation(words.trim(), state.commands) else null
                                     if (invoked != null) {
                                         flight.grounded = true
                                         return@ConversationComposer actions.onCommand(invoked.command.name, invoked.arguments)

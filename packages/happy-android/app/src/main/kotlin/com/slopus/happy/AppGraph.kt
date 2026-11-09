@@ -589,7 +589,9 @@ class AppGraph(
      */
     fun setForeground(value: Boolean) {
         started = (started + if (value) 1 else -1).coerceAtLeast(0)
+        val was = foreground.value
         foreground.value = started > 0
+        if (was && !foreground.value) agentSessions.backgrounded()
     }
 
     /** Each agent connection's live link and cached home (AgentSessions). */
@@ -602,6 +604,15 @@ class AppGraph(
         foreground = isForeground,
         network = appContext.networkPath(),
         chime = CompletionChime(appContext)::play,
+    )
+
+    val cloudPush = com.slopus.happy.push.CloudPushRuntime(
+        appContext, agentConnections, { agentSessions.session(it)?.client }, isForeground, scope,
+        ExpoSecureStore(
+            prefs = context.getSharedPreferences(com.slopus.happy.push.CloudPushRuntime.PREFS, Context.MODE_PRIVATE),
+            keys = secureStoreKeys,
+            keychainService = com.slopus.happy.push.CloudPushRuntime.KEYCHAIN_SERVICE,
+        ),
     )
 
     init {

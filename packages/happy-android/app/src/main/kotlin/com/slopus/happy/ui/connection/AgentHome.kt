@@ -104,6 +104,7 @@ import com.slopus.happy.ui.conversation.ConversationRowActions
 import com.slopus.happy.ui.chat.userMessageBubblePalette
 import com.slopus.happy.ui.chat.MessageCallbacks
 import com.slopus.happy.agent.AgentSession
+import com.slopus.happy.agent.decode
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.DisposableEffect
@@ -140,6 +141,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
 
 /** Everything an agent connection's home asks of the app. */
 @Immutable
@@ -179,6 +181,9 @@ class AgentHomeActions(
     val canCompose: Boolean = true,
     /** The person's role writes to the Chief of Staff, so settings' asks of it are found by search. */
     val canAskChief: Boolean = true,
+    /** Projects belong to self-hosted connections, never Cloud. */
+    val projectsAvailable: Boolean = true,
+    val notificationsAvailable: Boolean = false,
 )
 
 /** The colours of every bar on an agent connection's screens: the page's own [container], scrolled or not. */
@@ -265,8 +270,10 @@ fun AgentHomeScreen(
     preview: (@Composable (AgentFeedRow.Conversation) -> Unit)? = null,
     /** Home's list; [AgentHome] keeps its place across the tablet's breakpoint and the sidebar's hiding ([rememberAgentHomeListState]). */
     listState: LazyListState = rememberLazyListState(),
-    /** What search finds beyond home's rows, read while it is open ([AgentSearchSources.read]). */
-    searchSources: suspend () -> AgentSearchSources = { AgentSearchSources.None },
+    /** What search finds beyond home's rows, read while it is open ([AgentSearchSources.read]), with what [searchReads] read. */
+    searchSources: suspend (read: Map<String, JsonObject>) -> AgentSearchSources = { AgentSearchSources.None },
+    /** What search reads from the computer as it opens that the phone hasn't kept ([AgentSearchSources.reads]). */
+    searchReads: suspend () -> Map<String, JsonObject> = { emptyMap() },
     /** Search's daemon half for a query ([AgentSession.search]); null, or answering null, searches the phone alone. */
     search: (suspend (String) -> SearchAnswer?)? = null,
 ) {
@@ -310,9 +317,12 @@ fun AgentHomeScreen(
     val feedTitle = stringResource(R.string.feed_title)
     val todos = stringResource(R.string.agent_search_todos)
     val words = rememberAgentSearchWords()
-    // Read as search opens, and again as home changes under it.
-    val sources by produceState(AgentSearchSources.None, searching, feed) {
-        if (searching) value = searchSources()
+    // What the phone hasn't kept, read once as search opens; then the sources, again as home changes under it.
+    val read by produceState(emptyMap<String, JsonObject>(), searching) {
+        value = if (searching) searchReads() else emptyMap()
+    }
+    val sources by produceState(AgentSearchSources.None, searching, feed, read) {
+        if (searching) value = searchSources(read)
     }
     // The daemon's half, asked a moment after the typing stops; a new query cancels the one in flight.
     val remote by produceState<SearchAnswer?>(null, searching, query, search) {
@@ -352,8 +362,10 @@ fun AgentHomeScreen(
     // The bar is glass over the page: the cards scroll on under it, softened.
     val ground = colors.surface
     val phase = when {
-        !feed.loaded && status == AgentLinkStatus.Connecting -> HomePhase.Loading
-        !feed.loaded -> HomePhase.Offline
+        // Nothing read yet: it loads while the link is on its way, which it always is unless something
+        // other than the network keeps it away (a pairing to redo, an update, a sign-in), which says so.
+        !feed.loaded && !status.needsAction -> HomePhase.Loading
+        !feed.loaded -> HomePhase.Unavailable
         // Fixed places alone are no home yet: the first chat is.
         feed.rows.all { it is AgentFeedRow.Section || it == AgentFeedRow.Artifacts || it is AgentFeedRow.Feed || it == AgentFeedRow.Todos } -> HomePhase.Empty
         else -> HomePhase.List
@@ -407,16 +419,12 @@ fun AgentHomeScreen(
                 Crossfade(phase, label = "agentHome") { shown ->
                     when (shown) {
                         HomePhase.Loading -> LoadingIndicator(Modifier.padding(top = barFoot).testTag(AgentHomeTags.SPINNER))
-                        // Offline and removed keep a plain glyph, as desktop's errors do.
-                        HomePhase.Offline -> StatePage(
-                            tag = AgentHomeTags.OFFLINE,
-                            icon = if (status == AgentLinkStatus.Offline) Ionicon.CloudOfflineOutline else Ionicon.AlertCircleOutline,
-                            title = when (status) {
-                                AgentLinkStatus.Revoked -> null
-                                AgentLinkStatus.UpdateRequired -> null
-                                else -> stringResource(R.string.agent_home_offline_title, name)
-                            },
-                            body = statusMessage(status, profileRequired) ?: stringResource(R.string.agent_home_offline_body),
+                        // Removed keeps a plain glyph, as desktop's errors do.
+                        HomePhase.Unavailable -> StatePage(
+                            tag = AgentHomeTags.UNAVAILABLE,
+                            icon = Ionicon.AlertCircleOutline,
+                            title = null,
+                            body = statusMessage(status, profileRequired),
                             action = signInAction(status, actions, profileRequired),
                             modifier = Modifier.padding(top = barFoot),
                         )
@@ -598,7 +606,7 @@ private fun LeaveSurfaceDialogs(
 }
 
 /** What home's page shows under the bar. */
-private enum class HomePhase { Loading, Offline, Empty, List }
+private enum class HomePhase { Loading, Unavailable, Empty, List }
 
 /** How long the typing rests before the daemon is asked (the design's ~120 ms). */
 private const val SEARCH_DEBOUNCE_MS = 120L
@@ -633,6 +641,16 @@ private fun rememberAgentSearchWords(): AgentSearchWords {
             settings = resources.getString(R.string.settings_title),
             surfaceType = { type -> resources.getString(surfaceTypeName(type)) },
             artifactType = { type -> resources.getString(artifactTypeName(type)) },
+            task = resources.getString(R.string.new_work_task),
+            subtask = resources.getString(R.string.agent_page_subtask),
+            bot = resources.getString(R.string.new_work_bot),
+            chat = resources.getString(R.string.agent_search_kind_chat),
+            shared = resources.getString(R.string.agent_search_kind_shared),
+            done = resources.getString(R.string.todo_done),
+            agent = resources.getString(R.string.agent_search_by_agent),
+            notJoined = resources.getString(R.string.agent_search_not_joined),
+            taskNotJoined = resources.getString(R.string.agent_search_task_not_joined),
+            openTodos = { count -> resources.getQuantityString(R.plurals.agent_search_open_todos, count, count) },
         )
     }
 }
@@ -671,7 +689,7 @@ private fun rememberSearchEntries(actions: AgentHomeActions, endSearch: () -> Un
     val connect = stringResource(R.string.agent_search_connect_agent)
     val scan = stringResource(R.string.onboarding_scan_button)
     val openSettings = stringResource(R.string.agent_search_open_settings)
-    val index = agentSettingsIndex()
+    val index = agentSettingsIndex(projectsAvailable = actions.projectsAvailable, notificationsAvailable = actions.notificationsAvailable)
     return remember(actions, newTask, newTaskPicture, connect, scan, openSettings, index) {
         // happy-ios HomeViewController.quickActions (7a605f6ce). Connect and Scan both open the
         // scanner here: Android's one Add scanner takes a computer's, a terminal's or an agent's code.
@@ -731,15 +749,18 @@ private fun statusMessage(status: AgentLinkStatus, profileRequired: Boolean = fa
 }
 
 /**
- * The notice heading home's list: why the agent can't be reached for good,
- * the computer's refusal of something done here (iOS SyncEngine's
- * `notice`), or "The computer did not answer." while it doesn't (iOS's
- * `Strings.unanswered`); the title keeps the name meanwhile ([BarTitle]).
+ * The notice heading home's list: why the agent can't be reached until
+ * something is done, or the computer's refusal of something done here (iOS
+ * SyncEngine's `notice`). A link that is only on its way says so in the
+ * title alone ([BarTitle]).
  */
 @Composable
 private fun noticeMessage(status: AgentLinkStatus, profileRequired: Boolean, refusal: String?): String? =
     statusMessage(status, profileRequired) ?: refusal?.takeIf { it.isNotBlank() }?.let { LocalResources.current.refusalText(it) }
-        ?: if (status == AgentLinkStatus.Offline) stringResource(R.string.agent_home_unanswered) else null
+
+/** Kept away by something other than the network, which [statusMessage] says: the link waits on the person. */
+private val AgentLinkStatus.needsAction: Boolean
+    get() = this == AgentLinkStatus.Revoked || this == AgentLinkStatus.UpdateRequired || this == AgentLinkStatus.SignInRequired
 
 /** The notice row's motion, the rows' own ([agentHomeRows]). */
 private val BANNER_FADE_IN = tween<Float>(180)
@@ -928,6 +949,8 @@ private fun SignedInAgentHome(
             onOpenVaultItem = onOpenVaultItem,
             canCompose = canCompose,
             canAskChief = canAskChief,
+            projectsAvailable = !session.client.cloud,
+            notificationsAvailable = session.client.cloud,
         )
     }
     CompositionLocalProvider(LocalAgentPictures provides session.pictures) {
@@ -943,7 +966,10 @@ private fun SignedInAgentHome(
             preview = { row -> ConversationPreview(session, row, settings.userMessageBubbleColor) },
             listState = rememberAgentHomeListState(graph, id),
             searchSources = remember(session) {
-                { withContext(Dispatchers.IO) { AgentSearchSources.read(session.catalog.value, session.feed.value, session::cachedResource, session.intents.pending.value) } }
+                { read -> withContext(Dispatchers.IO) { AgentSearchSources.read(session.catalog.value, session.feed.value, { key -> session.cachedResource(key) ?: read[key] }, session.intents.pending.value) } }
+            },
+            searchReads = remember(session) {
+                { withContext(Dispatchers.IO) { AgentSearchSources.reads(session.feed.value, session::cachedResource) { path -> session.client.decode<JsonObject>("GET", path) } } }
             },
             search = remember(session) { { query -> session.search(query) } },
         )

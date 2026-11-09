@@ -90,9 +90,11 @@ accounts and servers v1, with v4's token lifetimes.
 
 - **Where.** "Connect to Happy Cloud" in the account switcher's menu (the
   list of accounts and servers, under Add) and in the scanner's and first
-  screen's ⋯ (`AccountAdding.connectToCloud`). Development and preview
-  builds only (`HappyCloud.isOffered`, from `AppVariant`): production shows
-  neither entry and `connectToCloud` does nothing there.
+  screen's ⋯ (`AccountAdding.connectToCloud`). The first screen also has
+  "Use Happy Cloud" above Start, with the same width and emphasis.
+  Development and preview builds only (`HappyCloud.isOffered`, from
+  `AppVariant`): production shows
+  none of these entries and `connectToCloud` does nothing there.
 - **Screens.** Every Happy Cloud step is a full-screen page in the
   onboarding's look (`CloudStageViewController`: the grain gradient, large
   title, one primary button at the bottom, no tables or alerts): Welcome,
@@ -436,7 +438,13 @@ ported from happy-agent-client's `happyLinks.ts`.
   agent's message one is drawn as a link and opens where
   `SettingsLinkPlace` says: `general` Settings, `account` Profile, `voice`
   the computer's Voice row, `servers` Happy Cloud's servers (Settings off
-  Happy Cloud); every other page opens
+  Happy Cloud). `providers` opens the native AI providers list on Cloud.
+  Its `add` chooser offers the server's ChatGPT and Claude sign-ins,
+  Claude setup tokens when enabled, and OpenAI, Anthropic and Grok API
+  keys. `providers/add/api-key?vendor=openai|anthropic|grok` opens the
+  secure key form. Every add link accepts `to=private|team`, subject to
+  the member's permissions. Bedrock setup remains on desktop.
+  Every other page opens
   `https://<name>.happybases.com/#/settings/<page>` in the system browser
   on a Happy Cloud server, and nothing elsewhere. Opening one only
   navigates. A malformed or blank-labelled settings link is its words.
