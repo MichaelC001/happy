@@ -27,20 +27,33 @@
  * the source; the noise texture behind randomR replaced by Paper's
  * proceduralHash21 over the same 100-cell period; fwidth, which AGSL lacks,
  * replaced by forward differences of the grain one pixel right and one down.
+ * The grain, which never moves, is worked out once per size into a bitmap
+ * (`grainField`) that every frame reads, as happy-ios's `grain_field` does.
  */
 package com.slopus.happy.ui.start
 
+import android.graphics.Bitmap
+import android.graphics.BitmapShader
+import android.graphics.Paint
+import android.graphics.Picture
 import android.graphics.RuntimeShader
+import android.graphics.Shader
 import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.withInfiniteAnimationFrameNanos
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -48,11 +61,19 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.slopus.happy.ui.components.rememberReduceMotion
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.max
 
 /** The background colour and the four colours Grain Gradient blends, in Paper's order. */
@@ -70,26 +91,37 @@ object GrainGradientTags {
 
 /**
  * Paper's Grain Gradient, "corners" shape, behind [modifier]'s bounds. It
- * moves at Paper's default speed while the screen is resumed, at most
- * [FRAME_NANOS] apart, and holds still while covered, in the background,
+ * moves at Paper's default speed while the screen is resumed, a frame on
+ * every one of the display's (120 a second on the Fold's and other
+ * high-rate screens, which `MaxRefreshRate` asks for, 60 elsewhere), as
+ * happy-ios's does, and holds still while covered, in the background,
  * or with animations removed (the first frame then, as Paper's frame 0).
- * Before Android 13 there is no runtime shader: a still gradient in the
- * same colours stands in.
+ * Each frame draws only the moving corners over the grain, worked out once
+ * for its size ([GrainCache], shared by every gradient of that size, so the
+ * Happy Cloud welcome over Start draws from its first frame); where it
+ * can't be, frames work the grain out themselves. Nothing of it is compiled
+ * or worked out on the main thread: until it is ready (the app warms it
+ * before the first screen, [GrainCache.warm]) the still gradient stands in
+ * and the moving one fades in over it. Before Android 13 there is no
+ * runtime shader: the still gradient stays.
  */
 @Composable
 fun GrainGradient(palette: GrainPalette, modifier: Modifier = Modifier) {
-    val shader = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) rememberGrainShader() else null
-    if (shader != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        ShaderGrainGradient(shader, palette, modifier)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && GrainCache.available) {
+        ShaderGrainGradient(palette, modifier)
     } else {
         Box(modifier.testTag(GrainGradientTags.FALLBACK).drawBehind { drawFallback(palette) })
     }
 }
 
+/** The grain worked out for one size, read pixel for pixel. */
+internal class GrainField(val size: IntSize, val bitmap: Bitmap, val shader: BitmapShader)
+
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 @Composable
-private fun ShaderGrainGradient(shader: RuntimeShader, palette: GrainPalette, modifier: Modifier) {
-    val time = remember { mutableFloatStateOf(0f) }
+private fun ShaderGrainGradient(palette: GrainPalette, modifier: Modifier) {
+    // Nanoseconds moved, summed whole so the clock's rate holds however long it runs.
+    val elapsed = remember { mutableLongStateOf(0L) }
     val reduceMotion = rememberReduceMotion()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(lifecycle, reduceMotion) {
@@ -99,46 +131,161 @@ private fun ShaderGrainGradient(shader: RuntimeShader, palette: GrainPalette, mo
             var last = withInfiniteAnimationFrameNanos { it }
             while (true) {
                 withInfiniteAnimationFrameNanos { now ->
-                    if (now - last >= FRAME_NANOS) {
-                        time.floatValue += (now - last) / 1_000_000_000f
-                        last = now
-                    }
+                    elapsed.longValue += now - last
+                    last = now
                 }
             }
         }
     }
+    DisposableEffect(Unit) {
+        GrainCache.hold()
+        onDispose { GrainCache.release() }
+    }
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    var programs by remember { mutableStateOf(GrainCache.programsNow) }
+    // The last size's field until this one's is worked out: a screen the size of the last one has it at once.
+    var field by remember { mutableStateOf(GrainCache.fieldNow) }
+    var whole by remember { mutableStateOf(GrainCache.wholeNow) }
+    LaunchedEffect(Unit) {
+        if (programs == null) programs = GrainCache.programs()
+    }
+    LaunchedEffect(size) {
+        if (size.width > 0 && size.height > 0 && field?.size != size) {
+            field = GrainCache.field(size)
+            if (field == null) whole = GrainCache.whole()
+        }
+    }
+    val ready = programs != null && (field != null || whole != null)
+    // Shown at once when ready for the first frame; otherwise faded in over the still gradient.
+    val shown = remember { Animatable(if (ready) 1f else 0f) }
+    LaunchedEffect(ready) {
+        if (!ready) return@LaunchedEffect
+        if (reduceMotion) shown.snapTo(1f) else shown.animateTo(1f, tween(FADE_MILLIS))
+    }
     Box(
-        modifier.testTag(GrainGradientTags.SHADER).drawBehind {
-            shader.setFloatUniform("u_resolution", size.width, size.height)
-            shader.setFloatUniform("u_time", time.floatValue)
-            shader.setColorUniform("u_colorBack", palette.back.toArgb())
-            palette.colors.forEachIndexed { i, color -> shader.setColorUniform("u_color$i", color.toArgb()) }
-            drawRect(ShaderBrush(shader))
+        modifier.testTag(GrainGradientTags.SHADER).onSizeChanged { size = it }.drawBehind {
+            val sized = field?.takeIf { it.size.width.toFloat() == this.size.width && it.size.height.toFloat() == this.size.height }
+            val shader = programs?.let { if (sized != null) it.corners.also { c -> c.setInputBuffer("u_field", sized.shader) } else whole }
+            val alpha = if (shader == null) 0f else shown.value
+            if (alpha < 1f) drawFallback(palette)
+            if (shader != null && alpha > 0f) {
+                shader.setFloatUniform("u_resolution", this.size.width, this.size.height)
+                shader.setFloatUniform("u_time", (elapsed.longValue / 1_000_000_000.0).toFloat())
+                shader.setColorUniform("u_colorBack", palette.back.toArgb())
+                palette.colors.forEachIndexed { i, color -> shader.setColorUniform("u_color$i", color.toArgb()) }
+                drawRect(ShaderBrush(shader), alpha = alpha)
+            }
         },
     )
 }
 
-/**
- * About 15 frames a second: Paper's default speed moves slowly enough, and
- * each frame is a full-screen shader the GPU shares with the screen's own
- * motion (a push, a swipe back). Between frames nothing is drawn.
- */
-private const val FRAME_NANOS = 66_000_000L
+private const val FADE_MILLIS = 300
 
+/**
+ * What every Grain Gradient shares, made off the main thread one thing at
+ * a time: its programs, compiled once for the app (AGSL compiles as a
+ * [RuntimeShader] is made, which on the main thread held the first frame of
+ * every screen with a gradient), and the grain for the last size asked.
+ * The grain, 11 MB on the Fold's cover screen and 17 on its inner one, is
+ * let go once no gradient is composed. Each program is one object every
+ * gradient sets its uniforms on just before it draws (a draw takes the
+ * shader as it is then), on the main thread.
+ */
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-@Composable
-private fun rememberGrainShader(): RuntimeShader? = remember {
-    try {
-        RuntimeShader(GRAIN_GRADIENT_AGSL)
+internal object GrainCache {
+    class Programs(val corners: RuntimeShader, val field: RuntimeShader)
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val worker = Dispatchers.Default.limitedParallelism(1)
+    private val scope = CoroutineScope(SupervisorJob() + worker)
+
+    @Volatile var programsNow: Programs? = null
+        private set
+    @Volatile var fieldNow: GrainField? = null
+        private set
+    @Volatile var wholeNow: RuntimeShader? = null
+        private set
+    @Volatile private var failed = false
+    @Volatile private var fieldFailed = false
+
+    /** Gradients composed now; main thread only. */
+    private var holders = 0
+
+    /** False once the programs are known not to compile here: the still gradient, then. */
+    val available: Boolean get() = !failed
+
+    suspend fun programs(): Programs? = programsNow ?: if (failed) null else withContext(worker) { compile() }
+
+    /** The grain for [size]: the last one when it is that size, else worked out now; null where it can't be. */
+    suspend fun field(size: IntSize): GrainField? = fieldNow?.takeIf { it.size == size } ?: if (failed || fieldFailed) null else withContext(worker) {
+        fieldNow?.takeIf { it.size == size } ?: compile()?.let { grainField(it.field, size) }?.also { fieldNow = it } ?: run { fieldFailed = true; null }
+    }
+
+    /** The whole shader, for where the grain can't be worked out ahead. */
+    suspend fun whole(): RuntimeShader? = wholeNow ?: if (failed) null else withContext(worker) {
+        wholeNow ?: build("whole") { RuntimeShader(GRAIN_GRADIENT_AGSL) }?.also { wholeNow = it }
+    }
+
+    /** The programs and the grain for [size], made now off the main thread: for a screen about to show a gradient. */
+    fun warm(size: IntSize?) {
+        scope.launch {
+            compile()
+            if (size != null && size.width > 0 && size.height > 0) field(size)
+        }
+    }
+
+    fun hold() {
+        holders++
+    }
+
+    fun release() {
+        if (--holders == 0) fieldNow = null
+    }
+
+    private fun compile(): Programs? = programsNow ?: if (failed) null else build("programs") {
+        Programs(RuntimeShader(GRAIN_CORNERS_AGSL), RuntimeShader(GRAIN_FIELD_AGSL))
+    }.also { if (it == null) failed = true else programsNow = it }
+
+    private fun <T> build(what: String, make: () -> T): T? = try {
+        make()
     } catch (e: RuntimeException) {
         // A device whose compiler refuses the source gets the still gradient.
-        Log.w("GrainGradient", "Grain Gradient shader unavailable", e)
+        Log.w("GrainGradient", "Grain Gradient $what unavailable", e)
         null
     } catch (e: LinkageError) {
         // Robolectric without native graphics.
         null
     }
 }
+
+/**
+ * The grain at each pixel of [size] and fwidth of it, drawn once by the
+ * GPU into a bitmap ([GRAIN_FIELD_AGSL]'s packing, [program] made from it);
+ * null where it can't be. Read raw ([RuntimeShader.setInputBuffer]): no
+ * colour conversion, no filtering. The draw runs on the app's render
+ * thread, as long as one full frame of the whole shader.
+ */
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+internal fun grainField(program: RuntimeShader, size: IntSize): GrainField? = try {
+    program.setFloatUniform("u_resolution", size.width.toFloat(), size.height.toFloat())
+    // A bitmap's own canvas is software, which has no runtime shaders: the picture is drawn by the GPU renderer.
+    val picture = Picture()
+    picture.beginRecording(size.width, size.height)
+        .drawRect(0f, 0f, size.width.toFloat(), size.height.toFloat(), Paint().also { it.shader = program })
+    picture.endRecording()
+    val bitmap = Bitmap.createBitmap(picture, size.width, size.height, Bitmap.Config.HARDWARE)
+    GrainField(size, bitmap, BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).also { it.filterMode = BitmapShader.FILTER_MODE_NEAREST })
+} catch (e: RuntimeException) {
+    Log.w("GrainGradient", "Grain field unavailable", e)
+    null
+} catch (e: LinkageError) {
+    // Robolectric without native graphics.
+    null
+}
+
+/** [grainField] with a program of its own: for checks. */
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+internal fun grainField(size: IntSize): GrainField? = grainField(RuntimeShader(GRAIN_FIELD_AGSL), size)
 
 /** The still stand-in: the background with each colour glowing in from a corner, as "corners" does. */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawFallback(palette: GrainPalette) {
@@ -155,24 +302,22 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawFallback(palett
     }
 }
 
-/**
- * Paper's grain-gradient.ts fragment shader for the "corners" shape (4),
- * with Paper's v_objectUV for fit contain worked out per pixel.
- */
-internal const val GRAIN_GRADIENT_AGSL = """
-uniform float2 u_resolution;
-uniform float u_time;
-layout(color) uniform half4 u_colorBack;
-layout(color) uniform half4 u_color0;
-layout(color) uniform half4 u_color1;
-layout(color) uniform half4 u_color2;
-layout(color) uniform half4 u_color3;
-
+private const val GRAIN_CONSTANTS = """
 const float COUNT = 4.;
 const float SOFTNESS = .5;
 const float INTENSITY = .5;
 const float NOISE = .25;
 
+// v_objectUV for fit contain: a square box the size of the shorter side,
+// centred, y up.
+float2 objectUv(float2 fragCoord, float2 resolution) {
+  float2 uv = fragCoord / resolution - .5;
+  uv.y = -uv.y;
+  return uv * resolution / min(resolution.x, resolution.y);
+}
+"""
+
+private const val GRAIN_NOISE = """
 float3 permute(float3 x) { return mod(((x * 34.0) + 1.0) * x, 289.0); }
 
 float snoise(float2 v) {
@@ -248,22 +393,35 @@ float grain(float2 g, float3 slow) {
   return INTENSITY * 2. / COUNT * (grainDist + .5) + NOISE * 10. / COUNT * noise;
 }
 
+// The grain at a pixel, and fwidth(shape): the grain one pixel right and
+// one pixel down (y is up in grain_uv); the corners themselves barely
+// change over a pixel. Neither moves.
+float2 grainAt(float2 fragCoord, float2 resolution) {
+  float2 grain_uv = objectUv(fragCoord, resolution) * min(resolution.x, resolution.y) * .7;
+  float3 slow = float3(fbm(.002 * grain_uv + 10.), fbm(.003 * grain_uv), fbm(.001 * grain_uv));
+  float added = grain(grain_uv, slow);
+  float aa = abs(grain(grain_uv + float2(.7, 0.), slow) - added) + abs(grain(grain_uv - float2(0., .7), slow) - added);
+  return float2(added, aa);
+}
+"""
+
+private const val GRAIN_PAINT = """
+uniform float2 u_resolution;
+uniform float u_time;
+layout(color) uniform half4 u_colorBack;
+layout(color) uniform half4 u_color0;
+layout(color) uniform half4 u_color1;
+layout(color) uniform half4 u_color2;
+layout(color) uniform half4 u_color3;
+$GRAIN_CONSTANTS
 float band(float mixer, float aa) {
   return smoothstep(.5 - .5 * SOFTNESS - aa, .5 + .5 * SOFTNESS + aa, clamp(mixer, 0., 1.));
 }
 
-half4 main(float2 fragCoord) {
+// The moving corners at a pixel, before the grain.
+float corners(float2 fragCoord) {
   float t = .1 * (u_time + 7.);
-
-  // v_objectUV for fit contain: a square box the size of the shorter side,
-  // centred, y up.
-  float box = min(u_resolution.x, u_resolution.y);
-  float2 uv = fragCoord / u_resolution - .5;
-  uv.y = -uv.y;
-  float2 shape_uv = uv * u_resolution / box;
-  float2 grain_uv = shape_uv * box * .7;
-
-  // Corners
+  float2 shape_uv = objectUv(fragCoord, u_resolution);
   shape_uv *= .6;
   float2 outer = float2(.5);
   float2 bl = smoothstep(float2(0.), outer, shape_uv + float2(.1 + .1 * sin(3. * t), .2 - .1 * sin(5.25 * t)));
@@ -273,16 +431,11 @@ half4 main(float2 fragCoord) {
   bl = smoothstep(float2(0.), outer, shape_uv + float2(.1 + .1 * sin(3. * t), .2 - .1 * cos(5.25 * t)));
   tr = smoothstep(float2(0.), outer, 1. - shape_uv);
   shape -= bl.x * bl.y * tr.x * tr.y;
-  shape = 1. - smoothstep(0., 1., shape);
+  return 1. - smoothstep(0., 1., shape);
+}
 
-  float3 slow = float3(fbm(.002 * grain_uv + 10.), fbm(.003 * grain_uv), fbm(.001 * grain_uv));
-  float added = grain(grain_uv, slow);
-  shape += added;
-
-  // fwidth(shape): the grain one pixel right and one pixel down (y is up
-  // in grain_uv); the corners themselves barely change over a pixel.
-  float aa = abs(grain(grain_uv + float2(.7, 0.), slow) - added) + abs(grain(grain_uv - float2(0., .7), slow) - added);
-
+// The colour of [shape] with its grain added, edges softened by [aa].
+half4 paint(float shape, float aa) {
   shape = clamp(shape - .5 / COUNT, 0., 1.);
   float totalShape = smoothstep(0., SOFTNESS + 2. * aa, clamp(shape * COUNT, 0., 1.));
   float mixer = shape * (COUNT - 1.);
@@ -294,5 +447,53 @@ half4 main(float2 fragCoord) {
 
   half3 color = gradient.rgb * totalShape + u_colorBack.rgb * (1. - totalShape);
   return half4(color, 1.);
+}
+"""
+
+/**
+ * Paper's grain-gradient.ts fragment shader for the "corners" shape (4),
+ * with Paper's v_objectUV for fit contain worked out per pixel: the grain
+ * worked out on every frame, for the frames before the field is ready.
+ */
+internal const val GRAIN_GRADIENT_AGSL = """
+$GRAIN_PAINT
+$GRAIN_NOISE
+half4 main(float2 fragCoord) {
+  float2 grain = grainAt(fragCoord, u_resolution);
+  return paint(corners(fragCoord) + grain.x, grain.y);
+}
+"""
+
+/**
+ * The grain and its fwidth packed into an opaque 8-bit pixel, 12 bits each,
+ * read back exactly: the grain, from -0.5 to 1 (Paper's reaches -0.33 to
+ * 1), in red and green's high half; fwidth, from 0 to 2, in green's low
+ * half and blue.
+ */
+internal const val GRAIN_FIELD_AGSL = """
+uniform float2 u_resolution;
+$GRAIN_CONSTANTS
+$GRAIN_NOISE
+half4 main(float2 fragCoord) {
+  float2 grain = grainAt(fragCoord, u_resolution);
+  float g = floor(clamp((grain.x + .5) / 1.5, 0., 1.) * 4095. + .5);
+  float a = floor(clamp(grain.y / 2., 0., 1.) * 4095. + .5);
+  float gHigh = floor(g / 16.);
+  float aHigh = floor(a / 256.);
+  return half4(gHigh / 255., ((g - gHigh * 16.) * 16. + aHigh) / 255., (a - aHigh * 256.) / 255., 1.);
+}
+"""
+
+/** [GRAIN_GRADIENT_AGSL] with the grain read from the field ([GRAIN_FIELD_AGSL]) pixel for pixel. */
+internal const val GRAIN_CORNERS_AGSL = """
+$GRAIN_PAINT
+uniform shader u_field;
+
+half4 main(float2 fragCoord) {
+  float3 bytes = floor(float3(u_field.eval(fragCoord).rgb) * 255. + .5);
+  float middle = floor(bytes.g / 16.);
+  float grain = (bytes.r * 16. + middle) / 4095. * 1.5 - .5;
+  float aa = ((bytes.g - middle * 16.) * 256. + bytes.b) / 4095. * 2.;
+  return paint(corners(fragCoord) + grain, aa);
 }
 """
