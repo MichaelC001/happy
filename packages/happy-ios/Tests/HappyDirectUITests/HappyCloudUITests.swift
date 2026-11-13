@@ -65,8 +65,8 @@ final class HappyCloudUITests: XCTestCase {
     /// Happy Cloud), the ten taps and the test account's form, to its
     /// servers. The password is pasted, never typed: XCTest's log keeps
     /// whatever is typed.
-    private func signInWithTestAccount(login: String, password: String) {
-        openCloud(capturing: "01-before")
+    private func signInWithTestAccount(login: String, password: String, openingCloud: Bool = true) {
+        if openingCloud { openCloud(capturing: "01-before") }
 
         // The Happy mark over the first slide's title, which says nothing to
         // VoiceOver: tapped where it is drawn.
@@ -246,9 +246,9 @@ final class HappyCloudUITests: XCTestCase {
         let gear = app.buttons["settings"].firstMatch
         require(gear.waitForExistence(timeout: 5), "no settings on the home")
         gear.tap()
-        let row = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'AI providers'")).firstMatch
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Inference'")).firstMatch
         for _ in 0..<4 where !row.isHittable { app.swipeUp() }
-        require(row.waitForExistence(timeout: 10), "no AI providers in Settings")
+        require(row.waitForExistence(timeout: 10), "no Inference in Settings")
         capture("40-settings")
         row.tap()
         let free = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Happy (free)'")).firstMatch
@@ -634,6 +634,205 @@ final class HappyCloudUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.5)
         }
         return nil
+    }
+
+    /// An invite link (`TEST_RUNNER_INVITE_URL`) opened from Notes opens
+    /// the app on Happy Cloud's welcome; the test account signs in, the
+    /// invite shows its server, and Join lands on that server's home. The
+    /// first launch points the app at the deployment in `CLOUD_ACCOUNTS`,
+    /// `CLOUD_BASE`, `CLOUD_WEB` and `CLOUD_INVITE`, kept for the launch
+    /// the link makes. Then each link in `INVITE_STATES`
+    /// (`name=url,name=url`, `mismatch` joined to see its refusal) opens on
+    /// the same layout: the title, the status line and the button sit where
+    /// they sat when the first invite was ready. Every step is filmed.
+    func testInviteLinkOpensTheAppAndJoins() throws {
+        guard let link = env["INVITE_URL"].flatMap(URL.init(string:)), let login = env["QA_LOGIN"], let password = env["QA_PASSWORD"],
+              let accounts = env["CLOUD_ACCOUNTS"], let base = env["CLOUD_BASE"], let web = env["CLOUD_WEB"], let invite = env["CLOUD_INVITE"]
+        else { throw XCTSkip("no invite run") }
+        app.launchArguments = ["-HappyCloudAccounts", accounts, "-HappyCloudBase", base, "-HappyCloudWeb", web, "-HappyCloudInvite", invite]
+        app.launch()
+        require(first([element("account-switcher"), app.buttons["start-cloud"]], timeout: 30) != nil, "the app didn't start")
+        app.terminate()
+
+        openFromNotes(link)
+        let title = app.staticTexts["Happy Cloud"]
+        film("a-link-opens", seconds: 40) { self.app.state == .runningForeground && title.exists }
+        require(title.exists, "the link didn't open Happy Cloud's welcome in the app")
+        capture("i3-opened-signed-out")
+        signInWithTestAccount(login: login, password: password, openingCloud: false)
+
+        let join = element("cloud-invite-join")
+        film("b-invite-loads", seconds: 30) { join.exists && join.isEnabled }
+        require(join.isEnabled, "the invite never loaded")
+        Thread.sleep(forTimeInterval: 1)
+        capture("i4-invite")
+        tree("i4-invite", app)
+        let ready = inviteFrames()
+        report("ready", ready)
+        join.tap()
+
+        let name = element("cloud-profile-name")
+        let switcher = element("account-switcher")
+        film("c-joining", seconds: 90) { name.exists || switcher.exists }
+        if name.exists {
+            capture("i5-profile")
+            name.tap()
+            name.typeText("QA Peer")
+            element("cloud-profile-continue").tap()
+        }
+        film("d-lands", seconds: 90) { switcher.exists }
+        require(switcher.exists, "Join didn't land on the server's home")
+        Thread.sleep(forTimeInterval: 4)
+        capture("i6-server-home")
+
+        for pair in (env["INVITE_STATES"] ?? "").split(separator: ",") {
+            let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let url = URL(string: parts[1]) else { continue }
+            let state = parts[0]
+            XCUIDevice.shared.system.open(url)
+            let status = element("cloud-invite-status")
+            film("e-\(state)", seconds: 30) { status.exists && !status.label.isEmpty }
+            require(status.exists, "\(state) didn't open the invite")
+            if state == "mismatch" {
+                film("e-\(state)-ready", seconds: 20) { join.isEnabled }
+                join.tap()
+                film("e-\(state)-joined", seconds: 20) { status.label.contains("Sign in with that email") }
+            }
+            Thread.sleep(forTimeInterval: 1)
+            capture("i7-\(state)")
+            let frames = inviteFrames()
+            report(state, frames)
+            XCTAssertEqual(frames, ready, "\(state) moved the title, the status line or the button")
+            if state == "expired" {
+                // Show My Servers: the servers list, Bootstrap a new one a button under it.
+                join.tap()
+                film("f-servers", seconds: 20) { self.element("cloud-servers").exists }
+                Thread.sleep(forTimeInterval: 2)
+                capture("i8-servers")
+            }
+            let close = app.buttons["cloud-close"]
+            if close.exists { close.tap() }
+            Thread.sleep(forTimeInterval: 1.5)
+        }
+    }
+
+    /// An account with no server bootstraps its first, which connects and
+    /// lands on its home; then Happy Cloud, from the switcher, and an
+    /// invite link both open still signed in: the servers list and Join,
+    /// not the welcome. Runs with `TEST_RUNNER_FIRST_LOGIN`/`_PASSWORD`
+    /// (an account with no server), `CLOUD_*` and `INVITE_URL`.
+    func testAFirstBootstrapKeepsTheAccountSignedIn() throws {
+        guard let login = env["FIRST_LOGIN"], let password = env["FIRST_PASSWORD"], let link = env["INVITE_URL"].flatMap(URL.init(string:)),
+              let accounts = env["CLOUD_ACCOUNTS"], let base = env["CLOUD_BASE"], let web = env["CLOUD_WEB"], let invite = env["CLOUD_INVITE"]
+        else { throw XCTSkip("no first-bootstrap run") }
+        app.launchArguments = ["-HappyCloudAccounts", accounts, "-HappyCloudBase", base, "-HappyCloudWeb", web, "-HappyCloudInvite", invite]
+        app.launch()
+        signInWithTestAccount(login: login, password: password)
+        let name = element("cloud-create-name")
+        film("a-first-bootstrap", seconds: 30) { name.exists }
+        require(name.exists, "no first Bootstrap for an account with no server")
+        capture("b1-first-bootstrap")
+        name.tap()
+        let server = "ios-first-\(Int(Date().timeIntervalSince1970) % 1_000_000)"
+        name.typeText(server)
+        let save = element("cloud-create-save")
+        film("b-name", seconds: 15) { save.isEnabled }
+        // The keyboard has carried the button up: tapped where it rests.
+        Thread.sleep(forTimeInterval: 1.5)
+        save.tap()
+        let profile = element("cloud-profile-name")
+        let switcher = element("account-switcher")
+        if !element("cloud-connecting").waitForExistence(timeout: 5), name.exists, save.isEnabled { save.tap() }
+        film("c-connecting", seconds: 90) { profile.exists || switcher.exists }
+        if profile.exists {
+            profile.tap()
+            profile.typeText("QA First")
+            element("cloud-profile-continue").tap()
+        }
+        film("d-lands", seconds: 90) { switcher.exists }
+        require(switcher.exists, "Bootstrap didn't land on @\(server)'s home")
+        Thread.sleep(forTimeInterval: 3)
+        capture("b2-server-home")
+
+        switcher.tap()
+        let cloud = element("account-cloud")
+        require(cloud.waitForExistence(timeout: 5), "no Connect to Happy Cloud in the switcher")
+        cloud.tap()
+        let servers = element("cloud-servers")
+        let welcome = element("cloud-welcome")
+        film("e-cloud-again", seconds: 20) { servers.exists || welcome.exists }
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("b3-cloud-again")
+        XCTAssertTrue(servers.exists, "Happy Cloud again opened the welcome: the first Bootstrap signed the account out")
+        let close = app.buttons["cloud-close"]
+        if close.exists { close.tap() }
+        Thread.sleep(forTimeInterval: 1.5)
+
+        XCUIDevice.shared.system.open(link)
+        let join = element("cloud-invite-join")
+        film("f-invite", seconds: 30) { join.exists || welcome.exists }
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("b4-invite-link")
+        XCTAssertTrue(join.exists, "an invite link opened the welcome: the first Bootstrap signed the account out")
+    }
+
+    /// The invite screen's title, status line and button, where they are.
+    private func inviteFrames() -> [CGRect] {
+        [element("cloud-invite-title").frame, element("cloud-invite-status").frame, element("cloud-invite-join").frame]
+    }
+
+    private func report(_ state: String, _ frames: [CGRect]) {
+        let attachment = XCTAttachment(string: "\(state): title \(frames[0]) status \(frames[1]) button \(frames[2])")
+        attachment.name = "frames-\(state)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Screenshots back to back, named `film-<scene>-<n>`, until `done` or
+    /// `seconds` pass: the frames of a recording.
+    private func film(_ scene: String, seconds: TimeInterval = 20, until done: () -> Bool) {
+        let deadline = Date().addingTimeInterval(seconds)
+        var frame = 0
+        repeat {
+            let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            attachment.name = String(format: "film-%@-%03d", scene, frame)
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            frame += 1
+            if !done() { Thread.sleep(forTimeInterval: 0.25) }
+        } while !done() && Date() < deadline
+    }
+
+    /// Writes `link` in a new note and taps it there, as a person would
+    /// open a link they were sent. A simulator has no Notes:
+    /// `OPEN_WITH=system` opens it as the system opens a tapped link.
+    private func openFromNotes(_ link: URL) {
+        if env["OPEN_WITH"] == "system" {
+            // A fresh install's association is fetched in the background:
+            // until it is in, the link opens Safari.
+            for _ in 0..<6 {
+                XCUIDevice.shared.system.open(link)
+                if app.wait(for: .runningForeground, timeout: 8) { return }
+                capture("i2-opened-elsewhere")
+                Thread.sleep(forTimeInterval: 10)
+            }
+            return
+        }
+        let notes = XCUIApplication(bundleIdentifier: "com.apple.mobilenotes")
+        notes.launch()
+        Thread.sleep(forTimeInterval: 2)
+        let compose = notes.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'new note' OR identifier CONTAINS[c] 'compose'")).firstMatch
+        if compose.waitForExistence(timeout: 10) { compose.tap() } else { capture("i1-notes-no-compose"); tree("i1-notes", notes) }
+        Thread.sleep(forTimeInterval: 1.5)
+        notes.typeText(link.absoluteString + "\n")
+        let done = notes.buttons["Done"].firstMatch
+        if done.waitForExistence(timeout: 5) { done.tap() }
+        Thread.sleep(forTimeInterval: 2)
+        capture("i1-note")
+        tree("i1-note", notes)
+        let tappable = notes.links.firstMatch
+        require(tappable.waitForExistence(timeout: 10), "the note's link isn't a link")
+        tappable.tap()
     }
 
     func testConnectSignUpAndTalkToAnAgent() throws {

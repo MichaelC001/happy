@@ -40,6 +40,9 @@ public enum StateScene: String, CaseIterable, Sendable {
     /// Nothing made yet where what agents make is kept: the Artifacts list
     /// with none (a 🎟️ sticker; `PROVENANCE.md`).
     case tickets
+    /// A task about to be made: over new work's Task (a 🪄 sticker;
+    /// `PROVENANCE.md`). A bot stands under the `robot`.
+    case magicWand = "magic-wand"
     /// Happy Cloud's welcome (desktop's CLOUD_SLIDES): permissions, and its
     /// source shared with those who review it.
     case closedLock = "closed-lock"
@@ -49,6 +52,14 @@ public enum StateScene: String, CaseIterable, Sendable {
     /// lock.
     case cloudVariation = "cloud-variation"
     case tree
+
+    /// Whether it rests on its first frame rather than its last: the magic
+    /// wand, a loop whose ends are the same still wand, so a tap plays its
+    /// whole spell from the start. Such a scene plays only when asked, from
+    /// the start to the end once, and then shows its first frame again.
+    var restsOnFirstFrame: Bool {
+        self == .magicWand
+    }
 }
 
 /// One state picture in a fixed square, drawn the way desktop draws it
@@ -57,7 +68,9 @@ public enum StateScene: String, CaseIterable, Sendable {
 /// It never loops; this is the rule for every animated emoji and sticker
 /// in the app, so any new one is a scene drawn here. The scene plays once when the state it illustrates
 /// appears and then holds its last frame, which for every animation is the
-/// pose it was drawn to return to, so the held picture is worth holding.
+/// pose it was drawn to return to, so the held picture is worth holding. A
+/// scene whose last frame isn't that pose rests on its first instead
+/// (`StateScene.restsOnFirstFrame`), and moves only when asked.
 /// After that it moves only when a reader asks: a tap, or the accessibility
 /// action. A replay is refused while one is running, so a repeated tap
 /// cannot turn "again" into a loop.
@@ -97,12 +110,14 @@ public final class StateSceneView: UIView {
     public var scene: StateScene {
         didSet {
             guard scene != oldValue else { return }
-            load()
+            load(switching: true)
         }
     }
 
     private let animationView: LottieAnimationView
     private let play: Play
+    /// Drawn in the first frame it is on screen (`init(immediate:)`).
+    private let immediate: Bool
     /// Only the main actor touches this; it is `nonisolated(unsafe)` so
     /// that `deinit` can cancel without being an isolated deinit, which on
     /// 26.3 is the shape behind the malloc abort the Watch screens hit.
@@ -125,10 +140,15 @@ public final class StateSceneView: UIView {
         didSet { if !waits { attach() } }
     }
 
-    public init(scene: StateScene, size: CGFloat, play: Play = .onAppear, replayLabel: String) {
+    /// `immediate`: its picture is there in the very frame it first goes on
+    /// screen, as new work's robot and magic wand are. A scene already
+    /// read (`preload`) is put up at once; one not yet read is read here, on
+    /// the main thread, rather than leave a blank frame while it arrives.
+    public init(scene: StateScene, size: CGFloat, play: Play = .onAppear, replayLabel: String, immediate: Bool = false) {
         self.scene = scene
         self.sceneSize = size
         self.play = play
+        self.immediate = immediate
         animationView = LottieAnimationView(configuration: LottieConfiguration(renderingEngine: .coreAnimation))
         super.init(frame: CGRect(x: 0, y: 0, width: size, height: size))
         animationView.contentMode = .scaleAspectFit
@@ -175,7 +195,9 @@ public final class StateSceneView: UIView {
 
     // MARK: Loading
 
-    private func load() {
+    /// `switching`: from one scene to another on screen, where one already
+    /// read is shown at once rather than a blank frame while it arrives.
+    private func load(switching: Bool = false) {
         loading?.cancel()
         animationView.stop()
         animationView.animation = nil
@@ -183,6 +205,12 @@ public final class StateSceneView: UIView {
         isPlaying = false
         hasPlayed = false
         let scene = scene
+        if immediate || switching, let animation = immediate ? Self.read(scene) : Self.cache.object(forKey: scene.rawValue as NSString) {
+            loading = nil
+            pending = animation
+            attach()
+            return
+        }
         loading = Task { [weak self] in
             let animation = await Task.detached(priority: .userInitiated) { Self.read(scene) }.value
             guard let self, !Task.isCancelled, self.scene == scene, let animation else { return }
@@ -202,6 +230,20 @@ public final class StateSceneView: UIView {
     /// Each scene read once: Lottie's models are immutable, so every view
     /// showing a scene, now or later, shares one.
     private nonisolated(unsafe) static let cache = NSCache<NSString, LottieAnimation>()
+
+    /// Forgets every scene read, as at launch. Tests start cold with this.
+    static func forgetRead() {
+        cache.removeAllObjects()
+    }
+
+    /// Reads `scenes` off the main thread ahead of need, from app launch, so
+    /// a view made `immediate` finds them read and costs the main thread
+    /// nothing.
+    public static func preload(_ scenes: [StateScene]) {
+        Task.detached(priority: .utility) {
+            for scene in scenes { _ = read(scene) }
+        }
+    }
 
     /// The scene's bytes, read and decoded off the main thread. A file that
     /// is missing or will not decode leaves the view empty, on purpose.
@@ -223,7 +265,23 @@ public final class StateSceneView: UIView {
     public func replay() {
         guard !UIAccessibility.isReduceMotionEnabled, animationView.animation != nil, !isPlaying else { return }
         animationView.currentProgress = 0
-        start()
+        guard scene.restsOnFirstFrame else {
+            start()
+            return
+        }
+        // Once through, then its first frame again.
+        hasPlayed = true
+        isPlaying = true
+        animationView.play(fromProgress: 0, toProgress: 1, loopMode: .playOnce) { [weak self] finished in
+            guard let self, finished, self.isPlaying else { return }
+            self.isPlaying = false
+            self.hold()
+        }
+    }
+
+    /// The frame it holds: its first, or its last.
+    private func hold() {
+        animationView.currentProgress = scene.restsOnFirstFrame ? 0 : 1
     }
 
     /// Hears every tap, motion reduced or not.
@@ -282,7 +340,7 @@ public final class StateSceneView: UIView {
             // The pose it was drawn to return to, held, for good.
             isPlaying = false
             animationView.pause()
-            animationView.currentProgress = 1
+            hold()
             return
         }
         guard isVisible else {
@@ -295,10 +353,15 @@ public final class StateSceneView: UIView {
             return
         }
         guard !isPlaying else { return }
+        if scene.restsOnFirstFrame {
+            // It moves only when asked; a play cut short goes back to rest.
+            if animationView.currentProgress != 0 { hold() }
+            return
+        }
         switch play {
         case .onDemand where !hasPlayed:
             // Never played on its own: the held frame from the start.
-            animationView.currentProgress = 1
+            hold()
         case .onDemand, .onAppear:
             // Mid-play and interrupted, or appearing for the first time.
             guard !hasPlayed || animationView.currentProgress < 1 else { return }

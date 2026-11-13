@@ -26,6 +26,8 @@ public final class AgentClient: Sendable {
     public let signsIn: Bool
     /// How the artifact pages read through it ask to be shown.
     public let pageModes = ArtifactPageModes()
+    /// Whether the computer takes this device's environment, and what it was last told.
+    public let environment = UserEnvironmentReports()
 
     init(transport: any AgentTransport, token: String, signsIn: Bool = false) {
         self.transport = transport
@@ -57,14 +59,11 @@ public final class AgentClient: Sendable {
         let body = try raw ?? json.map { try encoder.encode($0) }
         let response: HTTP1Response
         if let sent, let body, headers.isEmpty {
-            // An upload whose progress is heard: its answer holds no chat UI.
+            // An upload whose progress is heard.
             response = try await transport.send(method: method, path: path, credential: token, body: body, category: category, sent: sent)
             if response.status == 401 { throw AgentClientError.revoked }
             return try Self.checked(response)
         }
-        // Chat UI as itself, not its fallback text, on every other request.
-        var headers = headers
-        headers[ChatUi.protocolHeader] = String(ChatUi.protocolVersion)
         if let sent, let body {
             response = try await transport.send(method: method, path: path, credential: token, body: body, headers: headers, category: category, sent: sent)
         } else {
@@ -99,6 +98,25 @@ public final class AgentClient: Sendable {
 
     public func health() async throws -> AgentWire.Health {
         try await decode(AgentWire.Health.self, "GET", "/v0/health")
+    }
+
+    /// Tells the computer this device's environment (`PUT /v0/environment`),
+    /// when its health says it takes one and it changed since it was last
+    /// told. Health is asked until it says yes: a computer updated while
+    /// the app runs starts taking reports. A 404 is a computer that doesn't.
+    public func reportEnvironment(_ environment: UserEnvironment, deviceId: String) async throws {
+        if self.environment.takesReports != true {
+            let takes = try await health().capabilities?.userEnvironment == true
+            self.environment.serves(takes, deviceId: deviceId)
+            guard takes else { return }
+        }
+        guard !self.environment.told(environment) else { return }
+        do { _ = try await send("PUT", "/v0/environment", json: environment.report(deviceId: deviceId)) }
+        catch AgentClientError.status(404, _, _) {
+            self.environment.serves(false, deviceId: deviceId)
+            return
+        }
+        self.environment.remember(environment)
     }
 
     public func userSetting(_ key: String) async throws -> JSONValue? {
@@ -354,6 +372,23 @@ public final class AgentClient: Sendable {
         AccountUsage.project(try await decode(JSONValue.self, "GET", "/v0/usage"))
     }
 
+    /// `GET /v0/usage` as it came: each account's plan reading and the
+    /// rolling token windows Settings › Usage reads (`UsageOverview`).
+    public func usageResponse() async throws -> JSONValue {
+        try await decode(JSONValue.self, "GET", "/v0/usage")
+    }
+
+    /// Whether the server keeps a daily history (`capabilities.dailyUsage`).
+    public func servesDailyUsage() async throws -> Bool {
+        try await decode(JSONValue.self, "GET", "/v0/health")["capabilities"]?["dailyUsage"]?.boolValue == true
+    }
+
+    /// `GET /v0/usage/daily`: the last `days` local days in `timeZone`
+    /// (an IANA name) that spent tokens (`DailyUsage.read`).
+    public func dailyUsage(days: Int, timeZone: String) async throws -> JSONValue {
+        try await decode(JSONValue.self, "GET", "/v0/usage/daily?days=\(days)&tz=\(Self.escape(timeZone))")
+    }
+
     /// Asks for fresher readings of these accounts; they arrive as
     /// `provider.usage.updated`.
     public func refreshAccountUsage(_ providerIds: [String]) async throws {
@@ -369,10 +404,8 @@ public final class AgentClient: Sendable {
     /// Always steering, as desktop sends: mid-turn it is taken at the next
     /// boundary rather than waiting behind the run; idle, it starts one.
     /// `progress` hears each image's share written, in order, as the body goes out.
-    /// `quickReply` names the suggested reply `text` is; the computer
-    /// checks it and refuses a send whose words aren't that option.
     public func sendMessage(_ agentId: String, id: String, text: String, images: [(mimeType: String, data: Data)], toolRequest: AgentWire.ToolCallRequest? = nil,
-        quickReply: QuickReply? = nil, mode: AgentWire.Mode, progress: (@Sendable ([Double]) -> Void)? = nil) async throws {
+        mode: AgentWire.Mode, progress: (@Sendable ([Double]) -> Void)? = nil) async throws {
         guard images.allSatisfy({ $0.data.count <= AttachmentRules.maxInlineImageBytes }),
               images.reduce(0, { $0 + $1.data.count }) <= AttachmentRules.maxInlineImageTotalBytes else {
             throw AttachmentRules.invalid("Inline images exceed the model's image limit.")
@@ -390,7 +423,8 @@ public final class AgentClient: Sendable {
             } + (toolRequest.map { [$0.json] } ?? []))
         }
         object["mode"] = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(mode))
-        if let quickReply { object["quickReply"] = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(quickReply)) }
+        // Only to a computer that takes it: an older one refuses the whole send.
+        if let deviceId = environment.sendingDeviceId { object["deviceId"] = .string(deviceId) }
         let path = "/v0/agents/\(Self.escape(agentId))/send"
         // Pictures make it a file's size: a file's client and deadline.
         let category: RequestCategory = images.isEmpty ? .query : .file
@@ -468,19 +502,6 @@ public final class AgentClient: Sendable {
 
     public func abort(_ agentId: String) async throws {
         _ = try await send("POST", "/v0/agents/\(Self.escape(agentId))/abort", json: .object([:]))
-    }
-
-    /// One press on a chat UI component (`POST /v0/agents/:agentId/actions`):
-    /// its attempt record. `id` is the attempt's: sent again, the computer
-    /// answers with the record it already holds.
-    public func act(_ agentId: String, id: String, offer: UiOffer, action: UiAction) async throws -> AgentWire.Message {
-        let object: [String: JSONValue] = [
-            "id": .string(id), "messageId": .string(offer.messageId), "uiId": .string(offer.uiId), "componentId": .string(offer.componentId),
-            "action": .object(["type": .string(action.type), "payload": action.payload]),
-        ]
-        let response = try await decode(JSONValue.self, "POST", "/v0/agents/\(Self.escape(agentId))/actions", json: .object(object))
-        guard let record = try? response["record"]?.decode(as: AgentWire.Message.self) else { throw AgentClientError.invalidResponse }
-        return record
     }
 
     /// A failed turn run again (`…/messages/:id/retry`), or moved to another
@@ -637,7 +658,7 @@ public final class AgentClient: Sendable {
     /// `hello`; the stream ends when the connection does, or when nothing,
     /// not even a heartbeat, has come for `silence`.
     public func events(after cursor: String?) async throws -> AsyncThrowingStream<ServerSentEvent, Error> {
-        var headers = [ChatUi.protocolHeader: String(ChatUi.protocolVersion)]
+        var headers: [String: String] = [:]
         if let cursor { headers["Last-Event-ID"] = cursor }
         let response = try await transport.stream(path: "/v0/events/stream", credential: token, headers: headers)
         if response.status == 401 { throw AgentClientError.revoked }

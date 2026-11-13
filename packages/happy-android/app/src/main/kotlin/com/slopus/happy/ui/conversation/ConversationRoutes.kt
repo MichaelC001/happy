@@ -252,7 +252,10 @@ internal fun AgentSession.makeConversation(
     initialChoice: WorkChoice = WorkChoice(),
     created: () -> Unit = {},
 ): Conversation = Conversation(
-    api = ConversationApi(bytesRequest = conversationBytesRequest(), request = conversationRequest(), cloud = client.cloud, fileRequest = conversationFileRequest()),
+    api = ConversationApi(
+        bytesRequest = conversationBytesRequest(), request = conversationRequest(), cloud = client.cloud, fileRequest = conversationFileRequest(),
+        sendingDevice = { client.environment.sendingDeviceId },
+    ),
     signals = events.signalsFor(agentId),
     // No screen's or call's: a send or draft save in flight finishes after they go.
     scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
@@ -481,7 +484,6 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
             opensAttach = route.attach,
             roleCanSend = roleCanSend,
             roleCanCompose = permissions.canWrite,
-            roleAllows = permissions::allows,
             link = link,
             usage = usage,
             onRefreshUsage = session.usage::refresh,
@@ -526,8 +528,6 @@ private fun ConversationEntry(graph: AppGraph, nav: NavHostController, route: Co
                     onVisible = holder.hold::show,
                     onChoiceChange = holder::setChoice,
                     onCommand = conversation::runCommand,
-                    onQuickReply = conversation::sendReply,
-                    onUiAction = conversation::press,
                     onToggleTurn = conversation::toggleTurn,
                     onToggleMessage = conversation::toggleMessage,
                     onOpenTool = { callId -> nav.navigate(ToolCallRoute(route.connectionId, conversation.agentId, callId)) },
