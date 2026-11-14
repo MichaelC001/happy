@@ -111,11 +111,27 @@ public struct CloudWelcomeLayout: Equatable, Sendable {
 /// the title. The actions ride the keyboard and
 /// the rest stays centred in the room left over them, never above its top
 /// margin; past that the screen scrolls.
+///
+/// A step whose content is a list (Join a server, `pinsActions`) instead
+/// starts at its top margin, and its actions stay where they rest while
+/// the rest scrolls under them: however long the list, the actions are in
+/// sight, and scrolled to its end the list stops 24 over them.
 public struct CloudStageLayout: Equatable, Sendable {
     public enum Metrics {
         public static let sidePadding: CGFloat = StartLayout.Metrics.sidePadding
         public static let columnMaxWidth: CGFloat = StartLayout.Metrics.columnMaxWidth
         public static let top: CGFloat = 24
+        /// A step's list of short lines (the admin bot's points), in from the column's sides.
+        public static let pointsInset: CGFloat = 12
+        /// The most a person's text size grows the words in a pill of a
+        /// fixed height (the actions, a row's button): past it they would
+        /// be cut short.
+        public static let pillTextMaxScale: CGFloat = 1.4
+        /// The most it grows the step's lines (`TextStyles.cloudStageBody`):
+        /// under the title's 1.2 of 28, and the field or list still on the
+        /// first screen of a phone. Their 24 grows to a whole 30, so a
+        /// frame snapped to the screen's pixels never cuts off a last line.
+        public static let bodyMaxScale: CGFloat = 1.25
         public static let artGap: CGFloat = 24
         /// Between the art and a caption under it (Create your profile's
         /// Add photo).
@@ -150,7 +166,12 @@ public struct CloudStageLayout: Equatable, Sendable {
     public var title: CGRect
     public var body: CGRect
     public var content: CGRect
+    /// With `pinsActions`, in the view rather than the scrolled content.
     public var actions: [CGRect]
+    /// With `pinsActions`, how far up from the screen's bottom edge the
+    /// pinned actions (and the gap over them) cover the scrolled content
+    /// while the keyboard is down; zero without.
+    public var pinnedInset: CGFloat
     /// The scrolled content's height.
     public var contentHeight: CGFloat
     /// How far the keyboard covers the scroll view, for its bottom inset.
@@ -169,10 +190,11 @@ public struct CloudStageLayout: Equatable, Sendable {
     /// the view, the safe area's bottom while it is down. `art` is the
     /// scene's side, zero without one, and `caption` the size of a line
     /// under it, zero without one; an empty `body` or `content` measures
-    /// zero tall and takes no gap.
+    /// zero tall and takes no gap. `pinsActions` starts the step at its top
+    /// margin and keeps the actions in place while the rest scrolls.
     public init(size: CGSize, safeArea: LayoutInsets, keyboardTop: CGFloat? = nil, art side: CGFloat = 0, caption captionSize: CGSize = .zero,
                 title: Measurable, body: Measurable, content: Measurable, steadyBody: Measurable? = nil, steadyContent: Measurable? = nil,
-                actions: [Action]) {
+                pinsActions: Bool = false, actions: [Action]) {
         typealias M = Metrics
         let width = max(0, size.width - safeArea.horizontal)
         let column = Self.column(size: size, safeArea: safeArea)
@@ -198,7 +220,7 @@ public struct CloudStageLayout: Equatable, Sendable {
         let minTop = safeArea.top + M.top
         // Centred over the actions, wherever the keyboard has put them.
         let free = bottom - actionsHeight - M.actionsGap - minTop - block
-        var y = minTop + max(0, free / 2)
+        var y = pinsActions ? minTop : minTop + max(0, free / 2)
 
         art = side > 0 ? CGRect(x: safeArea.left + (width - side) / 2, y: y, width: side, height: side) : .zero
         if side > 0 { y += side }
@@ -215,7 +237,7 @@ public struct CloudStageLayout: Equatable, Sendable {
         self.content = CGRect(x: x, y: y, width: column, height: contentHeight)
         y += contentHeight
 
-        var top = max(y + M.actionsGap, bottom - actionsHeight)
+        var top = pinsActions ? bottom - actionsHeight : max(y + M.actionsGap, bottom - actionsHeight)
         if actions.isEmpty { top = y }
         var frames: [CGRect] = []
         for (index, action) in actions.enumerated() {
@@ -224,9 +246,10 @@ public struct CloudStageLayout: Equatable, Sendable {
             top += action.height
         }
         self.actions = frames
-        self.contentHeight = max(size.height, top + edge + M.bottomPadding)
+        pinnedInset = pinsActions ? edge + M.bottomPadding + actionsHeight + (actions.isEmpty ? 0 : M.actionsGap) : 0
+        self.contentHeight = pinsActions ? max(size.height, y + pinnedInset) : max(size.height, top + edge + M.bottomPadding)
         keyboardInset = keyboardTop.map { max(0, size.height - $0 - edge) } ?? 0
-        keyboardOffset = keyboardTop == nil ? 0 : max(0, (frames.last?.maxY ?? y) - bottom)
+        keyboardOffset = keyboardTop == nil || pinsActions ? 0 : max(0, (frames.last?.maxY ?? y) - bottom)
     }
 }
 
@@ -292,18 +315,32 @@ public struct CloudServerRowLayout: Equatable, Sendable {
     public var subtitle: CGRect
     public var button: CGRect
 
-    /// `button` is Join's (or Joined's) own size.
-    public init(width: CGFloat, button buttonSize: CGSize) {
+    /// The row's height with a subtitle of `lines` lines, its name and
+    /// subtitle `titleHeight` and `subtitleHeight` a line: bigger text
+    /// grows the row by what it grows, the padding kept.
+    public static func height(subtitleLines lines: Int = 1, titleHeight: CGFloat = Metrics.titleHeight, subtitleHeight: CGFloat = Metrics.subtitleHeight) -> CGFloat {
+        let lines = CGFloat(max(1, lines))
+        let grown = titleHeight - Metrics.titleHeight + lines * (subtitleHeight - Metrics.subtitleHeight)
+        return Metrics.height + (lines - 1) * Metrics.subtitleHeight + max(0, grown)
+    }
+
+    /// `button` is Join's (or Joined's) own size; `minButton` the least
+    /// width it takes (Join's 104; a row of a list of its own, its own
+    /// width). The row has room for `subtitleLines` subtitle lines; the
+    /// name and the `usedLines` its subtitle fills are centred down it.
+    public init(width: CGFloat, button buttonSize: CGSize, minButton: CGFloat = Metrics.buttonWidth, subtitleLines: Int = 1, usedLines: Int? = nil,
+                titleHeight: CGFloat = Metrics.titleHeight, subtitleHeight: CGFloat = Metrics.subtitleHeight) {
         typealias M = Metrics
-        let height = M.height
+        let lines = CGFloat(min(max(1, usedLines ?? subtitleLines), max(1, subtitleLines)))
+        let height = Self.height(subtitleLines: subtitleLines, titleHeight: titleHeight, subtitleHeight: subtitleHeight)
         picture = CGRect(x: M.padding, y: (height - M.picture) / 2, width: M.picture, height: M.picture)
-        let buttonWidth = max(M.buttonWidth, buttonSize.width)
+        let buttonWidth = max(minButton, buttonSize.width)
         button = CGRect(x: width - M.padding - buttonWidth, y: (height - buttonSize.height) / 2, width: buttonWidth, height: buttonSize.height)
         let textX = picture.maxX + M.gap
         let textWidth = max(0, button.minX - M.gap - textX)
-        let textTop = (height - M.titleHeight - M.subtitleHeight) / 2
-        title = CGRect(x: textX, y: textTop, width: textWidth, height: M.titleHeight)
-        subtitle = CGRect(x: textX, y: title.maxY, width: textWidth, height: M.subtitleHeight)
+        let textTop = (height - titleHeight - lines * subtitleHeight) / 2
+        title = CGRect(x: textX, y: textTop, width: textWidth, height: titleHeight)
+        subtitle = CGRect(x: textX, y: title.maxY, width: textWidth, height: lines * subtitleHeight)
     }
 }
 

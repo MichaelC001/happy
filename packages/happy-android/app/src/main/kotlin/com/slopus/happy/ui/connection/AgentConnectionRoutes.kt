@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.connection
 
+import com.slopus.happy.ui.gates.cloudOnboardingRoutes
 import com.slopus.happy.ui.vaults.vaultRoutes
 import com.slopus.happy.ui.page
 import androidx.compose.runtime.Composable
@@ -28,6 +29,7 @@ import com.slopus.happy.connection.ServerSignInState
 import com.slopus.happy.connection.server
 import com.slopus.happy.ui.artifacts.artifactRoutes
 import com.slopus.happy.ui.feed.feedRoutes
+import com.slopus.happy.ui.plugins.pluginRoutes
 import com.slopus.happy.ui.surfaces.surfaceRoutes
 import kotlinx.serialization.Serializable
 
@@ -56,6 +58,8 @@ fun NavGraphBuilder.agentConnectionRoutes(graph: AppGraph, nav: NavHostControlle
     page<ServerSignInRoute> { ServerSignIn(graph, nav) }
     cloudRoutes(graph, nav)
     artifactRoutes(graph, nav)
+    pluginRoutes(graph, nav)
+    cloudOnboardingRoutes(graph, nav)
     feedRoutes(graph, nav)
     surfaceRoutes(graph, nav)
     vaultRoutes(graph, nav)

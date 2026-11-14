@@ -1134,6 +1134,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
     private var planKey: ChatPlanner.Key {
         var key = ChatPlanner.Key(width: transcriptWidth, maxContentWidth: ContentWidth.maxWidth, environment: traitCollection.textEnvironment, references: subagentReferences, subagentTitles: chat.subagentTitles, pageHeights: pageHeights)
         key.server = session.server
+        key.agentId = media.agentId
         // Only a failure card reads the composer's model; without one the
         // key stays the warm chat's, so its rows planned ahead are taken.
         if chat.items.contains(where: { if case .failure = $0.role { true } else { false } }) {
@@ -1282,9 +1283,10 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
             Task { await store.readArtifacts(unread) }
         }
         // An HTML artifact a call shows is read for whether it wants to be
-        // inline, or is an app, whose card opens it full screen.
+        // inline, or is an app, whose card opens it full screen; a Gen UI
+        // for its document, drawn under its card.
         for piece in changed.lazy.flatMap(\.pieces) {
-            if case .artifact(let artifact) = piece, artifact.type == "html" { scanned.pages.insert(artifact.id) }
+            if case .artifact(let artifact) = piece, artifact.type == "html" || artifact.type == "gen_ui" { scanned.pages.insert(artifact.id) }
         }
         let pages = scanned.pages.filter { references.artifacts[$0] == nil }
         if !pages.isEmpty {
@@ -2280,6 +2282,22 @@ extension ChatViewController: PageHosting {
     }
 }
 
+extension ChatViewController: GenUIActing {
+    /// A `message` goes as the person's next message here, the origin
+    /// agent's own conversation (the only place it is enabled).
+    func genUI(run action: GenUIAction, key: String, artifactId: String, version: Int, in block: GenUIBlockView) {
+        if GenUIActionRunner.run(action, session: session, from: self, agentId: media.agentId) { return }
+        if action.opensSecretForm {
+            return GenUIActionRunner.openForm(action, key: key, artifactId: artifactId, version: version, in: block, client: session.client, from: self)
+        }
+        guard case .message(let text) = action, !previewing else { return }
+        Haptics.play(.send)
+        followsNewest = true
+        ultra.revealNextSend(animated: true)
+        let conversation = conversation
+        Task { await conversation.send(text: text) }
+    }
+}
 
 private extension ChatDrawItem {
     /// Where a message's words are drawn: its bubble, text and blocks, not

@@ -311,6 +311,10 @@ final class CloudWelcomeViewController: UIViewController, CloudFlowScreen, ASWeb
         note.string = expired ? Strings.CloudConnect.expired : ""
         note.accessibilityIdentifier = "cloud-welcome-note"
         followsTextSize()
+        // Apple's button draws its words at one size whatever the person's
+        // text size, and Google's matches it: GitHub's and email's stay at
+        // theirs too, so the four read as one set and none is cut short.
+        for button in [github, email] { button.traitOverrides.followsTextSize = false }
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
@@ -505,7 +509,9 @@ final class CloudWelcomeViewController: UIViewController, CloudFlowScreen, ASWeb
 ///   `steadyBody`), so a status line, a hint or a list arriving grows down
 ///   from where it is; a status line keeps two lines' room
 ///   (`statusRoom`). The actions keep their places, the primary's even
-///   while it is hidden (`keepsActionRoom`);
+///   while it is hidden (`keepsActionRoom`). A list (`pinsActions`)
+///   instead starts at the top and scrolls with the title while the
+///   actions stay put, so a long one never pushes them out of sight;
 /// - the keyboard is followed as the chat's composer follows it: from its
 ///   will-change notification, on its own duration and curve, in one
 ///   animation (`keyboardWillChange`); while a finger drags it down
@@ -515,7 +521,7 @@ final class CloudWelcomeViewController: UIViewController, CloudFlowScreen, ASWeb
 class CloudStageViewController: UIViewController, CloudFlowScreen, CloudTyping, KeyboardPushed, UIScrollViewDelegate {
     let context: AppContext
     private let gradient = GrainGradientView(palette: StartViewController.Colors.grain)
-    let scroll = UIScrollView()
+    let scroll: UIScrollView = CloudStageScroll()
     let art: StateSceneView?
     let titleLabel: StyledLabel
     let bodyLabel: StyledLabel
@@ -527,7 +533,7 @@ class CloudStageViewController: UIViewController, CloudFlowScreen, CloudTyping, 
         didSet {
             oldValue?.removeFromSuperview()
             primary.isHidden = primaryReplacement != nil
-            if let primaryReplacement { scroll.addSubview(primaryReplacement) }
+            if let primaryReplacement { (pinsActions ? view : scroll).addSubview(primaryReplacement) }
             relayout()
         }
     }
@@ -561,27 +567,44 @@ class CloudStageViewController: UIViewController, CloudFlowScreen, CloudTyping, 
     /// server is joined, Try Again until a connection fails), so showing one
     /// moves nothing. Off for a step whose only action is in its content.
     var keepsActionRoom = true
+    /// The step starts at the top and scrolls while its actions stay in
+    /// place over it (`CloudStageLayout`): a list that can be long. Set
+    /// before the view loads.
+    var pinsActions = false
     /// The body the block is centred by when the body changes (Connecting's
     /// failure); nil: the body as it is.
     var steadyBody: String? {
-        didSet { steadyBodyLabel = steadyBody.map { StartGalleryView.bodyLabel($0) } }
+        didSet { steadyBodyLabel = steadyBody.map { CloudStageViewController.bodyLabel($0) } }
     }
     /// `steadyBody`, measured as the body is.
     private var steadyBodyLabel: StyledLabel?
+    /// With `pinsActions`, what scrolls fades out over the actions, so a
+    /// row never runs into them.
+    private let fade = CAGradientLayer()
+    /// Where the pinned actions start in the view; nil without any shown.
+    private var actionsTop: CGFloat?
 
     init(context: AppContext, scene: StateScene?, title: String, body: String, primary: String, secondary: String? = nil, secondaryDisplay: RoundButtonDisplay = .inverted) {
         self.context = context
         art = scene.map { StateSceneView(scene: $0, size: StartLayout.Metrics.art, replayLabel: title) }
         titleLabel = StartGalleryView.titleLabel(title)
-        bodyLabel = StartGalleryView.bodyLabel(body)
+        bodyLabel = CloudStageViewController.bodyLabel(body)
         self.primary = RoundButton(title: primary)
         self.secondary = secondary.map { RoundButton(title: $0, size: secondaryDisplay == .filled ? .large : .normal, display: secondaryDisplay) }
         super.init(nibName: nil, bundle: nil)
+        for button in [self.primary, self.secondary].compactMap({ $0 }) where button.display == .filled {
+            button.label.style.maxScale = CloudStageLayout.Metrics.pillTextMaxScale
+        }
         if let secondary = self.secondary, secondaryDisplay == .inverted { Self.quiet(secondary) }
         followsTextSize()
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    /// A step's line: a slide's, grown no further than its title.
+    static func bodyLabel(_ string: String) -> StyledLabel {
+        StartGalleryView.bodyLabel(string, style: TextStyles.cloudStageBody)
+    }
 
     /// A text action in the gradient's secondary colour.
     static func quiet(_ button: RoundButton) {
@@ -606,7 +629,10 @@ class CloudStageViewController: UIViewController, CloudFlowScreen, CloudTyping, 
         scroll.keyboardDismissMode = .interactive
         scroll.delegate = self
         view.addSubview(scroll)
-        for subview in [art, titleLabel, bodyLabel, content, primary, secondary].compactMap({ $0 }) { scroll.addSubview(subview) }
+        for subview in [art, titleLabel, bodyLabel, content].compactMap({ $0 }) { scroll.addSubview(subview) }
+        for subview in [primary, secondary].compactMap({ $0 }) { (pinsActions ? view : scroll).addSubview(subview) }
+        // A drag begun on a row's button scrolls the list, as a table's does.
+        (scroll as? CloudStageScroll)?.scrollsFromControls = pinsActions
         // The guide, read only while a finger drags the keyboard; a
         // floating or split iPad keyboard covers nothing.
         view.keyboardLayoutGuide.followsUndockedKeyboard = false
@@ -770,12 +796,13 @@ class CloudStageViewController: UIViewController, CloudFlowScreen, CloudTyping, 
             content: Measurable { [unowned self] width in CGSize(width: width, height: contentHeight(width: width)) },
             steadyBody: steadyBodyLabel?.measurable,
             steadyContent: Measurable { [unowned self] width in CGSize(width: width, height: steadyContentHeight(width: width)) },
+            pinsActions: pinsActions,
             actions: actions
         )
         scroll.frame = view.bounds
         scroll.contentSize = CGSize(width: size.width, height: layout.contentHeight)
         scroll.contentInset.bottom = layout.keyboardInset
-        scroll.verticalScrollIndicatorInsets.bottom = layout.keyboardInset
+        scroll.verticalScrollIndicatorInsets.bottom = layout.keyboardInset + layout.pinnedInset
         // Once each time the keyboard settles somewhere new: the action
         // stays in sight, and a finger's scroll after that is left alone.
         if !followsGuide, scrolledForKeyboard != .some(keyboard) {
@@ -794,7 +821,38 @@ class CloudStageViewController: UIViewController, CloudFlowScreen, CloudTyping, 
             primaryReplacement?.setLayoutFrame(frame)
         }
         if let secondary, let frame = frames.popFirst() { secondary.setLayoutFrame(frame) }
+        actionsTop = pinsActions ? [primaryShown ? primary.frame : nil, secondary.flatMap { $0.isHidden ? nil : $0.frame }].compactMap { $0?.minY }.min() : nil
+        placeFade()
     }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) { placeFade() }
+
+    /// Opaque down to 44 over the actions, clear from 12 over them; the
+    /// mask rides the scroll's bounds, so it stays put on screen.
+    private func placeFade() {
+        guard let actionsTop, scroll.bounds.height > 0 else {
+            if scroll.layer.mask != nil { scroll.layer.mask = nil }
+            return
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if scroll.layer.mask == nil {
+            fade.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor, UIColor.clear.cgColor]
+            scroll.layer.mask = fade
+        }
+        let height = scroll.bounds.height
+        fade.frame = CGRect(origin: CGPoint(x: 0, y: scroll.contentOffset.y), size: scroll.bounds.size)
+        fade.locations = [0, max(0, actionsTop - 44) / height, max(0, actionsTop - 12) / height, 1].map { NSNumber(value: Double(min(1, $0))) }
+        CATransaction.commit()
+    }
+}
+
+/// A step's scroll; `scrollsFromControls`: a drag begun on a button
+/// scrolls rather than taps it.
+private final class CloudStageScroll: UIScrollView {
+    var scrollsFromControls = false
+
+    override func touchesShouldCancel(in view: UIView) -> Bool { scrollsFromControls || super.touchesShouldCancel(in: view) }
 }
 
 /// Taps on the welcome's logo: ten within four seconds open the test
@@ -852,7 +910,7 @@ final class CloudTestSignIn: UIView {
 /// GitHub: its login and password, opened by ten taps on the welcome's
 /// Happy mark in development and preview builds.
 final class CloudTestSignInViewController: CloudStageViewController, CloudSignInStep, UITextFieldDelegate {
-    let problem = StartGalleryView.bodyLabel("")
+    let problem = CloudStageViewController.bodyLabel("")
     private(set) var testSignIn: CloudTestSignIn?
     /// Where the test account's sign-in goes; the tests' fake accounts.
     var http: any HTTPTransport = NoRedirectURLSessionTransport()
@@ -1105,14 +1163,14 @@ final class CloudServersViewController: CloudStageViewController {
     private var rows: [String: CloudServerRow] = [:]
     private var order: [String] = []
     private let spinner = UIActivityIndicatorView(style: .medium)
-    let status = StartGalleryView.bodyLabel("")
+    let status = CloudStageViewController.bodyLabel("")
     let bootstrap = RoundButton(title: Strings.CloudConnect.bootstrapNew, size: .normal)
     private var pictures: [String: UIImage] = [:]
     private var loadingPictures: Set<String> = []
     /// Servers being joined, and those joined from here (server id to
     /// connection id), the last one last.
     private var joining: Set<String> = []
-    private(set) var joined: [(server: String, connection: String)] = []
+    fileprivate(set) var joined: [(server: String, connection: String)] = []
     /// Joins run one after another.
     private var queue: Task<Void, Never>?
     private var failedToLoad = false
@@ -1126,6 +1184,7 @@ final class CloudServersViewController: CloudStageViewController {
         super.init(context: context, scene: nil, title: Strings.CloudConnect.serversTitle, body: Strings.CloudConnect.serversMessage,
                    primary: Strings.CloudConnect.continueAction)
         signsOutOnBack = true
+        pinsActions = true
     }
 
     override func viewDidLoad() {
@@ -1284,14 +1343,20 @@ final class CloudServersViewController: CloudStageViewController {
         status.string = text ?? ""
         status.textColor = UIColor(problem ? Palette.textDestructive : Palette.startTextSecondary)
         relayout()
+        // Under a long list, scrolled to where it can be read over Continue.
+        guard text != nil, isViewLoaded else { return }
+        view.layoutIfNeeded()
+        var shown = status.convert(status.bounds, to: scroll)
+        shown.size.height += scroll.verticalScrollIndicatorInsets.bottom
+        scroll.scrollRectToVisible(shown, animated: true)
     }
 
     /// The rows, or the spinner while they load; Bootstrap a new one; and
     /// the status line last, in room kept for it, so a join's failure
-    /// moves nothing. The block is centred as it is while loading
-    /// (`steadyContentHeight`), so the list arriving grows down from it.
+    /// moves nothing. They start under the title and scroll with it while
+    /// Continue stays put (`pinsActions`).
     private func items(width: CGFloat, steady: Bool = false) -> [CloudColumnLayout.Item] {
-        let rowItems = steady ? [] : order.map { _ in CloudColumnLayout.Item(height: CloudServerRowLayout.Metrics.height, gap: 12) }
+        let rowItems = steady ? [] : order.map { CloudColumnLayout.Item(height: rows[$0]?.height ?? CloudServerRowLayout.Metrics.height, gap: 12) }
         return rowItems + [
             .init(size: CGSize(width: 44, height: steady || spinner.isAnimating ? 44 : 0), gap: 12, centred: true),
             .init(height: bootstrap.layout(width: width).size.height, gap: 16),
@@ -1343,7 +1408,7 @@ final class CloudServersViewController: CloudStageViewController {
 final class CloudCreateViewController: CloudStageViewController, UITextFieldDelegate {
     private let account: CloudAccount
     let field = CloudField(prefix: "@", placeholder: Strings.CloudConnect.namePlaceholder)
-    let status = StartGalleryView.bodyLabel("")
+    let status = CloudStageViewController.bodyLabel("")
     private let first: Bool
     private var checking: Task<Void, Never>?
 
@@ -1568,15 +1633,17 @@ enum CloudBrowser {
 
 /// A server in Join a server's list, on glass over the gradient: its
 /// picture, its name over `@name`, and Join, Joining, or Joined with a
-/// check (`CloudServerRowLayout`).
+/// check (`CloudServerRowLayout`). Onboarding's plugins step words its
+/// own (Set Up, Connected).
 final class CloudServerRow: UIView {
     enum State { case join, joining, joined }
 
     private let glass = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
     let picture = UIImageView()
-    let title = StyledLabel(style: TextStyle(.semiBold, size: 17, lineHeight: 22), color: Palette.startText, lines: 1)
-    let subtitle = StyledLabel(style: TextStyle(.regular, size: 15, lineHeight: 20), color: Palette.startTextSecondary, lines: 1)
-    let join = RoundButton(title: Strings.CloudConnect.join, size: .small)
+    // Grown no further than the pill beside them, so a row keeps room for its words.
+    let title = StyledLabel(style: TextStyle(.semiBold, size: 17, lineHeight: 22, maxScale: CloudStageLayout.Metrics.pillTextMaxScale), color: Palette.startText, lines: 1)
+    let subtitle = StyledLabel(style: TextStyle(.regular, size: 15, lineHeight: 20, maxScale: CloudStageLayout.Metrics.pillTextMaxScale), color: Palette.startTextSecondary, lines: 1)
+    let join: RoundButton
     private let joined = UIButton(type: .system)
 
     var state: State = .join {
@@ -1587,9 +1654,19 @@ final class CloudServerRow: UIView {
     var joinLabel: String? {
         didSet { apply() }
     }
+    /// Room for this many subtitle lines (`CloudServerRowLayout.height`).
+    var subtitleLines = 1 {
+        didSet { subtitle.numberOfLines = subtitleLines; setNeedsLayout() }
+    }
+    /// The button at its own width rather than Join's 104.
+    var compactButton = false {
+        didSet { setNeedsLayout() }
+    }
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    init(action: String = Strings.CloudConnect.join, done: String = Strings.CloudConnect.joined) {
+        join = RoundButton(title: action, size: .small)
+        join.label.style.maxScale = CloudStageLayout.Metrics.pillTextMaxScale
+        super.init(frame: .zero)
         glass.clipsToBounds = true
         glass.layer.cornerRadius = 22
         glass.layer.cornerCurve = .continuous
@@ -1601,18 +1678,23 @@ final class CloudServerRow: UIView {
         look.image = UIImage(systemName: "checkmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
         look.imagePadding = 4
         look.contentInsets = .zero
-        look.attributedTitle = AttributedString(Strings.CloudConnect.joined, attributes: AttributeContainer([
+        look.attributedTitle = AttributedString(done, attributes: AttributeContainer([
             .font: UIFont(name: FontFace.regular.rawValue, size: 15) ?? .systemFont(ofSize: 15),
         ]))
         joined.configuration = look
         joined.tintColor = UIColor(Palette.startTextSecondary)
         joined.isUserInteractionEnabled = false
-        joined.accessibilityLabel = Strings.CloudConnect.joined
+        joined.accessibilityLabel = done
         for view in [glass, picture, title, subtitle, join, joined] as [UIView] { addSubview(view) }
         apply()
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    /// Its height at the person's text size, for the list it is in.
+    var height: CGFloat {
+        CloudServerRowLayout.height(subtitleLines: subtitleLines, titleHeight: title.lineHeight, subtitleHeight: subtitle.lineHeight)
+    }
 
     private func apply() {
         join.isHidden = state == .joined
@@ -1624,8 +1706,20 @@ final class CloudServerRow: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let buttonSize = state == .joined ? joined.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: 32)) : join.layout(width: 0).size
-        let layout = CloudServerRowLayout(width: bounds.width, button: CGSize(width: buttonSize.width, height: max(32, buttonSize.height)))
+        // Compact, the pill as wide as its words.
+        let natural = ceil(join.label.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: 40)).width) + 2 * RoundButtonMetrics.of(.small).paddingHorizontal
+        let buttonSize = state == .joined ? joined.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: 32)) : join.layout(width: compactButton ? natural : 0).size
+        let button = CGSize(width: buttonSize.width, height: max(32, buttonSize.height))
+        let minButton = compactButton ? 0 : CloudServerRowLayout.Metrics.buttonWidth
+        let lines = (title: title.lineHeight, subtitle: subtitle.lineHeight)
+        var layout = CloudServerRowLayout(width: bounds.width, button: button, minButton: minButton, subtitleLines: subtitleLines,
+                                          titleHeight: lines.title, subtitleHeight: lines.subtitle)
+        // A shorter subtitle than its room: the name and it stay together, centred.
+        if subtitleLines > 1 {
+            let used = Int(ceil(subtitle.sizeThatFits(CGSize(width: layout.subtitle.width, height: .greatestFiniteMagnitude)).height / lines.subtitle - 0.25))
+            layout = CloudServerRowLayout(width: bounds.width, button: button, minButton: minButton, subtitleLines: subtitleLines, usedLines: max(1, used),
+                                          titleHeight: lines.title, subtitleHeight: lines.subtitle)
+        }
         glass.setLayoutFrame(bounds)
         picture.setLayoutFrame(layout.picture)
         title.setLayoutFrame(layout.title)
@@ -1678,7 +1772,8 @@ final class CloudField: UIView {
 #if DEBUG
 /// Each Happy Cloud screen under an account token, for the harness's
 /// device screenshots (`-screen cloud -cloudScreen …`): `welcome`,
-/// `expired`, `test`, `servers` (two of the preview's own),
+/// `expired`, `test`, `servers` (two of the preview's own), `serversMany`
+/// (five, two of them joined: taller than a phone's room),
 /// `empty` (none: Bootstrap), `live` (the account's, under the token),
 /// `create`, `connecting`, `email` and `code` (email's two steps,
 /// the address in `name`). `http` is where the welcome's sign-ins go. On
@@ -1699,6 +1794,11 @@ public enum CloudScreensPreview {
         switch screen {
         case "test": navigation.pushViewController(CloudTestSignInViewController(context: context), animated: false)
         case "servers": navigation.pushViewController(CloudServersViewController(context: context, account: account, load: { list }), animated: false)
+        case "serversMany":
+            let many = ["core", "test", "hello", "hello2", "globex-labs"].map { CloudServer(id: "preview-\($0)", name: $0, url: "", role: .member) }
+            let servers = CloudServersViewController(context: context, account: account, load: { many })
+            servers.joined = [("preview-core", "preview-core"), ("preview-test", "preview-test")]
+            navigation.pushViewController(servers, animated: false)
         case "empty": navigation.pushViewController(CloudServersViewController(context: context, account: account, load: { [] }), animated: false)
         case "live": navigation.pushViewController(CloudServersViewController(context: context, account: account), animated: false)
         case "create":

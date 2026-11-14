@@ -67,6 +67,7 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -75,8 +76,22 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.semantics.contentType
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.focus.onFocusChanged
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.ScrollState
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -169,6 +184,8 @@ object CloudSpec {
     val rowRadius = 20.dp
     val rowPadding = 16.dp
     val rowGap = 10.dp
+    /** How far a pinned screen's words fade at an edge they scroll past. */
+    val edgeFade = 32.dp
     /** A row's Join, desktop's 104. */
     val joinWidth = 104.dp
     val fieldRadius = 16.dp
@@ -202,9 +219,10 @@ object CloudSpec {
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CloudFrame(
+internal fun CloudFrame(
     title: String,
-    onBack: () -> Unit,
+    /** Null: no back (a step the person may not leave), and no bar. */
+    onBack: (() -> Unit)?,
     body: String? = null,
     @RawRes art: Int? = null,
     /** Every press on [art], with its time: the welcome counts them. */
@@ -224,99 +242,129 @@ private fun CloudFrame(
      * swap in place.
      */
     steadyButtons: Boolean = false,
+    /** The actions held at the bottom, the words scrolling above them: a step whose words may outgrow the screen (large text). */
+    pinActions: Boolean = false,
     content: @Composable ColumnScope.() -> Unit = {},
 ) {
     val dark = HappyTheme.colors.dark
     val text = if (dark) StartSpec.darkText else StartSpec.lightText
     Box(Modifier.fillMaxSize()) {
         GrainGradient(palette = if (dark) StartSpec.darkPalette else StartSpec.lightPalette, modifier = Modifier.fillMaxSize())
+        val actions: @Composable ColumnScope.() -> Unit = {
+            val buttonWidth = if (steadyButtons) {
+                Modifier.padding(horizontal = CloudSpec.sidePadding).widthIn(max = columnMaxWidth).fillMaxWidth()
+            } else {
+                Modifier.widthIn(min = StartSpec.connectMinWidth).width(IntrinsicSize.Max)
+            }
+            if (primary != null) {
+                RoundButton(
+                    title = primary.title,
+                    onClick = primary.onClick,
+                    enabled = primary.enabled,
+                    loading = primary.loading,
+                    modifier = buttonWidth.testTag(CloudTags.PRIMARY),
+                )
+            }
+            if (secondary != null || steadyButtons) {
+                Spacer(Modifier.height(8.dp))
+                RoundButton(
+                    title = secondary?.title ?: "",
+                    onClick = secondary?.onClick ?: {},
+                    enabled = secondary?.enabled ?: false,
+                    display = RoundButtonDisplay.Inverted,
+                    // A pill of its own, as the cards are: never a bare line of text.
+                    modifier = (if (secondary != null) buttonWidth.testTag(CloudTags.SECONDARY) else buttonWidth.alpha(0f).clearAndSetSemantics {})
+                        .then(if (steadyButtons) Modifier.clip(RoundedCornerShape(percent = 50)).background(HappyTheme.colors.surface.copy(alpha = CloudSpec.SURFACE_ALPHA)) else Modifier),
+                )
+            }
+        }
+        val words: @Composable ColumnScope.() -> Unit = {
+            // Pinned, the bar's room is kept outside the scroll ([pinActions]).
+            Spacer(Modifier.height(if (pinActions) StartGallerySpec.margin else StartSpec.controlsPadding + StartSpec.control + StartGallerySpec.margin))
+            Spacer(Modifier.weight(1f))
+            Column(
+                Modifier.padding(horizontal = CloudSpec.sidePadding).widthIn(max = columnMaxWidth).fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(CloudSpec.gap),
+            ) {
+                // The keyboard up: the scene gives its room to the field and the action, which must stay in view.
+                if (art != null && !WindowInsets.isImeVisible) {
+                    var plays by rememberSaveable { mutableIntStateOf(1) }
+                    SceneAnimation(
+                        art,
+                        plays,
+                        { plays = it + 1 },
+                        // Watched before the replay's own click sees it, and never consumed: the scene still replays, and nothing new is announced.
+                        modifier = if (onArtPress == null) Modifier else Modifier.pointerInput(onArtPress) {
+                            awaitEachGesture { onArtPress(awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial).uptimeMillis) }
+                        },
+                        size = CloudSpec.art,
+                    )
+                    Spacer(Modifier.height(CloudSpec.artGap - CloudSpec.gap))
+                }
+                // Large text with the keyboard up, pinned: the picture gives its room to the field, as the scene does.
+                if (top != null && !(pinActions && WindowInsets.isImeVisible && LocalDensity.current.fontScale > LARGE_TEXT)) {
+                    top()
+                    Spacer(Modifier.height(CloudSpec.artGap - CloudSpec.gap))
+                }
+                Text(
+                    title,
+                    style = cappedScale(StartGallerySpec.title.copy(lineBreak = LineBreak.Heading), OnboardingContentSpec.TITLE_MAX_SCALE),
+                    color = text,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().semantics { heading() }.testTag(CloudTags.TITLE),
+                )
+                if (body != null) {
+                    Text(
+                        body,
+                        style = StartGallerySpec.body.copy(lineBreak = LineBreak.Paragraph),
+                        color = text.copy(alpha = StartSpec.SECONDARY_ALPHA),
+                        textAlign = TextAlign.Center,
+                        minLines = bodyMinLines,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                content()
+            }
+            Spacer(Modifier.weight(1f))
+        }
         BoxWithConstraints(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout).union(WindowInsets.ime))) {
             val viewport = maxHeight
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .heightIn(min = viewport)
-                    .padding(bottom = StartSpec.bottomPadding),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Spacer(Modifier.height(StartSpec.controlsPadding + StartSpec.control + StartGallerySpec.margin))
-                Spacer(Modifier.weight(1f))
+            if (pinActions) {
+                // The actions stay at the bottom; the words scroll between them and the bar, never under it.
                 Column(
-                    Modifier.padding(horizontal = CloudSpec.sidePadding).widthIn(max = columnMaxWidth).fillMaxWidth(),
+                    Modifier.fillMaxSize().padding(top = StartSpec.controlsPadding + StartSpec.control, bottom = StartSpec.bottomPadding),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(CloudSpec.gap),
                 ) {
-                    // The keyboard up: the scene gives its room to the field and the action, which must stay in view.
-                    if (art != null && !WindowInsets.isImeVisible) {
-                        var plays by rememberSaveable { mutableIntStateOf(1) }
-                        SceneAnimation(
-                            art,
-                            plays,
-                            { plays = it + 1 },
-                            // Watched before the replay's own click sees it, and never consumed: the scene still replays, and nothing new is announced.
-                            modifier = if (onArtPress == null) Modifier else Modifier.pointerInput(onArtPress) {
-                                awaitEachGesture { onArtPress(awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial).uptimeMillis) }
-                            },
-                            size = CloudSpec.art,
-                        )
-                        Spacer(Modifier.height(CloudSpec.artGap - CloudSpec.gap))
-                    }
-                    if (top != null) {
-                        top()
-                        Spacer(Modifier.height(CloudSpec.artGap - CloudSpec.gap))
-                    }
-                    Text(
-                        title,
-                        style = cappedScale(StartGallerySpec.title.copy(lineBreak = LineBreak.Heading), OnboardingContentSpec.TITLE_MAX_SCALE),
-                        color = text,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth().semantics { heading() }.testTag(CloudTags.TITLE),
-                    )
-                    if (body != null) {
-                        Text(
-                            body,
-                            style = StartGallerySpec.body.copy(lineBreak = LineBreak.Paragraph),
-                            color = text.copy(alpha = StartSpec.SECONDARY_ALPHA),
-                            textAlign = TextAlign.Center,
-                            minLines = bodyMinLines,
-                            modifier = Modifier.fillMaxWidth(),
+                    val scroll = rememberScrollState()
+                    BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().clipToBounds().fadedEdges(scroll)) {
+                        val room = maxHeight
+                        Column(
+                            Modifier.fillMaxWidth().verticalScroll(scroll).heightIn(min = room),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            content = words,
                         )
                     }
-                    content()
+                    Spacer(Modifier.height(StartGallerySpec.margin))
+                    actions()
                 }
-                Spacer(Modifier.weight(1f))
-                Spacer(Modifier.height(StartGallerySpec.margin))
-                val buttonWidth = if (steadyButtons) {
-                    Modifier.padding(horizontal = CloudSpec.sidePadding).widthIn(max = columnMaxWidth).fillMaxWidth()
-                } else {
-                    Modifier.widthIn(min = StartSpec.connectMinWidth).width(IntrinsicSize.Max)
-                }
-                if (primary != null) {
-                    RoundButton(
-                        title = primary.title,
-                        onClick = primary.onClick,
-                        enabled = primary.enabled,
-                        loading = primary.loading,
-                        modifier = buttonWidth.testTag(CloudTags.PRIMARY),
-                    )
-                }
-                if (secondary != null || steadyButtons) {
-                    Spacer(Modifier.height(8.dp))
-                    RoundButton(
-                        title = secondary?.title ?: "",
-                        onClick = secondary?.onClick ?: {},
-                        enabled = secondary?.enabled ?: false,
-                        display = RoundButtonDisplay.Inverted,
-                        // A pill of its own, as the cards are: never a bare line of text.
-                        modifier = (if (secondary != null) buttonWidth.testTag(CloudTags.SECONDARY) else buttonWidth.alpha(0f).clearAndSetSemantics {})
-                            .then(if (steadyButtons) Modifier.clip(RoundedCornerShape(percent = 50)).background(HappyTheme.colors.surface.copy(alpha = CloudSpec.SURFACE_ALPHA)) else Modifier),
-                    )
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .heightIn(min = viewport)
+                        .padding(bottom = StartSpec.bottomPadding),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    words()
+                    Spacer(Modifier.height(StartGallerySpec.margin))
+                    actions()
                 }
             }
         }
         // Clear: the gradient shows through the bar, as on the first screen's next one.
-        Box(Modifier.windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))) {
+        if (onBack != null) Box(Modifier.windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))) {
             CompositionLocalProvider(LocalBarOnGlass provides true) {
                 StackHeader(title = "", onBack = onBack, fullWidth = true) {
                     if (menu.isNotEmpty()) {
@@ -343,8 +391,53 @@ private fun CloudFrame(
     }
 }
 
+/** The text scale from which a pinned screen with the keyboard up drops its picture. */
+private const val LARGE_TEXT = 1.3f
+
+/** Where the words go on past an edge of their scroll, they fade out there rather than being cut. */
+private fun Modifier.fadedEdges(scroll: ScrollState): Modifier =
+    graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawWithContent {
+        drawContent()
+        val fade = CloudSpec.edgeFade.toPx().coerceAtMost(size.height / 3)
+        if (scroll.canScrollBackward) {
+            drawRect(Brush.verticalGradient(0f to Color.Transparent, 1f to Color.Black, startY = 0f, endY = fade), size = Size(size.width, fade), blendMode = BlendMode.DstIn)
+        }
+        if (scroll.canScrollForward) {
+            drawRect(
+                Brush.verticalGradient(0f to Color.Black, 1f to Color.Transparent, startY = size.height - fade, endY = size.height),
+                topLeft = Offset(0f, size.height - fade),
+                size = Size(size.width, fade),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+    }
+
+/**
+ * A field focused with the keyboard up is scrolled clear of a pinned
+ * screen's faded edges ([fadedEdges]), not only just into view, once the
+ * keyboard has settled.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun Modifier.clearOfFades(): Modifier {
+    val requester = remember { BringIntoViewRequester() }
+    var focused by remember { mutableStateOf(false) }
+    var height by remember { mutableIntStateOf(0) }
+    val ime = WindowInsets.isImeVisible
+    val margin = with(LocalDensity.current) { CloudSpec.edgeFade.toPx() }
+    LaunchedEffect(focused, ime) {
+        if (!focused || !ime) return@LaunchedEffect
+        delay(IME_SETTLE)
+        requester.bringIntoView(Rect(0f, -margin, 1f, height + margin))
+    }
+    return bringIntoViewRequester(requester).onSizeChanged { height = it.height }.onFocusChanged { focused = it.hasFocus }
+}
+
+/** About how long the keyboard takes to come up. */
+private const val IME_SETTLE = 350L
+
 /** One of a screen's actions: the primary at the bottom, or the quiet one under it. */
-private class CloudAction(val title: String, val onClick: () -> Unit, val enabled: Boolean = true, val loading: Boolean = false)
+internal class CloudAction(val title: String, val onClick: () -> Unit, val enabled: Boolean = true, val loading: Boolean = false)
 
 @Composable
 private fun Spinner() {
@@ -1149,7 +1242,9 @@ fun CloudProfileScreen(
     failed: Boolean,
     onChoosePhoto: () -> Unit,
     onSubmit: (String) -> Unit,
-    onBack: () -> Unit,
+    onBack: (() -> Unit)?,
+    /** Continue held at the bottom, as onboarding's steps are ([CloudFrame]'s pinActions). */
+    pinActions: Boolean = false,
 ) {
     // The cursor after a suggested name, as iOS: ready to add to it or take it.
     var field by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(suggested.orEmpty().let { TextFieldValue(it, TextRange(it.length)) }) }
@@ -1163,6 +1258,7 @@ fun CloudProfileScreen(
         onBack = onBack,
         columnMaxWidth = CloudProfileSpec.columnMaxWidth,
         top = { ProfilePicturePicker(photo, seed, enabled = !saving, onChoosePhoto) },
+        pinActions = pinActions,
     ) {
         CloudNameField(
             field,
@@ -1192,7 +1288,14 @@ object CloudProfileSpec {
 
 /** The picture, round, with its camera badge bottom-right, and the text button under it: both open the picker. */
 @Composable
-private fun ProfilePicturePicker(photo: ImageBitmap?, seed: String, enabled: Boolean, onChoose: () -> Unit) {
+internal fun ProfilePicturePicker(
+    photo: ImageBitmap?,
+    seed: String,
+    enabled: Boolean,
+    onChoose: () -> Unit,
+    /** Add photo or Change photo under it; off where the screen's own words say it (onboarding's Add a photo). */
+    caption: Boolean = true,
+) {
     val colors = HappyTheme.colors
     val text = if (colors.dark) StartSpec.darkText else StartSpec.lightText
     val label = stringResource(if (photo == null) R.string.cloud_profile_add_photo else R.string.cloud_profile_change_photo)
@@ -1216,7 +1319,7 @@ private fun ProfilePicturePicker(photo: ImageBitmap?, seed: String, enabled: Boo
                 androidx.compose.material3.Icon(MaterialSymbols.PhotoCamera, contentDescription = null, tint = colors.text, modifier = Modifier.size(CloudProfileSpec.badgeIcon))
             }
         }
-        Box(
+        if (caption) Box(
             Modifier
                 .padding(top = CloudProfileSpec.buttonGap)
                 .heightIn(min = CloudProfileSpec.buttonHeight)
@@ -1233,7 +1336,7 @@ private fun ProfilePicturePicker(photo: ImageBitmap?, seed: String, enabled: Boo
 
 /** A large field on the gradient: the theme's surface, a little see-through, 18 type. */
 @Composable
-private fun CloudField(
+internal fun CloudField(
     value: String,
     onChange: (String) -> Unit,
     placeholder: String,
@@ -1245,8 +1348,10 @@ private fun CloudField(
     capitalization: KeyboardCapitalization = KeyboardCapitalization.None,
     /** What autofill may offer here: an email address, a one-time code. */
     autofill: ContentType? = null,
+    /** The keyboard's action key. */
+    onIme: (() -> Unit)? = null,
 ) {
-    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(CloudSpec.fieldRadius)).background(HappyTheme.colors.surface.copy(alpha = CloudSpec.SURFACE_ALPHA))) {
+    Box(Modifier.fillMaxWidth().clearOfFades().clip(RoundedCornerShape(CloudSpec.fieldRadius)).background(HappyTheme.colors.surface.copy(alpha = CloudSpec.SURFACE_ALPHA))) {
         HappyTextField(
             value = value,
             onValueChange = onChange,
@@ -1259,6 +1364,7 @@ private fun CloudField(
             enabled = enabled,
             keyboardOptions = KeyboardOptions(capitalization = capitalization, autoCorrectEnabled = false, keyboardType = keyboard, imeAction = ime),
             visualTransformation = transformation,
+            keyboardActions = KeyboardActions(onAny = { onIme?.invoke() }),
             modifier = Modifier.testTag(tag).then(if (autofill == null) Modifier else Modifier.semantics { contentType = autofill }),
         )
     }
@@ -1267,7 +1373,7 @@ private fun CloudField(
 /** [CloudField] for a name: its own cursor (a prefilled one at the end, as iOS), words capitalized, Done sending it. */
 @Composable
 private fun CloudNameField(value: TextFieldValue, onChange: (TextFieldValue) -> Unit, enabled: Boolean, onDone: () -> Unit, modifier: Modifier) {
-    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(CloudSpec.fieldRadius)).background(HappyTheme.colors.surface.copy(alpha = CloudSpec.SURFACE_ALPHA))) {
+    Box(Modifier.fillMaxWidth().clearOfFades().clip(RoundedCornerShape(CloudSpec.fieldRadius)).background(HappyTheme.colors.surface.copy(alpha = CloudSpec.SURFACE_ALPHA))) {
         HappyTextField(
             value = value,
             onValueChange = onChange,
@@ -1287,7 +1393,7 @@ private fun CloudNameField(value: TextFieldValue, onChange: (TextFieldValue) -> 
 
 /** A note that reads on any part of the gradient: on the fields' surface, in [color] or the secondary text. */
 @Composable
-private fun NotePill(text: String, color: Color?) {
+internal fun NotePill(text: String, color: Color?) {
     val colors = HappyTheme.colors
     Box(Modifier.clip(RoundedCornerShape(50)).background(colors.surface.copy(alpha = CloudSpec.SURFACE_ALPHA)).padding(horizontal = 14.dp, vertical = 8.dp)) {
         Text(text, style = happyTextStyle(fontSize = 14, lineHeight = 18, weight = FontWeight.Medium), color = color ?: colors.textSecondary, textAlign = TextAlign.Center)

@@ -267,6 +267,9 @@ struct SettingsRow {
     /// An account's or connection's row: `image` round in the icon's
     /// place, an empty circle until it comes, never a glyph.
     var avatar = false
+    /// `image` drawn in a rounded square, a tile's shape, not round: a
+    /// plugin's mark.
+    var squareImage = false
     /// Its picture, drawn round in the icon's place; the icon is the
     /// fallback for one that hasn't come yet.
     var image: UIImage?
@@ -483,7 +486,7 @@ final class SettingsCardView: UIView {
                     // Its own picture, round, filling the square an icon
                     // would have had: the rows read as the accounts they are.
                     tile.backgroundColor = row.image == nil ? UIColor(Palette.settingsAddFill) : .clear
-                    tile.layer.cornerRadius = frame.height / 2
+                    tile.layer.cornerRadius = row.squareImage ? SettingsLayout.Metrics.tileRadius : frame.height / 2
                     // The picture over the thumbhash it had: dissolved in.
                     ImageFade.show(row.image, in: glyph, fade: previous?.id == row.id && previous?.image != nil)
                     glyph.contentMode = .scaleAspectFill
@@ -516,6 +519,8 @@ final class SettingsCardView: UIView {
                 let label = subtitle ?? makeSubtitle()
                 label.isHidden = false
                 label.text = row.subtitle
+                // A destructive row's line is a refusal: said in red too.
+                label.textColor = UIColor(row.destructive ? Palette.settingsDestructive : Palette.settingsSecondary)
                 // An art row's line wraps, at the person's text size.
                 label.font = fonts?.subtitle ?? Self.subtitleFont
                 label.numberOfLines = fonts == nil ? row.subtitleLines : 0

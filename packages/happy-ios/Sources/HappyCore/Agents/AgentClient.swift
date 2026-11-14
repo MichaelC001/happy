@@ -73,7 +73,7 @@ public final class AgentClient: Sendable {
         return try Self.checked(response)
     }
 
-    private static func checked(_ response: HTTP1Response) throws -> HTTP1Response {
+    static func checked(_ response: HTTP1Response) throws -> HTTP1Response {
         guard (200..<300).contains(response.status) || response.status == 304 || response.status == 206 else {
             // Flat (`{error, code}`) or nested (`{error: {code, message}}`).
             let failure = try? JSONValue.decode(response.body)
@@ -595,6 +595,18 @@ public final class AgentClient: Sendable {
         return try await send("GET", "/v0/artifacts/\(Self.escape(artifactId))/versions/\(version)/files/\(escaped)", headers: headers, category: .file)
     }
 
+    /// A `gen_ui` version's render document (`GenUIRenderDocument.path`),
+    /// whole, read by its path whether or not the version's files list it:
+    /// a Happy Agent lists it, a Happy Cloud server leaves it out and serves
+    /// it all the same (happy-cluster API.md, "Gen UI artifacts").
+    public func genUIRender(_ artifactId: String, version: Int) async throws -> Data {
+        var data = Data()
+        try await Self.read({ range in
+            try await artifactFile(artifactId, version: version, path: GenUIRenderDocument.path, range: range.map { "bytes=\($0.lowerBound)-\($0.upperBound)" })
+        }, each: { piece, _, _ in data.append(piece) })
+        return data
+    }
+
     /// One answer holds at most 8 MiB, so a whole file is read in ranges
     /// of this size.
     public static let rangeChunk = 4 * 1024 * 1024
@@ -657,7 +669,7 @@ public final class AgentClient: Sendable {
     /// The journal as it happens, from `after` when given. The first frame is
     /// `hello`; the stream ends when the connection does, or when nothing,
     /// not even a heartbeat, has come for `silence`.
-    public func events(after cursor: String?) async throws -> AsyncThrowingStream<ServerSentEvent, Error> {
+    public func events(after cursor: String?, resetOnSilence: Bool = true) async throws -> AsyncThrowingStream<ServerSentEvent, Error> {
         var headers: [String: String] = [:]
         if let cursor { headers["Last-Event-ID"] = cursor }
         let response = try await transport.stream(path: "/v0/events/stream", credential: token, headers: headers)
@@ -669,7 +681,7 @@ public final class AgentClient: Sendable {
             let reader = Task {
                 var parser = ServerSentEventParser()
                 let heard = Heard()
-                let watchdog = Self.watch(continuation, transport: transport, heard: heard)
+                let watchdog = Self.watch(continuation, transport: transport, heard: heard, resetOnSilence: resetOnSilence)
                 defer { watchdog.cancel() }
                 do {
                     for try await bytes in body {
@@ -700,14 +712,14 @@ public final class AgentClient: Sendable {
     /// One sleeper for the stream's life, woken at the silence deadline and
     /// put back to sleep if bytes came meanwhile: not a task made and
     /// cancelled for every chunk.
-    private static func watch(_ continuation: AsyncThrowingStream<ServerSentEvent, Error>.Continuation, transport: any AgentTransport, heard: Heard) -> Task<Void, Never> {
+    private static func watch(_ continuation: AsyncThrowingStream<ServerSentEvent, Error>.Continuation, transport: any AgentTransport, heard: Heard, resetOnSilence: Bool) -> Task<Void, Never> {
         Task {
             while true {
                 let due = heard.lastHeard + silence
                 guard (try? await Task.sleep(until: due, clock: .continuous)) != nil else { return }
                 if ContinuousClock.now >= heard.lastHeard + silence { break }
             }
-            await transport.reset(.realtime)
+            if resetOnSilence { await transport.reset(.realtime) }
             continuation.finish(throwing: PairingError.unavailable)
         }
     }

@@ -172,6 +172,39 @@ final class CloudLayoutTests: XCTestCase {
         XCTAssertEqual(layout.contentHeight, 1366)
     }
 
+    /// Join a server with five servers: it starts at its top margin and
+    /// scrolls whole, title and all, while Continue stays where every
+    /// step's action rests; scrolled to its end, the list stops 24 over it.
+    func testALongListScrollsUnderItsPinnedAction() {
+        func servers(_ content: CGFloat, keyboardTop: CGFloat? = nil) -> CloudStageLayout {
+            CloudStageLayout(size: phone, safeArea: barred, keyboardTop: keyboardTop, title: .fixed(width: 300, height: 34), body: .fixed(width: 300, height: 48),
+                             content: .fixed(width: 345, height: content), steadyContent: .fixed(width: 345, height: 174),
+                             pinsActions: true, actions: [.init(height: 50)])
+        }
+        let long = servers(616)
+        XCTAssertEqual(long.title, CGRect(x: 24, y: 103 + 24, width: 345, height: 34))
+        XCTAssertEqual(long.body, CGRect(x: 24, y: 173, width: 345, height: 48))
+        XCTAssertEqual(long.content, CGRect(x: 24, y: 253, width: 345, height: 616))
+        XCTAssertEqual(long.actions, [CGRect(x: 24, y: 752, width: 345, height: 50)])
+        XCTAssertEqual(long.actions[0].maxY, 852 - 34 - 16, "inside the safe area, where every step's rests")
+        XCTAssertEqual(long.pinnedInset, 34 + 16 + 50 + 24)
+        XCTAssertEqual(long.contentHeight, 253 + 616 + 124)
+        XCTAssertEqual(long.content.maxY - (long.contentHeight - 852) + 24, long.actions[0].minY, "scrolled to its end, 24 over Continue")
+        XCTAssertEqual(long.keyboardOffset, 0)
+        // However long the list, nothing else moves.
+        for list in [servers(174), servers(300), servers(1200)] {
+            XCTAssertEqual(list.title, long.title)
+            XCTAssertEqual(list.actions, long.actions)
+            XCTAssertEqual(list.content.minY, long.content.minY)
+        }
+        XCTAssertEqual(servers(300).contentHeight, 852, "a short one doesn't scroll")
+        // Over a keyboard the action rides it and the keyboard's inset adds the rest.
+        let typing = servers(616, keyboardTop: 516)
+        XCTAssertEqual(typing.actions, [CGRect(x: 24, y: 450, width: 345, height: 50)])
+        let end = typing.contentHeight + typing.keyboardInset - 852
+        XCTAssertEqual(typing.content.maxY - end + 24, typing.actions[0].minY, "scrolled to its end, 24 over Continue")
+    }
+
     /// A phone on its side: the column stays inside the safe area.
     func testTheColumnKeepsInsideTheSafeArea() {
         let layout = CloudStageLayout(size: CGSize(width: 852, height: 393), safeArea: LayoutInsets(top: 32, left: 59, bottom: 21, right: 59),
@@ -216,6 +249,43 @@ final class CloudLayoutTests: XCTestCase {
         XCTAssertEqual(row.subtitle, CGRect(x: 74, y: 39, width: 141, height: 20))
         let wide = CloudServerRowLayout(width: 345, button: CGSize(width: 120, height: 32))
         XCTAssertEqual(wide.button.width, 120)
+    }
+
+    /// Onboarding's lists: a two-line subtitle grows the row by a line,
+    /// everything still centred, and the button keeps its own width.
+    func testARowWithTwoSubtitleLinesAndItsOwnButton() {
+        XCTAssertEqual(CloudServerRowLayout.height(subtitleLines: 2), 96)
+        let row = CloudServerRowLayout(width: 345, button: CGSize(width: 70, height: 32), minButton: 0, subtitleLines: 2)
+        XCTAssertEqual(row.picture, CGRect(x: 14, y: 24, width: 48, height: 48))
+        XCTAssertEqual(row.button, CGRect(x: 261, y: 32, width: 70, height: 32))
+        XCTAssertEqual(row.title, CGRect(x: 74, y: 17, width: 175, height: 22))
+        XCTAssertEqual(row.subtitle, CGRect(x: 74, y: 39, width: 175, height: 40))
+    }
+
+    /// At every text size a step's or a Start slide's title is at least
+    /// as large as its lines, which grow no further than 1.25, to whole 30 pt lines.
+    func testAStepsTitleIsNeverSmallerThanItsLines() {
+        for category in TextSizeCategory.allCases {
+            let scale = TextScale(category)
+            for body in [TextStyles.cloudStageBody, TextStyles.startSlideBody] {
+                XCTAssertGreaterThanOrEqual(TextStyles.startSlideTitle.scaled(scale).size, body.scaled(scale).size, "\(category)")
+            }
+        }
+        XCTAssertEqual(TextStyles.cloudStageBody.scaled(.standard), TextStyles.cloudStageBody, "as designed at the default size")
+        let largest = TextStyles.cloudStageBody.scaled(TextScale(.accessibilityExtraExtraExtraLarge))
+        XCTAssertEqual(largest.size, 17 * 1.25, accuracy: 0.001)
+        XCTAssertEqual(largest.lineHeight, 30)
+    }
+
+    /// Bigger text grows the row by what its lines grow; the padding and
+    /// the picture stay, and the words stay centred down it.
+    func testARowGrowsWithTheTextSize() {
+        XCTAssertEqual(CloudServerRowLayout.height(subtitleLines: 2, titleHeight: 30, subtitleHeight: 28), 96 + 8 + 2 * 8)
+        let row = CloudServerRowLayout(width: 345, button: CGSize(width: 70, height: 32), minButton: 0, subtitleLines: 2, titleHeight: 30, subtitleHeight: 28)
+        XCTAssertEqual(row.title, CGRect(x: 74, y: 17, width: 175, height: 30))
+        XCTAssertEqual(row.subtitle, CGRect(x: 74, y: 47, width: 175, height: 56))
+        XCTAssertEqual(row.picture, CGRect(x: 14, y: 36, width: 48, height: 48))
+        XCTAssertEqual(CloudServerRowLayout.height(subtitleLines: 1, titleHeight: 20, subtitleHeight: 18), 76, "smaller text keeps the designed row")
     }
 
     // MARK: Create your profile
