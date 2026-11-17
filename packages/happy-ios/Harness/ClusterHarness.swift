@@ -101,6 +101,15 @@ actor ClusterServer: AgentTransport {
     let nameless: Bool
     /// Health says it serves plugins; off (`-noplugins`), as deployed before them.
     let servesPlugins: Bool
+    /// Health says it runs pipelines; off (`-nopipelines`), as deployed before them.
+    let servesPipelines: Bool
+    /// The events stream opens, the running migration logs a line a
+    /// second, and ten seconds on the pipelines move on (`-livepipelines`);
+    /// otherwise the stream can't be reached.
+    let livePipelines: Bool
+    private var pipelines = ClusterPipelines()
+    private var streams: [AsyncThrowingStream<Data, Error>.Continuation] = []
+    private var cursor = 1
     /// An existing tenant while the move to the settings rolls out
     /// (`-policyvault`): its Policy vault still flagged, beside the config
     /// routes and `policy.edit`.
@@ -147,8 +156,12 @@ actor ClusterServer: AgentTransport {
         var scope: String { ["profile", "avatar", "mobileApp"].contains(id) ? "member" : "server" }
     }
 
-    init(manager: Bool = true, installed: Bool = true, nameless: Bool = false, gates: String? = nil, servesPlugins: Bool = true, policyVault: Bool = false, production: Bool = false, invites: String? = nil) {
+    init(manager: Bool = true, installed: Bool = true, nameless: Bool = false, gates: String? = nil, servesPlugins: Bool = true, servesPipelines: Bool = true, livePipelines: Bool = false,
+         refusesAbort: Bool = false, policyVault: Bool = false, production: Bool = false, invites: String? = nil) {
         self.manager = manager
+        self.servesPipelines = servesPipelines
+        self.livePipelines = livePipelines
+        pipelines.refusesAbort = refusesAbort
         self.invites = invites
         self.servesPlugins = servesPlugins
         self.policyVault = policyVault
@@ -197,9 +210,16 @@ actor ClusterServer: AgentTransport {
         func refuse(_ status: Int, _ code: String, _ error: String) -> HTTP1Response { ok(#"{"code":"\#(code)","error":"\#(error)"}"#, status: status) }
         let sent = body.flatMap { try? JSONValue.decode($0) }
         let installation = path.hasPrefix("/v0/plugins/installations/") ? path.dropFirst("/v0/plugins/installations/".count).split(separator: "/").map(String.init) : []
+        if servesPipelines, let answer = pipelines.answer(method, path) {
+            publish(answer.events)
+            return ok(answer.body, status: answer.status)
+        }
+        if let answer = ClusterChat.answer(method, path) { return ok(answer) }
         switch (method, path) {
         case ("GET", "/v0/bootstrap/desktop"): return ok(Self.bootstrap)
-        case ("GET", "/v0/health"): return ok(servesPlugins ? #"{"ready":true,"capabilities":{"vaults":true,"plugins":true}}"# : #"{"ready":true,"capabilities":{"vaults":true}}"#)
+        case ("GET", "/v0/health"):
+            let served = ["\"vaults\":true"] + (servesPlugins ? ["\"plugins\":true"] : []) + (servesPipelines ? ["\"pipelines\":true"] : [])
+            return ok(#"{"ready":true,"capabilities":{\#(served.joined(separator: ","))}}"#)
         case ("GET", "/v0/onboarding") where nameless:
             return ok(#"{"completed":false,"steps":{"profile":{"done":true},"chiefOfStaff":{"done":false}},"member":{"completed":false,"steps":{"profile":{"done":\#(profileName != nil)}}}}"#)
         case ("GET", "/v0/onboarding"): return ok(onboarding)
@@ -318,7 +338,41 @@ actor ClusterServer: AgentTransport {
         return refuse(404, "not_found", "Not here.")
     }
 
-    func stream(path: String, credential: String, headers: [String: String]) async throws -> HTTP1Stream { throw URLError(.notConnectedToInternet) }
+    func stream(path: String, credential: String, headers: [String: String]) async throws -> HTTP1Stream {
+        guard livePipelines else { throw URLError(.notConnectedToInternet) }
+        let (body, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        streams.append(continuation)
+        continuation.yield(Data("event: hello\ndata: {\"cursor\":\"cursor-1\",\"resumed\":true}\n\n".utf8))
+        if streams.count == 1 {
+            Task {
+                for _ in 0..<8 {
+                    try? await Task.sleep(for: .seconds(1))
+                    self.publish(self.pipelines.tick())
+                }
+                try? await Task.sleep(for: .seconds(2))
+                self.advancePipelines()
+            }
+        }
+        return HTTP1Stream(status: 200, body: body)
+    }
+
+    /// The pipelines move on, and the stream says which runs changed.
+    private func advancePipelines() {
+        pipelines.advance()
+        publish(["r12", "r1", "r2", "r3"].map { run in
+            let pipeline = ["r12": "triage", "r1": "deploy", "r2": "build", "r3": "sweep"][run] ?? ""
+            return ("pipeline.run.updated", #"{"pipelineId":"\#(pipeline)","runId":"\#(run)"}"#)
+        } + [("pipeline.node.log", #"{"runId":"r1","nodeId":"migrate"}"#), ("pipeline.updated", #"{"pipelineId":"deploy"}"#)])
+    }
+
+    /// Journals `events` on every open stream.
+    private func publish(_ events: [(type: String, payload: String)]) {
+        for (type, payload) in events {
+            cursor += 1
+            let event = #"{"cursor":"cursor-\#(cursor)","type":"\#(type)","occurredAt":\#(Int64(Date().timeIntervalSince1970 * 1000)),"payload":\#(payload)}"#
+            for stream in streams { stream.yield(Data("event: \(type)\ndata: \(event)\n\n".utf8)) }
+        }
+    }
     func reset() async {}
     func close() async {}
 
@@ -349,7 +403,19 @@ actor ClusterServer: AgentTransport {
 /// (`-member`) or with nothing installed (`-fresh`), in dark (`-dark`);
 /// a member yet to give their name on a server without gates (`-nameless`);
 /// onboarding's gates as `-gates profile:required,avatar,…` (`ClusterServer.Gate`);
-/// a server that doesn't serve plugins (`-noplugins`); an existing tenant
+/// a server that doesn't serve plugins (`-noplugins`); its pipelines
+/// (`-open pipelines`, `ClusterPipelines`; `-bottom` scrolls to its last run, `-select <row>` taps a row), moving on over the events
+/// stream (`-livepipelines`), or a server without them (`-nopipelines`);
+/// a run (`-open run:r1`, from its row in the list with `-viarow`; `-scroll <row>` to a row, `-abort` asks to
+/// abort it, `-aborted` aborts it as the confirmation does, refused with
+/// `-abortrefused`) or one node of it (`-open node:r1:migrate`; `-toggle
+/// <seq>` opens or folds a command, `-bottom` to the log's tail); on
+/// either `-select <row>` taps a row; a pipeline (`-open pipeline:deploy`,
+/// a version of it `pipeline:deploy:v7`, a node of its head
+/// `pipeline:deploy:migrate`; `-scroll <row>`, `-bottom`, `-select <row>`);
+/// Chief of Staff's chat with what it was told by no person (`-open chat`,
+/// `ClusterChat`; `-earlier` its first turns alone, `-toggle <message>` opens one, `-tap <run>` a result's run);
+/// an existing tenant
 /// whose Policy vault is still flagged (`-policyvault`), or as deployed
 /// before the documents moved to settings (`-production`);
 /// `-open instructions|security|settings`; notifications `-push granted|denied`
@@ -365,7 +431,8 @@ final class ClusterHarness {
     private func open(window: HarnessWindow, arguments: [String]) async {
         let server = ClusterServer(manager: !arguments.contains("-member"), installed: !arguments.contains("-fresh"), nameless: arguments.contains("-nameless"),
                                    gates: arguments.firstIndex(of: "-gates").flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil },
-                                   servesPlugins: !arguments.contains("-noplugins"), policyVault: arguments.contains("-policyvault"),
+                                   servesPlugins: !arguments.contains("-noplugins"), servesPipelines: !arguments.contains("-nopipelines"),
+                                   livePipelines: arguments.contains("-livepipelines"), refusesAbort: arguments.contains("-abortrefused"), policyVault: arguments.contains("-policyvault"),
                                    production: arguments.contains("-production"), invites: value("-invites", in: arguments))
         let account = AccountController(
             serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/cluster",
@@ -400,6 +467,87 @@ final class ClusterHarness {
             switch open {
             case "plugins":
                 navigation.pushViewController(PluginsViewController(session: session), animated: false)
+            case "pipelines":
+                let pipelines = PipelinesViewController(session: session)
+                navigation.pushViewController(pipelines, animated: false)
+                // `-bottom`: to the last run, which reads the next page, then to its end.
+                if arguments.contains("-bottom") {
+                    for id in ["run:r8", "run:r11"] {
+                        try? await Task.sleep(for: .seconds(2))
+                        pipelines.list.scroll(to: id, animated: false)
+                    }
+                }
+                // `-select <row>`: as a tap on that row.
+                if let row = value("-select", in: arguments) {
+                    try? await Task.sleep(for: .seconds(2))
+                    pipelines.list.onSelect?(row)
+                }
+            case "chat":
+                // Chief of Staff's conversation; `-toggle <message>` opens one, `-tap <run>` opens a result's run.
+                let chat = ChatViewController(session: session, agentId: ClusterChat.agentId, title: "Chief of Staff", spaceId: nil, intro: nil)
+                navigation.pushViewController(chat, animated: false)
+                try? await Task.sleep(for: .seconds(1.5))
+                if let id = value("-toggle", in: arguments) { chat.act(.toggleTool(id)) }
+                if let run = value("-tap", in: arguments) { chat.act(.openPipelineRun(runId: run, pipelineName: nil)) }
+            case let open? where open.hasPrefix("pipeline:"):
+                // `pipeline:deploy`, `pipeline:deploy:v7` (a version), `pipeline:deploy:migrate` (a node of the head).
+                let parts = open.split(separator: ":").map(String.init)
+                navigation.pushViewController(PipelinesViewController(session: session), animated: false)
+                var page = PipelineViewController(session: session, pipelineId: parts[1])
+                navigation.pushViewController(page, animated: false)
+                try? await Task.sleep(for: .seconds(1.5))
+                if parts.count == 3 {
+                    page.open(parts[2].hasPrefix("v") ? .version(Int(parts[2].dropFirst()) ?? 1) : .definitionNode(version: nil, nodeId: parts[2]))
+                    page = navigation.topViewController as? PipelineViewController ?? page
+                    try? await Task.sleep(for: .seconds(1.5))
+                }
+                // A scroll made here says nothing to the page, as a reader's does: it's told, so it reads the next page of runs.
+                if let row = value("-scroll", in: arguments) {
+                    page.list.scroll(to: row, animated: false)
+                    page.list.onScroll?()
+                }
+                if arguments.contains("-bottom") {
+                    for _ in 0..<2 {
+                        page.list.list.scrollToBottom(animated: false)
+                        page.list.onScroll?()
+                        try? await Task.sleep(for: .seconds(1.5))
+                    }
+                    page.list.list.scrollToBottom(animated: false)
+                }
+                if let row = value("-select", in: arguments) { page.list.onSelect?(row) }
+            case let open? where open.hasPrefix("run:") || open.hasPrefix("node:"):
+                let parts = open.split(separator: ":").map(String.init)
+                let list = PipelinesViewController(session: session)
+                navigation.pushViewController(list, animated: false)
+                let run: PipelineRunViewController
+                if arguments.contains("-viarow") {
+                    // As a tap on its row in the list, which knows its pipeline's name.
+                    try? await Task.sleep(for: .seconds(1.5))
+                    list.list.onSelect?(PipelineListItems.runId(parts[1]))
+                    try? await Task.sleep(for: .seconds(0.5))
+                    guard let shown = navigation.topViewController as? PipelineRunViewController else { break }
+                    run = shown
+                } else {
+                    run = PipelineRunViewController(session: session, runId: parts[1])
+                    navigation.pushViewController(run, animated: false)
+                }
+                if parts.count == 3 {
+                    let node = PipelineNodeViewController(session: session, run: run.feed, nodeId: parts[2])
+                    navigation.pushViewController(node, animated: false)
+                    try? await Task.sleep(for: .seconds(1.5))
+                    if let seq = value("-toggle", in: arguments).flatMap(Int.init) { node.open(.command(seq: seq)) }
+                    if arguments.contains("-bottom") {
+                        try? await Task.sleep(for: .seconds(0.5))
+                        node.list.list.scrollToBottom(animated: false)
+                    }
+                    if let row = value("-select", in: arguments) { node.list.onSelect?(row) }
+                } else {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    if let row = value("-scroll", in: arguments) { run.list.scroll(to: row, animated: false) }
+                    if arguments.contains("-abort") { run.open(.abort) }
+                    if arguments.contains("-aborted") { await run.feed.abort() }
+                    if let row = value("-select", in: arguments) { run.list.onSelect?(row) }
+                }
             case "instructions", "security":
                 let page = PolicyDocumentViewController(document: open == "security" ? .security : .instructions, session: session)
                 navigation.pushViewController(page, animated: false)
@@ -432,6 +580,11 @@ final class ClusterHarness {
                 await act(on: navigation, session: session, arguments: arguments)
             default:
                 break
+            }
+            // `-keep <name>`: what the opened screen shows once it settles, as `Documents/<name>.png` (a device).
+            if let name = value("-keep", in: arguments) {
+                try? await Task.sleep(for: .seconds(4))
+                Self.keep(window, as: name)
             }
         } catch {
             print("CLUSTER_HARNESS error: \(error)")

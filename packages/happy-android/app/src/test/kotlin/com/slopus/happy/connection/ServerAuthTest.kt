@@ -161,8 +161,18 @@ class ServerAuthTest {
         // Refused: sign in again. Unreachable: try later.
         server.enqueue(json("""{"error":"invalid_grant"}""", 400))
         assertReason(ServerAuthException.Reason.SignInRequired) { auth.refresh(rotated, origin) }
-        server.enqueue(json("""{}""", 503))
-        assertReason(ServerAuthException.Reason.Unreachable) { auth.refresh(rotated, origin) }
+        // Any 5xx, a gateway's HTML or empty one too, and a 429 pass: the grant stays.
+        listOf(
+            json("""{"error":"temporarily_unavailable"}""", 503),
+            json("""{"error":"server_error"}""", 500),
+            MockResponse.Builder().code(502).addHeader("Content-Type", "text/html").body("<html>Bad Gateway</html>").build(),
+            MockResponse.Builder().code(504).build(),
+            MockResponse.Builder().code(429).addHeader("Content-Type", "text/html").body("<html>Too Many Requests</html>").build(),
+            json("""{"error":"slow_down"}""", 429),
+        ).forEach { answer ->
+            server.enqueue(answer)
+            assertReason(ServerAuthException.Reason.Unreachable) { auth.refresh(rotated, origin) }
+        }
         assertReason(ServerAuthException.Reason.SignInRequired) { auth.refresh(rotated.copy(refreshUrl = null), origin) }
     }
 
@@ -210,6 +220,36 @@ class ServerAuthTest {
         assertReason(ServerAuthException.Reason.WrongAudience) { auth.complete(pending, "$redirect?code=abc&state=${pending.state}") }
         server.enqueue(json("""{"access_token":"opaque","token_type":"Bearer"}"""))
         assertReason(ServerAuthException.Reason.WrongAudience) { auth.refresh(OAuthCredential("jwt", "happy", "$base/oauth/refresh", "r"), origin) }
+    }
+
+    /** An identity-only sign-in (OIDC `scope=openid`): the code for the `id_token`, which must name the client; the same callback checks and refusals. */
+    @Test
+    fun anIdentitySignInGetsAnIdTokenForThisClient() = runBlocking {
+        val identity = OAuthMethod(id = "accounts", name = "Accounts", authorizationUrl = "$base/authorize", tokenUrl = "$base/token", clientId = "happy", scope = "openid")
+        val pending = auth.begin(origin, identity, redirect)
+        assertEquals(null, pending.authorizeUrl.toHttpUrl().queryParameter("resource"))
+        assertReason(ServerAuthException.Reason.Expired) { auth.identity(pending, "$redirect?code=abc&state=other") }
+        assertEquals(0, server.requestCount)
+        val token = jwt("happy", tag = "id-1")
+        server.enqueue(json("""{"id_token":"$token","token_type":"Bearer","expires_in":300}"""))
+        assertEquals(token, auth.identity(pending, "$redirect?code=abc&state=${pending.state}"))
+        val body = form(server.takeRequest().also { assertEquals("/token", it.target) }.body!!.utf8())
+        assertEquals(mapOf("grant_type" to "authorization_code", "code" to "abc", "redirect_uri" to redirect, "client_id" to "happy", "code_verifier" to pending.verifier), body)
+        // Another client's, or several of which none is this one: refused. Several naming it: taken.
+        server.enqueue(json("""{"id_token":"${jwt("happy-web")}"}"""))
+        assertReason(ServerAuthException.Reason.WrongAudience) { auth.identity(pending, "$redirect?code=abc&state=${pending.state}") }
+        server.enqueue(json("""{"id_token":"${jwt("https://happy.acme.example/")}"}"""))
+        assertReason(ServerAuthException.Reason.WrongAudience) { auth.identity(pending, "$redirect?code=abc&state=${pending.state}") }
+        val both = jwt("other", "happy")
+        server.enqueue(json("""{"id_token":"$both"}"""))
+        assertEquals(both, auth.identity(pending, "$redirect?code=abc&state=${pending.state}"))
+        // No id_token (an access token is no identity), a refusal, a fault that passes.
+        server.enqueue(json("""{"access_token":"${jwt("happy")}","token_type":"Bearer"}"""))
+        assertReason(ServerAuthException.Reason.InvalidToken) { auth.identity(pending, "$redirect?code=abc&state=${pending.state}") }
+        server.enqueue(json("""{"error":"invalid_grant"}""", 400))
+        assertReason(ServerAuthException.Reason.Denied) { auth.identity(pending, "$redirect?code=abc&state=${pending.state}") }
+        server.enqueue(json("""{"error":"temporarily_unavailable"}""", 503))
+        assertReason(ServerAuthException.Reason.Unreachable) { auth.identity(pending, "$redirect?code=abc&state=${pending.state}") }
     }
 
     @Test

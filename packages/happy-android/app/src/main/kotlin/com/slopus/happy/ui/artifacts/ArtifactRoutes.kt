@@ -93,16 +93,7 @@ internal fun computerName(graph: AppGraph, connectionId: String): String {
 }
 
 private class ArtifactsHolder(session: AgentSession?) : ViewModel() {
-    val feed: ArtifactCatalogFeed? = session?.let {
-        val files = ArtifactClient(it.client)
-        ArtifactCatalogFeed(
-            scope = viewModelScope,
-            fetch = { cursor -> files.catalog(cursor) },
-            fetchOne = { id -> files.artifact(id) },
-            kept = { it.cachedResource(ArtifactCatalogFeed.RESOURCE) },
-            keep = { value -> it.keepResource(ArtifactCatalogFeed.RESOURCE, value) },
-        ).also { feed -> feed.start(it.events) }
-    }
+    val feed: ArtifactCatalogFeed? = session?.artifacts
     val thumbnails: ArtifactThumbnails? = session?.let { ArtifactThumbnails(ArtifactClient(it.client), viewModelScope) }
 }
 
@@ -111,6 +102,7 @@ private fun AgentArtifacts(graph: AppGraph, nav: NavHostController, route: Agent
     val session = remember(route.connectionId) { graph.agentSessions.session(route.connectionId) }
     val holder = viewModel { ArtifactsHolder(session) }
     val feed = holder.feed
+    LaunchedEffect(feed) { feed?.refresh() }
     val state = feed?.state?.collectAsStateWithLifecycle()?.value ?: ArtifactCatalogFeed.State(loaded = true, error = Problem.Unknown)
     val status = session?.status?.collectAsStateWithLifecycle()?.value
     val syncing = session?.isSyncing?.collectAsStateWithLifecycle()?.value ?: false

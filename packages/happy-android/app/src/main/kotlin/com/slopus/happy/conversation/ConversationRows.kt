@@ -5,6 +5,7 @@ import com.slopus.happy.chat.markdown.MarkdownBlock
 import com.slopus.happy.chat.markdown.parseMarkdown
 import com.slopus.happy.chat.obj
 import com.slopus.happy.chat.str
+import com.slopus.happy.pipelines.PipelineRunNotice
 import com.slopus.happy.references.HappyReferences
 import com.slopus.happy.references.References
 import kotlinx.serialization.json.JsonObject
@@ -111,6 +112,19 @@ sealed interface ConversationRow {
         val status: String get() = tool.status
     }
 
+    /**
+     * A run of tool calls between two pieces of the agent's words, as one
+     * line (desktop's `AgentToolSection`, under Group tool calls,
+     * [ToolSections]): while [live] its latest call, once over what it was
+     * made of and how long it took ([durationMs]; a run of one call stays
+     * that call's line). Keyed by the run's first call, so it is one row
+     * from its first call on.
+     */
+    data class Section(override val key: String, val calls: List<ToolUse>, val live: Boolean, val durationMs: Long?) : ConversationRow {
+        /** The call the line shows while it is one call's line. */
+        val latest: ToolUse get() = calls.last()
+    }
+
     /** A picture inline in a message. */
     data class Picture(override val key: String, val image: Block.Image) : ConversationRow
 
@@ -136,6 +150,15 @@ sealed interface ConversationRow {
     ) : ConversationRow {
         val ref: com.slopus.happy.artifacts.ArtifactRef get() = com.slopus.happy.artifacts.ArtifactRef.presented(artifactId, version, type, title, shows)
     }
+
+    /**
+     * A message the agent sent itself (its `senderAgentId` its own): a goal's
+     * continuation, a message it scheduled for itself, a pipeline run's result.
+     * Nobody wrote it, so it is never the person's bubble (desktop's self
+     * agent message): [label] is why it was written, [text] what it says, and
+     * [pipeline] the run it tells of, where the cluster said.
+     */
+    data class SelfNote(override val key: String, val messageId: String, val label: String?, val text: String, val pipeline: PipelineRunNotice?) : ConversationRow
 
     /** Another agent writing to this one: a collaborator or subtask reporting. */
     data class Collaborator(override val key: String, val senderAgentId: String, val text: String, val blocks: List<MarkdownBlock>) : ConversationRow
@@ -163,7 +186,13 @@ sealed interface ConversationRow {
      * is pinned to the transcript's end; answered, it stays in its turn where
      * it was asked, saying what was answered.
      */
-    data class Ask(override val key: String, val question: Question, val phase: AskPhase) : ConversationRow
+    data class Ask(
+        override val key: String,
+        val question: Question,
+        val phase: AskPhase,
+        /** Answered before this conversation showed it, under Group tool calls: one grey line, not the card. */
+        val line: Boolean = false,
+    ) : ConversationRow
 
     /** One line of housekeeping worth showing (a compaction). */
     data class Notice(override val key: String, val kind: NoticeKind) : ConversationRow
@@ -340,6 +369,13 @@ class ConversationRowBuilder(
             }
             if (message.role != "user" && message.role != "agent") return emptyList()
             val sender = message.senderAgentId
+            if (message.role == "user" && sender != null && sender == agentId) {
+                val pipeline = PipelineRunNotice.parse(message.pipelineRun)
+                // A run's result is unseen until a turn takes it, and may be withdrawn before: never drawn waiting.
+                if (pipeline != null && message.status == "pending") return emptyList()
+                val label = message.senderAgentExplanation?.trim()?.takeIf { it.isNotEmpty() }
+                return listOf(ConversationRow.SelfNote("$id:self", id, label, plain(message.text.trim(), references), pipeline))
+            }
             if (sender != null && sender != agentId && sender != parentAgentId) {
                 val text = inboundText(message.text, sender).trim()
                 return listOf(ConversationRow.Collaborator("$id:from", sender, plain(text, references), parseMarkdown(resolved(text, references, false, here), hasPage)))

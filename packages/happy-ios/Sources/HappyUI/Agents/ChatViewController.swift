@@ -126,6 +126,11 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
     /// Finished turns opened on their work ("View traces"), by run, for
     /// this screen's life: every other finished turn is folded.
     private var expandedTurns = Set<String>()
+    /// Settings › Appearance › Group tool calls, as this screen last read it.
+    private lazy var groupsToolCalls = session.localSettings.groupsToolCalls
+    /// The tool sections this screen saw end and the questions it saw
+    /// waiting (`ToolSections`): what a row shows, never how tall it is.
+    private var sections = ToolSections.Memory()
     /// A turn was opened or folded: the next apply moves rows in place,
     /// the rows the reader sees staying where they are.
     private var foldMoved = false
@@ -465,6 +470,11 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         // went unheard: down, unless it is still this composer's.
         fingerOnKeyboard = false
         if !ownsKeyboard { keyboardTop = .greatestFiniteMagnitude }
+        // Group tool calls turned on or off on a screen over this one.
+        if session.localSettings.groupsToolCalls != groupsToolCalls {
+            groupsToolCalls = session.localSettings.groupsToolCalls
+            replan()
+        }
         ultraKeyboard?.activate()
         // Back from a screen over this one, or a swipe back let go of.
         updateBar(animated: animated)
@@ -1182,8 +1192,9 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         }
     }
 
-    /// The conversation as the transcript shows it: each finished turn
-    /// folded unless opened, a waiting question with what is ticked.
+    /// The conversation as the transcript shows it: each run of tool calls
+    /// one line under Group tool calls, each finished turn folded unless
+    /// opened, a waiting question with what is ticked.
     private var shownItems: [ChatItem] {
         var items = chat.items
         if !picks.isEmpty {
@@ -1193,7 +1204,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
                 items[index].role = .question(ask)
             }
         }
-        return TurnFold.fold(items, expanded: expandedTurns)
+        return TurnFold.shown(items, working: chat.working, queued: chat.queued, grouped: groupsToolCalls, expanded: expandedTurns, memory: &sections)
     }
 
     /// The question waiting on the person, with what is ticked.
@@ -1478,13 +1489,15 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
 
     /// The header's grey line: what the agent is at, in a word, while it is.
     private func updateHeaderStatus() {
-        header.status = Strings.HeaderStatus.text(headerState, activity: chat.activity, loaded: chat.loaded)
+        // Updating only until this chat's history read lands, whatever home is at.
+        let state = LinkState.chat(home: headerState, historyRead: chat.synced || chat.error != nil)
+        header.status = Strings.HeaderStatus.text(state, activity: chat.activity, loaded: chat.loaded)
         // The link on its way, or the chat still catching up: said with
         // the spinner, as home's title says it.
-        header.statusSpins = Strings.HeaderStatus.spins(headerState) || (headerState == .online && !chat.loaded)
+        header.statusSpins = Strings.HeaderStatus.spins(state) || (state == .online && !chat.loaded)
         // "Thinking" and "Working" sweep while the working line's loader
         // runs; a question or a wait is said still.
-        header.statusShimmers = headerState == .online && chat.loaded && ChatJumpButton.spins(chat.activity)
+        header.statusShimmers = state == .online && chat.loaded && ChatJumpButton.spins(chat.activity)
     }
 
     // MARK: Layout
@@ -2100,6 +2113,11 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
             if media.isDownloaded(key) { open(key) } else { media.toggleDownload(key) }
         case .openArtifact(let artifact):
             openArtifact(artifact, session: session)
+        case .openPipelineRun(let runId, let pipelineName):
+            // The run page says so when the run can't be read.
+            guard !previewing else { return }
+            card.blur()
+            navigationController?.pushViewController(PipelineRunViewController(session: session, runId: runId, pipelineName: pipelineName), animated: true)
         case .toggleTool(let messageId):
             toggle(messageId)
         case .openMessage(let itemId):

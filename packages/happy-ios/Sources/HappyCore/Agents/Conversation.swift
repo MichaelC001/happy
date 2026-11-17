@@ -11,6 +11,11 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
         /// not the one that manages it: one compact row naming the sender,
         /// opened to read what it said (happy-desktop's `agentMessage` activity).
         case collaborator(agentId: String, explanation: String?)
+        /// The agent's message to itself, which no person wrote: a goal's
+        /// continuation, a message it scheduled for itself, a pipeline's
+        /// result. The same compact row, opened to read it (desktop #156),
+        /// or with `pipelineRun` the run it tells of, which a tap opens.
+        case own(explanation: String?, pipelineRun: AgentWire.PipelineRunNotice?)
         /// A turn that failed: desktop's failure card, its reason the item's
         /// text, with Retry or a switch to the composer's model.
         case failure(Failure)
@@ -23,6 +28,9 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
         case question(Ask)
         /// A finished turn's fold control, placed by `TurnFold`.
         case trace(Trace)
+        /// A run of tool calls drawn as one line (Group tool calls),
+        /// placed by `ToolSections`.
+        case section(Section)
     }
 
     public enum Delivery: Equatable, Sendable {
@@ -95,8 +103,12 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
     /// On a team's computer, the member who wrote a person's message, by
     /// their user ID; nil for one still on its way and outside a team.
     public var author: String? { didSet { revision = 0 } }
+    /// When the agent's message it came from was made, in ms: what a tool
+    /// section's duration is read from (`ToolSections`). Nil for a
+    /// person's message and anything not made from one of the agent's.
+    public var madeAt: Double? { didSet { revision = 0 } }
 
-    public init(id: String, role: Role, pieces: [Piece], delivery: Delivery, turn: String? = nil, time: Double? = nil, author: String? = nil) {
+    public init(id: String, role: Role, pieces: [Piece], delivery: Delivery, turn: String? = nil, time: Double? = nil, author: String? = nil, madeAt: Double? = nil) {
         self.id = id
         self.role = role
         self.pieces = pieces
@@ -104,6 +116,7 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
         self.turn = turn
         self.time = time
         self.author = author
+        self.madeAt = madeAt
     }
 
     /// This item stamped as a making of its own.
@@ -126,7 +139,7 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
 
     public static func == (lhs: ChatItem, rhs: ChatItem) -> Bool {
         if lhs.revision != 0, lhs.revision == rhs.revision { return true }
-        return lhs.id == rhs.id && lhs.role == rhs.role && lhs.pieces == rhs.pieces && lhs.delivery == rhs.delivery && lhs.turn == rhs.turn && lhs.time == rhs.time && lhs.author == rhs.author
+        return lhs.id == rhs.id && lhs.role == rhs.role && lhs.pieces == rhs.pieces && lhs.delivery == rhs.delivery && lhs.turn == rhs.turn && lhs.time == rhs.time && lhs.author == rhs.author && lhs.madeAt == rhs.madeAt
     }
 
     /// Stamps unique across the app, so items of two conversations are never
@@ -434,6 +447,13 @@ public actor Conversation {
     /// read again, once.
     private var readCursor: String?
     private var streamFrom: String?
+    /// Opened before its engine asked for the stream: home's read waits
+    /// until this chat's has gone (`ChatsFirst`).
+    private var holdsHome = false
+    /// The stream openings heard (`.resync(from: nil)`), and the one a
+    /// read asked after its stream was asked for landed before.
+    private var openings = 0
+    private var readAtOpening: Int?
     /// The account's stream picks up where it left off (`.resync(replays:)`):
     /// its replay brings what changed in runs that had finished, so the read
     /// beside it need only bring the runs after the newest finished one held.
@@ -567,9 +587,11 @@ public actor Conversation {
 
     public func start() async {
         guard following == nil else { return }
+        if creation == nil, !holdsHome { holdsHome = store.chatsFirst.opening() }
         do { try await checkpointClaim(for: "conversation:\(agentId)").value }
         catch {
             checkpointClaims.removeValue(forKey: "conversation:\(agentId)")
+            letHomeAsk()
             snapshot.error = "Could not open this conversation on this device."; publish(); return
         }
         if let creation {
@@ -594,6 +616,7 @@ public actor Conversation {
     }
 
     public func stop() async {
+        letHomeAsk()
         following?.cancel(); following = nil
         children?.cancel(); children = nil
         questionEvents?.cancel(); questionEvents = nil
@@ -733,11 +756,14 @@ public actor Conversation {
                     // The stream's `.resync(from:)` says whether it covers.
                 } else if replays, !visible, heldEvents == nil {
                     // Off screen, the replay brings what it missed.
+                } else if from == nil, readAtOpening == openings {
+                    // Read since this stream was asked for: its hello says whether it covers.
                 } else if from.map(covered) != true {
                     // Some may be lost: not current again until the read below is in.
                     snapshot.synced = false
                     reload()
                 }
+                if from == nil { openings += 1; readAtOpening = nil }
                 deliverWaiting()
             case .event(let envelope):
                 if heldEvents != nil { heldEvents?.append(envelope) } else { receive(envelope) }
@@ -770,36 +796,48 @@ public actor Conversation {
                 if heldEvents == nil { heldEvents = [] }
                 let after = anchored ? anchor() : nil
                 let resets = await store.carrierResets
+                // Its engine stopped (signed out): nothing is asked, and the
+                // read fails as one on its closed client did.
+                guard await store.chatsFirst.wait() else { letHomeAsk(); failed(CancellationError()); return }
+                let opening = holdsHome ? openings : nil
+                client.chatReads.began()
                 do {
                     async let bootstrap = client.bootstrap(agentId)
                     async let page = client.messages(agentId, after: after?.message)
+                    letHomeAsk()
                     var (start, history) = try await (bootstrap, page)
                     var since = after?.run
                     if since != nil, history.hasMore { history = try await client.messages(agentId); since = nil }
+                    client.chatReads.ended()
                     if Task.isCancelled { return }
+                    if let opening { readAtOpening = opening }
                     adopt(start, history, since: since)
                     return
                 } catch {
+                    client.chatReads.ended()
                     if Task.isCancelled { return }
                     // A message the computer no longer holds: the newest runs instead, at once.
                     if after != nil, case AgentClientError.status = error { anchored = false; continue }
                     // Let go with its client (a network change): asked again, unsaid.
-                    if await store.carrierResets == resets {
-                        reads += 1
-                        snapshot.synced = false
-                        snapshot.error = Store.describe(error)
-                        Happenings.errorShown(.conversationLoad, error)
-                        snapshot.loaded = true
-                        let held = heldEvents ?? []
-                        heldEvents = nil
-                        for event in held { receive(event, publishes: false) }
-                        publish()
-                    }
+                    if await store.carrierResets == resets { failed(error) }
                 }
                 do { try await Task.sleep(for: .seconds(min(30, 1 << min(failures, 5)))) } catch { return }
                 failures += 1
             }
         }
+    }
+
+    /// A read that didn't land: shown with what came meanwhile.
+    private func failed(_ error: Error) {
+        reads += 1
+        snapshot.synced = false
+        snapshot.error = Store.describe(error)
+        Happenings.errorShown(.conversationLoad, error)
+        snapshot.loaded = true
+        let held = heldEvents ?? []
+        heldEvents = nil
+        for event in held { receive(event, publishes: false) }
+        publish()
     }
 
     /// The newest run held here that has finished, and its last message,
@@ -880,6 +918,16 @@ public actor Conversation {
             streamFrom = nil
             if !covered(from) { reload() }
         }
+    }
+
+    deinit {
+        if holdsHome { store.chatsFirst.asked() }
+    }
+
+    private func letHomeAsk() {
+        guard holdsHome else { return }
+        holdsHome = false
+        store.chatsFirst.asked()
     }
 
     /// The newest read taken began after the stream that began at `from`.
@@ -2273,13 +2321,22 @@ public actor Conversation {
                 guard case .compaction(let compaction) = block else { return nil }
                 return compaction
             }.enumerated().map { index, compaction in
-                ChatItem(id: index == 0 ? message.id : "\(message.id)/\(index)", role: .tool(Self.compactionTool(compaction)), pieces: [], delivery: .sent, turn: turn).stamped()
+                ChatItem(id: index == 0 ? message.id : "\(message.id)/\(index)", role: .tool(Self.compactionTool(compaction)), pieces: [], delivery: .sent, turn: turn, madeAt: message.createdAt).stamped()
             }
             if !compactions.isEmpty { made.items = compactions; return }
             // Only a failure is shown, as desktop's card; other service
             // messages are the daemon's housekeeping.
             guard let failure = Failure.of(message) else { return }
-            made.items = [ChatItem(id: message.id, role: .failure(failure), pieces: [.text(failure.reason)], delivery: .sent, turn: turn).stamped()]
+            made.items = [ChatItem(id: message.id, role: .failure(failure), pieces: [.text(failure.reason)], delivery: .sent, turn: turn, madeAt: message.createdAt).stamped()]
+            return
+        }
+        if message.role == "user", message.metadata?.senderAgentId == agentId {
+            // Stamped with this agent as its sender: never the person's words.
+            let text = message.content.compactMap { block -> String? in if case .text(let text) = block { text } else { nil } }.joined(separator: "\n")
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let explanation = message.metadata?.senderAgentExplanation.flatMap { $0.isEmpty ? nil : $0 }
+            made.items = [ChatItem(id: message.id, role: .own(explanation: explanation, pipelineRun: message.metadata?.pipelineRun),
+                                   pieces: trimmed.isEmpty ? [] : [.text(trimmed)], delivery: .sent, turn: turn, madeAt: message.createdAt).stamped()]
             return
         }
         if message.role == "user" || message.role == "agent", let sender = Self.collaborator(message, agentId: agentId, parentAgentId: parentAgentId) {
@@ -2288,7 +2345,7 @@ public actor Conversation {
             let text = message.content.compactMap { block -> String? in if case .text(let text) = block { text } else { nil } }.joined(separator: "\n")
             let body = message.role == "agent" ? Self.inboundText(text, agentId: sender.agentId) : text
             let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-            made.items = [ChatItem(id: message.id, role: .collaborator(agentId: sender.agentId, explanation: sender.explanation), pieces: trimmed.isEmpty ? [] : [.text(trimmed)], delivery: .sent, turn: turn).stamped()]
+            made.items = [ChatItem(id: message.id, role: .collaborator(agentId: sender.agentId, explanation: sender.explanation), pieces: trimmed.isEmpty ? [] : [.text(trimmed)], delivery: .sent, turn: turn, madeAt: message.createdAt).stamped()]
             return
         }
         // The agent that manages this one gives it its work: desktop reads
@@ -2320,7 +2377,7 @@ public actor Conversation {
                 if !segmentLayout, let kept = old?.segments[segment], kept.key == key {
                     item = kept.item
                 } else {
-                    let made = ChatItem(id: segment, role: role, pieces: pieces, delivery: delivery, turn: turn, time: time, author: author)
+                    let made = ChatItem(id: segment, role: role, pieces: pieces, delivery: delivery, turn: turn, time: time, author: author, madeAt: agentRole ? message.createdAt : nil)
                     item = made.stamped()
                 }
                 // Made from shown media, which may move: made again each time.
@@ -2349,7 +2406,7 @@ public actor Conversation {
                 return nil
             }
             block.decided = true
-            block.row = (ChatItem(id: block.callId, role: role, pieces: showing, delivery: .sent, turn: turn).stamped(), showing)
+            block.row = (ChatItem(id: block.callId, role: role, pieces: showing, delivery: .sent, turn: turn, madeAt: message.createdAt).stamped(), showing)
             return block.row?.item
         }
         for (index, block) in message.content.enumerated() {

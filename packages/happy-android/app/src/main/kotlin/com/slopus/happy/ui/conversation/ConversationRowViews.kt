@@ -44,6 +44,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.R
+import com.slopus.happy.pipelines.PipelineRunNotice
 import com.slopus.happy.chat.ChatMessage
 import com.slopus.happy.chat.ChatRow
 import com.slopus.happy.chat.MessageDelivery
@@ -153,6 +154,8 @@ class ConversationRowActions(
     val pages: InlinePages? = null,
     /** Gen UI artifacts drawn under their cards; null where none are. */
     val genUi: GenUiInline? = null,
+    /** Opens the run a pipeline's result tells of; null where nothing opens it, and its card is only read. */
+    val onOpenPipelineRun: ((PipelineRunNotice) -> Unit)? = null,
 )
 
 /** Plays the recording [ref] whose tile is [key]: in the viewer, once it can ([VideoOpening]). */
@@ -220,6 +223,7 @@ fun ConversationRowView(row: ConversationRow, bubble: BubblePalette, actions: Co
             is ConversationRow.User -> UserRow(row, bubble, actions, content)
             is ConversationRow.Text -> TextRow(row, actions, content)
             is ConversationRow.Tool -> ToolLine(row.tool, content, onOpen = actions.opener(row.tool))
+            is ConversationRow.Section -> ToolSectionRow(row, actions, content)
             is ConversationRow.Reasoning -> ReasoningProse(row, content)
             is ConversationRow.Picture -> Box(content.fillMaxWidth().padding(horizontal = ConversationRowSpec.marginHorizontal, vertical = ConversationRowSpec.marginVertical)) {
                 InlinePictures(row.key, listOf(row.image), actions, MediaFlow.tool, alignEnd = false)
@@ -258,8 +262,9 @@ fun ConversationRowView(row: ConversationRow, bubble: BubblePalette, actions: Co
                 }
             }
             is ConversationRow.Collaborator -> CollaboratorProse(row, actions.legacy, content)
+            is ConversationRow.SelfNote -> SelfNoteRow(row, actions, content)
             is ConversationRow.Failure -> FailureRow(row, actions, content)
-            is ConversationRow.Ask -> AskRow(row, actions.asks, content)
+            is ConversationRow.Ask -> if (row.line) AnsweredLine(row, content) else AskRow(row, actions.asks, content)
             is ConversationRow.TurnEnd -> TurnEndRow(row, content)
             is ConversationRow.Trace -> TraceRow(row, actions.onToggleTurn, content)
             is ConversationRow.Notice -> Text(

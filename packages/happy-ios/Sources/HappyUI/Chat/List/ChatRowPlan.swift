@@ -191,6 +191,9 @@ enum ChatDrawItem {
     case embed(ChatEmbed, frame: CGRect)
     /// A person's own message's clock or checks (`ChatDeliveryView`).
     case delivery(ChatDeliveryMark, frame: CGRect)
+    /// A tool section's one line (`ChatToolLineView`): it keeps what it
+    /// showed and replaces it letter by letter.
+    case toolLine(ChatToolLine, frame: CGRect)
 }
 
 /// What an embedded view shows.
@@ -328,6 +331,8 @@ enum ChatRowAction: Equatable, Sendable {
     case playAttachment(ChatAttachment)
     /// A V2 artifact's card.
     case openArtifact(Artifact)
+    /// A pipeline result's row: its run's page.
+    case openPipelineRun(runId: String, pipelineName: String?)
     /// A finished V2 turn's "View traces" / "Hide traces", by its run.
     case toggleTurn(String)
 
