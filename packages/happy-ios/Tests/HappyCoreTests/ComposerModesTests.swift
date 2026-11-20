@@ -159,9 +159,12 @@ final class ModelModeOptionsTests: XCTestCase {
     func testCuratedCodexModelsMostCapableFirst() {
         let models = Options.hardcodedModelModes(flavor: "codex")
         XCTAssertEqual(keys(models), [
-            "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+            "gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna",
+            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
         ])
-        XCTAssertEqual(models[0].name, "GPT-6 Astra")
+        XCTAssertEqual(models[0].name, "GPT-6.2 Astra")
+        XCTAssertEqual(models[0].description, "most capable")
+        XCTAssertNil(models[2].description, "GPT-6 Astra is no longer the most capable")
         XCTAssertEqual(models[0].providerId, "openai")
         XCTAssertEqual(models[0].providerName, "OpenAI")
     }
@@ -170,11 +173,12 @@ final class ModelModeOptionsTests: XCTestCase {
         let models = Options.hardcodedModelModes(flavor: "codex")
         let withCustom = Options.includeConfiguredModel(flavor: "codex", models: models, configured: "my-workspace-model")
         XCTAssertEqual(keys(withCustom), [
-            "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+            "gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna",
+            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
             "my-workspace-model",
         ])
         XCTAssertEqual(withCustom.last, ModeOption(key: "my-workspace-model", name: "my-workspace-model", description: "custom model"))
-        XCTAssertEqual(models.count, 8)
+        XCTAssertEqual(models.count, 10)
         XCTAssertEqual(Options.includeConfiguredModel(flavor: "gemini", models: models, configured: "my-workspace-model"), models)
         XCTAssertEqual(Options.includeConfiguredModel(flavor: "openclaw", models: models, configured: "my-workspace-model"), models)
     }
@@ -225,7 +229,7 @@ final class ModelModeOptionsTests: XCTestCase {
     func testEveryCodexModelGetsTheLevelsItsRegistryPublishes() {
         let full = ["low", "medium", "high", "xhigh", "max", "ultra"]
         let luna = ["low", "medium", "high", "xhigh", "max"]
-        for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"] {
+        for model in ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"] {
             XCTAssertEqual(keys(Options.effortLevelsForModel(flavor: "codex", modelKey: model)), full, model)
         }
         for model in ["gpt-6-luna", "gpt-5.6-luna"] {
@@ -257,6 +261,7 @@ final class ModelModeOptionsTests: XCTestCase {
         XCTAssertEqual(Options.defaultEffortKey(flavor: "codex"), "medium")
         XCTAssertEqual(Options.defaultPermissionModeKey(flavor: "agy"), "default")
         XCTAssertEqual(Options.defaultModelKey(flavor: "agy"), "Gemini 3.8 Flash")
+        XCTAssertEqual(Options.defaultModelKey(flavor: "agy", cliVersion: "1.2.7-beta.0"), "Gemini 4 Hydrogen")
         XCTAssertEqual(Options.defaultEffortKey(flavor: "agy"), "medium")
         XCTAssertEqual(Options.defaultEffortKeyForModel(flavor: "gemini", modelKey: "gemini-2.5-pro"), nil)
         XCTAssertEqual(Options.defaultEffortKeyForModel(flavor: "codex", modelKey: "gpt-6-luna"), "medium")
@@ -307,13 +312,24 @@ final class ModelModeOptionsTests: XCTestCase {
         let models = Options.availableModels(flavor: "agy", metadata: nil)
         XCTAssertEqual(models, Options.hardcodedModelModes(flavor: "agy"))
         let keys = keys(models)
+        XCTAssertTrue(keys.contains("Gemini 4 Neon"))
+        XCTAssertTrue(keys.contains("Gemini 4 Carbon"))
+        XCTAssertTrue(keys.contains("Gemini 4 Argon"))
+        XCTAssertTrue(keys.contains("Gemini 4 Hydrogen"))
         XCTAssertTrue(keys.contains("Gemini 3.8 Flash"))
         XCTAssertEqual(Options.defaultModelKey(flavor: "agy"), "Gemini 3.8 Flash")
-        XCTAssertEqual(keys.filter { $0.hasPrefix("Gemini ") }, ["Gemini 3.8 Flash"])
+        XCTAssertEqual(Options.defaultModelKey(flavor: "agy", cliVersion: "1.2.7-beta.0"), "Gemini 4 Hydrogen")
+        XCTAssertEqual(keys.filter { $0.hasPrefix("Gemini ") }, ["Gemini 4 Neon", "Gemini 4 Carbon", "Gemini 4 Argon", "Gemini 4 Hydrogen", "Gemini 3.8 Flash"])
+        XCTAssertEqual(self.keys(Options.effortLevelsForModel(flavor: "agy", modelKey: "Gemini 4 Neon")), ["low", "medium", "high", "xhigh"])
+        XCTAssertEqual(self.keys(Options.effortLevelsForModel(flavor: "agy", modelKey: "Gemini 4 Carbon")), ["low", "medium", "high"])
+        XCTAssertEqual(self.keys(Options.effortLevelsForModel(flavor: "agy", modelKey: "Gemini 4 Argon")), ["low", "medium", "high"])
+        XCTAssertEqual(self.keys(Options.effortLevelsForModel(flavor: "agy", modelKey: "Gemini 4 Hydrogen")), ["low", "medium", "high", "xhigh"])
         XCTAssertEqual(self.keys(Options.effortLevelsForModel(flavor: "agy", modelKey: "Gemini 3.8 Flash")), ["low", "medium", "high"])
+        XCTAssertEqual(self.keys(Options.effortLevelsForModel(flavor: "agy", modelKey: "Orchestrator (Neon)")), [])
+        XCTAssertEqual(self.keys(Options.effortLevelsForModel(flavor: "agy", modelKey: "Orchestrator (Carbon)")), [])
         XCTAssertFalse(keys.contains("default"))
         XCTAssertFalse(keys.contains("opus"))
-        XCTAssertEqual(models.map(\.providerId), ["google", "anthropic", "anthropic", "openai"])
+        XCTAssertEqual(models.map(\.providerId), ["google", "google", "google", "google", "google", "google", "google", "google", "anthropic", "anthropic", "openai"])
     }
 
     func testASavedLegacyAgyModelStaysSelectable() {
@@ -445,6 +461,32 @@ final class ModelModeOptionsTests: XCTestCase {
         XCTAssertFalse(auto("not-a-version"))
         XCTAssertTrue(Options.modeSupportedByCli(sinceCliVersion: nil, cliVersion: "0.9.0"))
         XCTAssertTrue(Options.modeSupportedByCli(sinceCliVersion: nil, cliVersion: "not-a-version"))
+    }
+
+    func testFable52IsGatedOnTheCLIThatRunsIt() {
+        let models = Options.hardcodedModelModes(flavor: "claude")
+        XCTAssertEqual(models[0].sinceCliVersion, "1.2.7-beta.0")
+        XCTAssertTrue(models.dropFirst().allSatisfy { $0.sinceCliVersion == nil })
+        XCTAssertTrue(Options.hardcodedModelModes(flavor: "codex").allSatisfy { $0.sinceCliVersion == nil })
+
+        func offered(_ version: String?, selected: String? = nil) -> [String] {
+            keys(Options.availableModels(flavor: "claude", metadata: claudeOn(version), selectedKey: selected))
+        }
+        XCTAssertFalse(offered("1.2.6").contains("claude-fable-5-2"))
+        XCTAssertFalse(offered("not-a-version").contains("claude-fable-5-2"))
+        XCTAssertEqual(offered("1.2.6").count, 6)
+        XCTAssertEqual(offered("1.2.7-beta.0"), keys(models))
+        XCTAssertEqual(offered(nil), keys(models), "an unknown CLI is not gated")
+        // A saved pick stays selectable, as its own row.
+        XCTAssertEqual(offered("1.2.6", selected: "claude-fable-5-2"), keys(models))
+        XCTAssertEqual(
+            Options.availableModels(flavor: "claude", metadata: claudeOn("1.2.6"), selectedKey: "claude-fable-5-2").first?.name,
+            "Fable 5.2"
+        )
+    }
+
+    private func claudeOn(_ version: String?) -> JSONValue {
+        .object(["flavor": .string("claude")].merging(version.map { ["version": .string($0)] } ?? [:]) { $1 })
     }
 
     func testWhetherTheSessionCLICanParseASavedKey() {
@@ -673,7 +715,7 @@ final class ComposerModesTests: XCTestCase {
         XCTAssertEqual(modes.modelMode?.key, "claude-opus-5-5")
         XCTAssertEqual(modes.effortLevel?.key, "medium")
         XCTAssertEqual(modes.availableModes.count, 5)
-        XCTAssertEqual(modes.availableModels.count, 7)
+        XCTAssertEqual(modes.availableModels.count, 6, "no Fable 5.2 before 1.2.7-beta.0")
         XCTAssertEqual(modes.availableEffortLevels.map(\.key), ["low", "medium", "high", "xhigh", "max"])
     }
 
@@ -766,6 +808,19 @@ final class ComposerModesTests: XCTestCase {
         XCTAssertEqual(modes.modelMode?.key, "claude-opus-5")
         XCTAssertEqual(modes.effortLevel?.key, "medium")
         XCTAssertEqual(modes.availableModes.map(\.key), ["acceptEdits", "plan", "bypassPermissions", "default"])
+    }
+
+    func testANewSessionOffersFable52OnlyToACLIThatRunsIt() {
+        func modes(_ cliVersion: String?, overrides: [String: JSONValue] = [:], pick: String? = nil) -> ComposerModes {
+            ComposerModes.newSession(agentType: "claude", picks: ComposerPicks(modelMode: pick), agentDefaultOverrides: overrides, cliVersion: cliVersion)
+        }
+        XCTAssertFalse(modes("1.2.6").availableModels.contains { $0.key == "claude-fable-5-2" })
+        XCTAssertEqual(modes("1.2.6", pick: "claude-fable-5-2").modelMode?.key, "claude-opus-5-5", "a stale pick falls to the default")
+        XCTAssertEqual(modes("1.2.7-beta.0", pick: "claude-fable-5-2").modelMode?.key, "claude-fable-5-2")
+        XCTAssertEqual(modes(nil).availableModels.first?.key, "claude-fable-5-2")
+        let saved = modes("1.2.6", overrides: ["claude": json(#"{ "modelMode": "claude-fable-5-2" }"#)])
+        XCTAssertEqual(saved.modelMode?.key, "claude-fable-5-2")
+        XCTAssertEqual(saved.modelMode?.name, "Fable 5.2")
     }
 
     func testANewSessionKeepsASavedModelRow() {

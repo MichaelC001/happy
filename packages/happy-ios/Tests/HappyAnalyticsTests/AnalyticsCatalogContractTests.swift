@@ -31,6 +31,10 @@ final class AnalyticsCatalogContractTests: XCTestCase {
             case "bool": kind = .bool
             case "version": kind = .version
             case "os_version": kind = .osVersion
+            case "signal": kind = .signal
+            case "class_name": kind = .className
+            case "frame_list": kind = .frameList
+            case "build_uuid": kind = .buildUUID
             default: throw XCTSkip("unknown property type \(spec)")
             }
         }
@@ -55,7 +59,8 @@ final class AnalyticsCatalogContractTests: XCTestCase {
         let events = try XCTUnwrap(catalog["events"]?.objectValue).filter { forIOS($0.value) }
         XCTAssertEqual(Set(AnalyticsSchema.events.keys), Set(events.keys), "the iOS events")
         for (name, spec) in events {
-            let properties = try XCTUnwrap(spec["properties"]?.objectValue, name)
+            // A property may be another client's alone (its own "clients"), as a common one may.
+            let properties = try XCTUnwrap(spec["properties"]?.objectValue, name).filter { forIOS($0.value) }
             let swift = try XCTUnwrap(AnalyticsSchema.events[name], name)
             XCTAssertEqual(Set(swift.keys), Set(properties.keys), "\(name)'s properties")
             for (property, propertySpec) in properties {
@@ -86,6 +91,20 @@ final class AnalyticsCatalogContractTests: XCTestCase {
         XCTAssertEqual(AnalyticsEvent.ModelFamily(model: "claude-opus-4-5"), .other)
         XCTAssertEqual(AnalyticsEvent.ModelFamily(model: "acme/secret-project-model"), .other)
         XCTAssertEqual(AnalyticsEvent.ModelFamily(model: "Anthropic/Opus"), .other)
+    }
+
+    /// The catalog's crash signature types, by their own words, are the
+    /// Swift schema's checks.
+    func testTheCrashSignatureTypesMatchTheSharedCatalog() throws {
+        let types = try XCTUnwrap(catalog()["types"]?.objectValue)
+        XCTAssertEqual(types["class_name"]?.stringValue?.contains("^[A-Za-z_$][A-Za-z0-9_$.]{0,127}$"), true)
+        XCTAssertEqual(types["build_uuid"]?.stringValue?.contains("^[0-9A-F]{32}$"), true)
+        let frames = try XCTUnwrap(types["frame_list"]?.stringValue)
+        XCTAssertTrue(frames.hasPrefix("1 to \(CrashSignature.maxFrames) "))
+        XCTAssertTrue(frames.contains("at most \(AnalyticsSchema.maxFrameListLength) characters"))
+        XCTAssertTrue(frames.contains("^[A-Za-z0-9_.$-]{1,64}\\+0x[0-9a-f]{1,12}$"))
+        XCTAssertTrue(frames.contains("^[A-Za-z0-9_$.<>-]{1,128}:[0-9]{1,7}$"))
+        XCTAssertEqual(types["signal"]?.stringValue?.hasPrefix("integer 1..64"), true)
     }
 
     /// Versions go as numbers only: a suffix is cut, anything else is null.

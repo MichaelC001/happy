@@ -87,7 +87,7 @@ object ModeOptions {
 
     // The current generation by full model ID, one row each: every one is 1M-native.
     private val claudeModelModes = listOf(
-        ModeOption("claude-fable-5-2", "Fable 5.2", "1M context"),
+        ModeOption("claude-fable-5-2", "Fable 5.2", "1M context", AgentDefaults.CLI_VERSION_WITH_FABLE_5_2),
         ModeOption("claude-fable-5-1", "Fable 5.1"),
         ModeOption("claude-fable-5", "Fable 5"),
         ModeOption("claude-opus-5-5", "Opus 5.5"),
@@ -100,7 +100,9 @@ object ModeOptions {
     private val unlistedClaudeModelNames = mapOf("claude-sonnet-5" to "Sonnet 5")
 
     private val codexModelModes = listOf(
-        ModeOption("gpt-6-astra", "GPT-6 Astra", "most capable"),
+        ModeOption("gpt-6.2-astra", "GPT-6.2 Astra", "most capable"),
+        ModeOption("gpt-6.2-sol", "GPT-6.2 Sol"),
+        ModeOption("gpt-6-astra", "GPT-6 Astra"),
         ModeOption("gpt-6.1-sol", "GPT-6.1 Sol"),
         ModeOption("gpt-6.1-terra", "GPT-6.1 Terra"),
         ModeOption("gpt-6-sol", "GPT-6 Sol"),
@@ -122,9 +124,16 @@ object ModeOptions {
     private val openClawModelModes = listOf(ModeOption("default", "Default model"))
 
     private val agyModelModes = listOf(
+        ModeOption("Gemini 4 Neon", "Gemini 4 Neon"),
+        ModeOption("Gemini 4 Carbon", "Gemini 4 Carbon"),
+        ModeOption("Gemini 4 Argon", "Gemini 4 Argon"),
+        ModeOption("Gemini 4 Hydrogen", "Gemini 4 Hydrogen"),
+        ModeOption("Orchestrator (Neon)", "Orchestrator (Neon)"),
+        ModeOption("Orchestrator (Carbon)", "Orchestrator (Carbon)"),
+        ModeOption("Orchestrator (Argon)", "Orchestrator (Argon)"),
         ModeOption("Gemini 3.8 Flash", "Gemini 3.8 Flash"),
-        ModeOption("Claude Sonnet 4.6 (Thinking)", "Claude Sonnet 4.6 (Thinking)"),
-        ModeOption("Claude Opus 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)"),
+        ModeOption("Claude Opus 5.5", "Claude Opus 5.5"),
+        ModeOption("Claude Sonnet 5.5", "Claude Sonnet 5.5"),
         ModeOption("GPT-OSS 120B (Medium)", "GPT-OSS 120B (Medium)"),
     )
 
@@ -160,10 +169,20 @@ object ModeOptions {
     // The Agent SDK's EffortLevel union: one scale for every Claude model.
     private val claudeEfforts = listOf("low", "medium", "high", "xhigh", "max")
 
-    private val agyEffortsByModel = mapOf("Gemini 3.8 Flash" to listOf("low", "medium", "high"))
+    private val agyEffortsByModel = mapOf(
+        "Gemini 4 Neon" to listOf("low", "medium", "high", "xhigh"),
+        "Gemini 4 Carbon" to listOf("low", "medium", "high"),
+        "Gemini 4 Argon" to listOf("low", "medium", "high"),
+        "Gemini 4 Hydrogen" to listOf("low", "medium", "high", "xhigh"),
+        "Gemini 3.8 Flash" to listOf("low", "medium", "high"),
+        "Claude Opus 5.5" to listOf("low", "medium", "high"),
+        "Claude Sonnet 5.5" to listOf("low", "medium", "high"),
+    )
 
     // What each model publishes in Codex's registry, in its order.
     private val codexEffortsByModel = mapOf(
+        "gpt-6.2-astra" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
+        "gpt-6.2-sol" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
         "gpt-6-astra" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
         "gpt-6.1-sol" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
         "gpt-6.1-terra" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
@@ -212,6 +231,10 @@ object ModeOptions {
     /** filterPermissionModesForCli: the hardcoded lists only; a published catalog matches its own CLI. */
     fun filterPermissionModesForCli(modes: List<ModeOption>, cliVersion: String?): List<ModeOption> =
         modes.filter { com.slopus.happy.model.modeSupportedByCli(it, cliVersion) }
+
+    /** filterModelModesForCli: the hardcoded lists less models the CLI predates; [keeping], a saved pick, stays. */
+    fun filterModelModesForCli(models: List<ModeOption>, cliVersion: String?, keeping: String? = null): List<ModeOption> =
+        models.filter { it.key == keeping || com.slopus.happy.model.modeSupportedByCli(it, cliVersion) }
 
     /** modeHacks.ts `hackMode`: OpenCode's doubled "build, build" and "plan/plan" names. */
     fun hackMode(mode: ModeOption): ModeOption {
@@ -288,7 +311,8 @@ object ModeOptions {
      * (Astra first per provider), then its current model and a locally
      * picked `provider:model` key as disabled rows when the catalog lacks
      * them. Otherwise the session metadata's models (Codex gets a `default`
-     * row first), else the hardcoded list with [selectedKey] kept.
+     * row first), else the hardcoded list less what the session's CLI
+     * predates, with [selectedKey] kept.
      */
     fun availableModels(
         flavor: String?,
@@ -340,7 +364,8 @@ object ModeOptions {
             if (flavor == "codex" && published.none { it.key == "default" }) return listOf(ModeOption("default", "default model")) + published
             return published
         }
-        return includeConfiguredModel(flavor, modelModes(flavor), selectedKey)
+        val models = filterModelModesForCli(modelModes(flavor), metadata?.version, AgentDefaults.retireModelMode(flavor, selectedKey))
+        return includeConfiguredModel(flavor, models, selectedKey)
     }
 
     /** resolveCurrentOption: the first of [preferredKeys] the list has. */

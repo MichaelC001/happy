@@ -2,7 +2,9 @@ package com.slopus.happy.model.settings
 
 import com.slopus.happy.R
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -45,14 +47,20 @@ class ModeOptionsTest {
             ModeOptions.modelModes("claude").map { it.key },
         )
         assertEquals("1M context", ModeOptions.modelModes("claude")[0].description)
+        assertEquals(AgentDefaults.CLI_VERSION_WITH_FABLE_5_2, ModeOptions.modelModes("claude")[0].sinceCliVersion)
+        assertTrue(ModeOptions.modelModes("claude").drop(1).all { it.sinceCliVersion == null })
         assertEquals(
-            listOf("gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+            listOf(
+                "gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna",
+                "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+            ),
             ModeOptions.modelModes("codex").map { it.key },
         )
         assertEquals("most capable", ModeOptions.modelModes("codex")[0].description)
+        assertNull("GPT-6 Astra is no longer the most capable", ModeOptions.modelModes("codex")[2].description)
         assertEquals(6, ModeOptions.modelModes("gemini").size)
         assertEquals(listOf("default"), ModeOptions.modelModes("openclaw").map { it.key })
-        assertEquals("Gemini 3.8 Flash", ModeOptions.modelModes("agy")[0].name)
+        assertEquals("Gemini 4 Neon", ModeOptions.modelModes("agy")[0].name)
     }
 
     @Test
@@ -76,16 +84,34 @@ class ModeOptionsTest {
     }
 
     @Test
+    fun fable52OnlyForACliThatRunsIt() {
+        val claude = ModeOptions.modelModes("claude")
+        assertFalse(ModeOptions.filterModelModesForCli(claude, "1.2.6").any { it.key == "claude-fable-5-2" })
+        assertFalse(ModeOptions.filterModelModesForCli(claude, "garbage").any { it.key == "claude-fable-5-2" })
+        assertEquals(claude, ModeOptions.filterModelModesForCli(claude, "1.2.7-beta.0"))
+        assertEquals("an unknown CLI is not gated", claude, ModeOptions.filterModelModesForCli(claude, null))
+        assertEquals("a saved pick stays", claude, ModeOptions.filterModelModesForCli(claude, "1.2.6", keeping = "claude-fable-5-2"))
+    }
+
+    @Test
     fun effortLevelsPerModel() {
         assertEquals("xHigh", ModeOptions.effortDisplayName("xhigh"))
         assertEquals("Ultra", ModeOptions.effortDisplayName("ultra"))
 
         assertEquals(listOf("Low", "Medium", "High", "xHigh", "Max"), ModeOptions.effortLevelsForModel("claude", "claude-haiku-5-5").map { it.name })
+        assertEquals(listOf("low", "medium", "high", "xhigh", "max", "ultra"), ModeOptions.effortLevelsForModel("codex", "gpt-6.2-astra").map { it.key })
+        assertEquals(listOf("low", "medium", "high", "xhigh", "max", "ultra"), ModeOptions.effortLevelsForModel("codex", "gpt-6.2-sol").map { it.key })
         assertEquals(listOf("low", "medium", "high", "xhigh", "max", "ultra"), ModeOptions.effortLevelsForModel("codex", "gpt-6.1-sol").map { it.key })
         assertEquals(listOf("low", "medium", "high", "xhigh", "max", "ultra"), ModeOptions.effortLevelsForModel("codex", "gpt-6.1-terra").map { it.key })
         assertEquals(listOf("low", "medium", "high", "xhigh", "max"), ModeOptions.effortLevelsForModel("codex", "gpt-6-luna").map { it.key })
         assertEquals(listOf("low", "medium", "high", "xhigh"), ModeOptions.effortLevelsForModel("codex", "my-model").map { it.key })
+        assertEquals(listOf("low", "medium", "high", "xhigh"), ModeOptions.effortLevelsForModel("agy", "Gemini 4 Neon").map { it.key })
+        assertEquals(listOf("low", "medium", "high"), ModeOptions.effortLevelsForModel("agy", "Gemini 4 Carbon").map { it.key })
+        assertEquals(listOf("low", "medium", "high"), ModeOptions.effortLevelsForModel("agy", "Gemini 4 Argon").map { it.key })
+        assertEquals(listOf("low", "medium", "high", "xhigh"), ModeOptions.effortLevelsForModel("agy", "Gemini 4 Hydrogen").map { it.key })
         assertEquals(listOf("low", "medium", "high"), ModeOptions.effortLevelsForModel("agy", "Gemini 3.8 Flash").map { it.key })
+        assertEquals(emptyList<ModeOption>(), ModeOptions.effortLevelsForModel("agy", "Orchestrator (Neon)"))
+        assertEquals(emptyList<ModeOption>(), ModeOptions.effortLevelsForModel("agy", "Orchestrator (Carbon)"))
         assertEquals(emptyList<ModeOption>(), ModeOptions.effortLevelsForModel("agy", "GPT-OSS 120B (Medium)"))
         assertEquals(emptyList<ModeOption>(), ModeOptions.effortLevelsForModel("gemini", "gemini-2.5-pro"))
     }
