@@ -424,6 +424,52 @@ win:
   put into words: no error text, and an account with no windows, no
   model tokens and no history is left out (`usageVendors`).
   `UsageFixtures` is the test and shot data (`UsageShots`).
+- **Settings › Inference on a Happy Agent** (`ui/connection/ProviderAccounts.kt`,
+  `agent/ProviderSignIn.kt`, `agent/ProviderAccounts.kt`; named as desktop's
+  Settings › Inference, and iOS has the same pages and words; code keeps
+  the `ProviderAccounts` names) is happy-agent API.md's "Provider
+  sign-in": a row after Agents, only on a Happy Agent whose health says
+  `capabilities.providerSignIn` (kept per connection, never probed). Happy
+  Cloud's own Inference row (its AI providers) shows only on Cloud, so the
+  two never meet. Nothing on these pages moves with state: only what a
+  person typed or named may change a layout, and it is cut short, not
+  wrapped.
+  - The list is one Accounts card, a row per `codex`, `claude` and `grok`
+    account of `GET /v0/config` carrying `credential`, every row two lines:
+    vendor mark with a status dot, name and plan, chevron, and one line,
+    the first that applies (`AccountStatus`): Needs sign-in, since a
+    date where the error gives one (`signIn == "signed_out"` or a permanent
+    `login.refreshError`); Couldn't refresh (a transient error; its tail is
+    "expires in" in place of "last tried" when the login runs out within a
+    day); else Used/Not used yet and refreshed, "System login" first for
+    the machine's own. `lastUsedAt` and `login` come from `GET /v0/usage`;
+    an older agent without them gets "Last checked" from usage's
+    `refreshedAt`.
+  - Accounts switched off are left out of the list altogether, with no
+    way to show them (Steve); with every account off it is the empty
+    state, "Every account on this Happy Agent is switched off." (desktop's). An account switched off stays on
+    its page until it is left, so it can be switched back on there.
+  - A row opens the account: Enabled (`PATCH /v0/config`), then Login,
+    always the same five rows with "—" for what isn't known (Source, Last
+    used, Last refresh, Token expires, Last refresh error), then Sign in
+    again and Update token where `acceptsToken`.
+  - Signing in again is one page whose steps share a fixed-height area
+    and one action row (Cancel, Done, Try again or Close). A phone signs
+    in with `device`, or Claude's `browser` page with its code pasted
+    back; never Codex's or Grok's browser, which finishes on the computer.
+    The page started's operation is followed through
+    `provider_sign_in.updated` (the greater `version` wins) and read again
+    on resume and each reconnect; leaving it unfinished cancels it.
+  - The agent says nothing of who owns a team until it refuses (`403
+    forbidden`), so that refusal is remembered for the session and the
+    actions stay off with the reason. Codes and tokens are never kept,
+    logged or sent to analytics.
+  - Debug builds have `ui.connection.ProviderAccountsFixturesActivity`: the
+    real client over `ProviderSignInDaemon`, the contract in memory (`--es
+    providerAccounts.scene
+    normal|success|failure|owner|missing|states|legacy|off`, `--es
+    providerAccounts.account codex`, `--es providerAccounts.signIn codex`,
+    `--es providerAccounts.token claude_work`).
 - **Agent home search** looks and moves as iOS's
   (`HappyCore/Agents/Search.swift`, `SearchShown.swift`,
   `ui/connection/AgentSearch.kt`) and lists what desktop's ⌘K palette
@@ -1901,6 +1947,14 @@ screen, by tap, back or a drag, and otherwise fades. Then it waits for the
 thumbnail to draw again (`ViewerOrigins.drawn`) before it goes, so there
 is no hole. A recording neither flies nor hides its tile.
 
+A file's own screen (`ui/files/FileScreen`: a workspace file, or a relay
+session's) shows desktop FilePreview's pictures and recordings itself, by
+extension (`isPicturePath`, `isVideoPath`), not as "Binary File". A picture
+rests fitted to the rest of the screen, never enlarged, and zooms in place
+(`PageZoom`, as a viewer page); a tap opens the viewer. A recording plays in
+`VideoPage` without the viewer's motion, on its first frame until played.
+Both are read whole: the agent's `file` route has no ranges to stream.
+
 A tap on a kept recording's play button plays it as soon as its first
 playable range is on the phone (iOS 42121e99e, `VideoOpening`). The
 retriever reads the header through the same ranged source the player
@@ -2648,6 +2702,62 @@ every locale, not happy-i18n.
   own duration.
 - Tests: `vaults/*Test` (listing, events, uploads against a fake daemon,
   routes, presets) and `ui/vaults/VaultLayoutTest`.
+
+### Viewers
+
+Who else is on a conversation or a Surface, in its header (happy-agent
+API.md, "Viewers"; the same contract happy-cluster serves). `viewers/` is
+the wire and state, `ui/viewers/` the slot; words are
+`strings_viewers.xml` in every locale.
+
+- **Store** (`Viewers`, one per `AgentSession`): one owner coroutine takes
+  every change in order (views, the hello's `streamId`, the stream's end,
+  frames, answers), so nothing shown comes from a stream or a send that is
+  over. One PUT at a time per stream: the computer may still apply a call
+  that was given up, so the next waits for the answer, and only a new
+  stream or its end cancels the one out (the computer ends the old
+  stream's views itself). A screen holds its target while resumed
+  (`ViewersSlot` does it with `repeatOnLifecycle(RESUMED)`), so background,
+  lock and leaving all unview it; a target this stream was already sent
+  stays viewed 600 ms after its last screen leaves, so a 450 ms push to
+  another screen of it (a vault's folders) never leaves it. One not sent
+  yet just goes, and a new stream keeps none.
+  What is viewed (newest first, at most 8) goes to `PUT
+  /v0/viewers/streams/:streamId` 300 ms after the last change (trailing),
+  again 15 s after each send (from the send, not its answer), 3 s after a
+  failed one, and `[]` once nothing is and the stream may still hold
+  something: any non-empty send counts until an answered `[]` or a new
+  stream, so a lost answer still gets cleared. Each answer replaces the
+  lists; a target left for good loses its list. `viewers.updated` frames
+  (routed beside the document frames, never to the journal) that come after
+  it land on top in arrival order; one that overtook it is healed by the
+  next heartbeat. Answers and
+  frames are read entry by entry, so a target type this build doesn't know
+  drops alone. A 404 (standalone, older) hides the slot and asks nothing
+  more until a hello with another `streamId`.
+- **Tiers** (`ViewerTier`): Here, Recent (gone at most 10 minutes) and
+  Seen; the slot redraws at the next badge minute or tier change
+  (`ViewerTier.nextChange`), never on a fixed tick.
+- **Slot** (`ViewersSpec`): 104 wide whenever viewers are served, the same
+  with 0 or 50 people, so the title never moves; four faces 18 apart at its
+  end, then `+N`. Here wears a ring in the person's colour that breathes on
+  the RenderThread (`RenderThreadBreath`, `viewer_ring_breathe.xml`) and a
+  green dot, pops in on a spring and fades its ring as they go; faces move
+  by translation alone. Recent shows its minutes, Seen is smaller and grey.
+  A tap lists everyone: "here now", "4 minutes ago", "Nov 12". In a
+  document the slot is the one indicator once served (as on iOS): its list
+  marks who is editing in their cursor's colour, and adds editors the
+  viewers don't name (older clients). Right to left it mirrors; at large
+  text the minutes grow past their cell over the faces. `+N` is always
+  drawn over the faces.
+- **Where:** the chat's bar (`ConversationScreen(viewers)`) and every
+  Surface's bar beside its menu (todo, document, calendar, system monitor,
+  vault, references and the rest).
+- **Fixture:** debug builds have `ui.viewers.ViewersFixturesActivity`: the
+  real store and slot over an in-memory computer (`--es viewers.screen
+  chat|todo --es viewers.scene tiers|none|ten|live`). `LiveViewersTest`
+  runs two people's sessions against a real team-mode daemon when
+  `HAPPY_VIEWERS_ENV` names the JSON happy-agent's live fixture writes.
 
 ### Plugins
 

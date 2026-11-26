@@ -18,6 +18,8 @@ import com.slopus.happy.diagnostics.Timing
 import com.slopus.happy.diagnostics.traced
 import com.slopus.happy.documents.DocumentLibrary
 import com.slopus.happy.documents.DocumentStreams
+import com.slopus.happy.viewers.AgentViewersBackend
+import com.slopus.happy.viewers.Viewers
 import com.slopus.happy.feed.AgentFeedRoutes
 import com.slopus.happy.feed.FeedLibrary
 import com.slopus.happy.feed.FeedCovers
@@ -370,6 +372,13 @@ class AgentSession internal constructor(
     private val pipelinesAvailability = keptCapability(PIPELINES_AVAILABLE)
     val pipelinesAvailable: StateFlow<Boolean> get() = pipelinesAvailability.available
 
+    /** Whether Settings lists Inference (the agent's accounts): bootstrap health's `capabilities.providerSignIn`, never probed. */
+    private val providerSignInAvailability = keptCapability(PROVIDER_SIGN_IN_AVAILABLE)
+    val providerSignInAvailable: StateFlow<Boolean> get() = providerSignInAvailability.available
+
+    /** The provider accounts' sign-ins (Settings › Inference), made when a page first asks. */
+    val providerAccounts: ProviderAccounts by lazy { ProviderAccounts(AgentProviderSignIns(client), events, scope) }
+
     /** A capability kept in the connection's resources under [resource], so home's row doesn't come and go on each start. */
     private fun keptCapability(resource: String) = CapabilityAvailability(
         probe = null,
@@ -556,6 +565,9 @@ class AgentSession internal constructor(
      * `<connection>.documents/`; their live frames come off this session's stream.
      */
     val documents = DocumentLibrary(client, cacheFile?.let { File(it.parentFile, it.nameWithoutExtension + ".documents") }, scope)
+
+    /** Who else is on the conversations and Surfaces this phone shows. */
+    val viewers = Viewers(scope, AgentViewersBackend(client))
 
     val artifacts = com.slopus.happy.artifacts.ArtifactCatalogFeed(
         scope, fetch = { cursor -> ArtifactClient(client).catalog(cursor) },
@@ -1072,6 +1084,7 @@ class AgentSession internal constructor(
         client.noteHealth(bootstrap.health ?: JsonObject(emptyMap()))
         pluginsAvailability.noteHealth(info.plugins)
         pipelinesAvailability.noteHealth(info.pipelines)
+        providerSignInAvailability.noteHealth(info.providerSignIn)
         avatarHash = info.thumbhash?.takeIf { it != known?.thumbhash || known.avatarFile == null }
         if (known != null) {
             val hasNode = bootstrap.config?.get("node") is JsonObject
@@ -1116,6 +1129,10 @@ class AgentSession internal constructor(
                         documents.frame(frame.event, frame.data)
                         continue
                     }
+                    if (frame.event == Viewers.FRAME) {
+                        viewers.frame(frame.data)
+                        continue
+                    }
                     val event = frame.toAgentEvent() ?: continue
                     if (event.type == AgentEvent.HELLO) {
                         Timing.mark("link.hello")
@@ -1127,6 +1144,7 @@ class AgentSession internal constructor(
                         drainingState.value = hello.draining
                         statusState.value = AgentLinkStatus.Connected
                         phaseState.value = SyncPhase.P0Live
+                        viewers.opened(event.data.string("streamId"))
                         snapshot.await()
                         if (hello.gap && (resumed || wasVerified)) readSnapshot()
                         resumeAllowed = true
@@ -1169,6 +1187,7 @@ class AgentSession internal constructor(
         } finally {
             secondary?.cancel()
             documents.closed()
+            viewers.closed()
             feedLibrary.disconnected()
             stream.close()
         }
@@ -1423,6 +1442,8 @@ class AgentSession internal constructor(
     private companion object {
         /** Where the connection keeps whether it has pipelines. */
         const val PIPELINES_AVAILABLE = "pipelines-available"
+        /** Where the connection keeps whether its accounts sign in here. */
+        const val PROVIDER_SIGN_IN_AVAILABLE = "provider-sign-in-available"
 
         /** Surface events that come together read the snapshot once. */
         const val SNAPSHOT_COALESCE = 300L

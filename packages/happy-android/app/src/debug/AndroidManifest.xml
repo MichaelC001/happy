@@ -44,6 +44,11 @@
         <activity
             android:name=".ui.pipelines.PipelinesFixturesActivity"
             android:exported="true" />
+        <!-- The header's viewers over an in-memory computer (ui/viewers/ViewersFixturesActivity). -->
+        <activity
+            android:name=".ui.viewers.ViewersFixturesActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize" />
         <!-- The plugin pages over an in-memory Happy Cloud server (ui/plugins/PluginsFixturesActivity). -->
         <activity
             android:name=".ui.plugins.PluginsFixturesActivity"
@@ -52,6 +57,11 @@
         <!-- The AI providers list, add chooser, API key and own-endpoint pages over an in-memory server (ui/connection/CloudProvidersFixturesActivity). -->
         <activity
             android:name=".ui.connection.CloudProvidersFixturesActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize" />
+        <!-- Settings › Inference (a Happy Agent's accounts) and its sign-in and token pages over the contract in memory (ui/connection/ProviderAccountsFixturesActivity). -->
+        <activity
+            android:name=".ui.connection.ProviderAccountsFixturesActivity"
             android:exported="true"
             android:windowSoftInputMode="adjustResize" />
         <!-- Settings › Compute over a live plain-HTTP test API, token in the intent (ui/connection/ComputeLiveActivity). -->

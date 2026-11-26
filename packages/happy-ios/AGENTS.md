@@ -532,6 +532,29 @@ and fixtures remain. Preserve credential and push compatibility on upgrades.
   list stays current through its feed (events, a resync after a gap, a
   read when it opens or the stream reconnects); a page reloads from its
   header's button.
+- **Viewers in headers** (Steve, every client), on a team server's agent
+  conversations and Surface screens (`ViewersBarItem`, `ViewersSlotView`; the
+  store is `SyncEngine.viewers`, `Core/Viewers/`). The route is
+  happy-agent `API.md`'s Viewers: `PUT /v0/viewers/streams/:streamId`
+  and `viewers.updated` frames.
+  - A screen views its target while its slot is in a window; the app in
+    the background views nothing (`[]`). Every target shown goes in one
+    PUT, again every 15 s. A PUT whose answer was lost counts as applied,
+    so leaving after it still says `[]`. PUTs on one stream go one at a
+    time and are never cancelled (a cancelled body may still land after a
+    later `[]`); a new or closed stream retires the old one's pump, its
+    request cancelled and its answer ignored. A 404 hides the slot until the
+    next stream; the item, not the slot, watches for that and for the
+    bootstrap that makes it a team's (not loaded is not standalone).
+  - Only an answer on this stream, for a target still on screen, is live.
+    Kept lists (reopened, reconnected, back from away) show nobody here:
+    whoever was is drawn as last seen then, until a fresh answer.
+  - The slot is 88 wide whenever it shows, so a header with nobody is
+    laid out as one with fifty. Motion is Core Animation only (the ring's
+    breathing, the pop, the fades); faces are placed only on news or a
+    tier's change (`ViewerTiers.nextChange`).
+  - No haptic on an arrival: `Haptics` plays only for the person's own
+    acts.
 
 ## Record kinds: current vs retired
 
