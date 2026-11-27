@@ -2229,6 +2229,8 @@ normalization as the photo picker.
 
 The composer's label slot holds two chips, as iOS does (e2238fdc4,
 083c30df4): the model (bold) and its effort (`ConversationModelChips`).
+When both don't fit, only the model gives way: its name is cut and the
+effort keeps its width (iOS `AgentInputCardLayout.middle`).
 Each opens its own list (`ui/conversation/ModelPicker`), in Android's
 menu card instead of iOS glass. The list's trailing edge sits on the
 chip's, 10 dp above it, and it opens scrolled to the checked line.
@@ -2777,12 +2779,23 @@ words are `strings_plugins.xml` in every locale.
   reconnect, after every write and when a page resumes (back from a sign-in
   in the browser). Refusals are a typed `PluginRefusal`; refused setup fields
   show under their field in the server's words.
-- **Pages:** the list (Installed, then Available), a plugin (Install, Install
+- **Pages:** the list (Installed, then Available, then Features: feature
+  plugins not installed, apart so the role note under Available isn't
+  read as theirs), a plugin (Install, Install
   again where it may be installed more than once, its installations and
   tools), an installation (Set up by OAuth in a Custom Tab or by fields,
   Signed in with per-account Disconnect, Remove; each confirmed). Someone
   whose role can't manage plugins reads them. `NavHostController.openPlugin`
   opens one plugin from anywhere (Gen UI's `plugin` action).
+- **Feature plugins** (happy-cluster API.md, "Feature plugins"): a catalog
+  entry of `kind: "feature"` (`Plugin.feature`) is one of the app's own
+  features, the person's own in every team. Anyone may install it (no
+  `canManage`, `PluginsSnapshot.mayInstall`), once, with nothing to set up:
+  its page has Install, or Uninstall (confirmed) and a note that uninstalling
+  keeps the data. Its installation (ID = the plugin's) opens no page. The
+  catalog's `installed` stands in for an installations list a member is
+  refused. Installing or uninstalling tells `FeaturesSource` at once
+  (`noteFeature`); `features.updated` from the server follows.
 - **Fixture:** debug builds have `ui.plugins.PluginsFixturesActivity`: the
   real pages over an in-memory server (`--ez plugins.member true` for a
   member).
@@ -2796,9 +2809,27 @@ pages; words are `strings_pipelines.xml` in every locale.
 
 - **Where:** home's Pipelines row under Plugins (`AgentFeedRow.Pipelines`,
   `MainPanelKey.PIPELINES` on the tablet), shown only while health says
-  `capabilities.pipelines` (`AgentSession.pipelinesAvailable`, a
-  `CapabilityAvailability` kept per connection so the row doesn't come and
-  go). Nothing is probed: without the flag there is no row and no request.
+  `capabilities.pipelines` (a `CapabilityAvailability` kept per connection
+  so the row doesn't come and go) and the person hasn't uninstalled them
+  (`AgentSession.pipelinesAvailable`). Nothing is probed: without the flag
+  there is no row and no request.
+- **Uninstalled** (happy-cluster API.md, "Feature plugins";
+  `agent/Features.kt`): Pipelines is a feature plugin (see Plugins), the
+  person's own in every team they are in. `FeaturesSource` keeps
+  `GET /v0/features` (`available` per feature), read on every `hello`
+  (coming back to the foreground starts the link, so that is one too) where
+  health says `capabilities.features`, and once it does. `features.updated`
+  replaces the list with its payload's, live, and a read on its way
+  meanwhile is dropped. Without the flag, or on 404/501, every feature is
+  available; so is a feature not listed or a list not known yet. While
+  Pipelines is unavailable (`pipelinesTurnedOff`): no home row (so no tablet
+  or search entry), a run's card in a chat opens nothing, and
+  `PipelinesOffEffect` takes every pipeline page off the stack, with what
+  was opened over them, back to the page under the first (the empty panel
+  on a tablet). A route answering `403 feature_not_installed` marks it
+  unavailable here at once (`ClusterPipelines`' `turnedOff`), and its read
+  never answers (`PipelinesTurnedOff` in `attempt`), so the leaving page
+  shows no error. There is no switch in Settings.
 - **Wire:** `PipelinesBackend` (`ClusterPipelines`). Readers are tolerant
   as desktop's: what isn't the shape is left out, a name the server leaves
   out is the ID, `trigger.agentId` may be null. `GET /v0/pipeline-runs`
@@ -2873,7 +2904,12 @@ pages; words are `strings_pipelines.xml` in every locale.
   pipeline, with `--ei pipelines.version 2` a version, and with
   `--es pipelines.node triage` that version's node; `--ez pipelines.chat
   true` a chat told how its runs ended (`pipelines.chat.before` draws the
-  agent's own messages as before they were told apart).
+  agent's own messages as before they were told apart). Home has Plugins
+  too, with Pipelines as a feature plugin for a member; its row follows it,
+  and `am start -f 0x20000000 … --es pipelines.feature off|on` is another app
+  uninstalling or installing it (`plugins.changed` and `features.updated`;
+  with `--ez pipelines.feature.quiet true` no event, so the next read is
+  refused 403).
 
 ## Autocomplete
 
@@ -2919,3 +2955,16 @@ the task or bot's first message once it is made. The new agent's catalog (its
 bootstrap) decides: without that name, or with attachments, the words go as
 plain text. A failure leaves the message failed with Retry, as a first send's
 does. Other commands wait for an agent.
+
+Happy Agent chats, new work included, mention teammates from the same list
+(desktop's happyAgentMentionPlaces.ts): an `@` word at the cursor offers the
+bootstrap's `teammates` (`session.team`, kept offline; Happy Agent in team
+mode and Happy Cloud send it, standalone doesn't, so nobody is offered there),
+the reader left out, those whose name holds the word, five at most
+(`searchPeople`). A pick writes `[Name](happy://users/<id>)` (`mentionMarkdown`),
+which is what is sent and saved; in a task's chat the computer brings the
+person in (API.md "Mentioning from a message"). The field shows each such
+link as "@Name" in the strong face through an `OutputTransformation`
+(`ui/autocomplete/ComposerMentions`, desktop's composer mention): the caret
+steps over it and a delete into it takes it whole, keyboard or IME. Debug
+builds' `ViewersFixturesActivity` chat offers its people.

@@ -445,6 +445,9 @@ class Conversation(
     /** The kept history has been read from [keeper], or there was none to read. */
     private var restored = false
 
+    /** What was restored was kept by a build that didn't check messages: the next history read is whole. */
+    private var unchecked = false
+
     /**
      * Catches up with the agent. The first read starts from what this phone
      * kept, shown as soon as the disk answers; then the agent is asked only
@@ -500,12 +503,15 @@ class Conversation(
     /**
      * The last message of the newest run that has finished, where a catch-up
      * starts (API.md `after`). The newest run may still be going, so it is
-     * read whole again unless it is known to have finished.
+     * read whole again unless it is known to have finished. Only an ID the
+     * computer knows ([Message.serverId]) anchors: past a placeholder it sent
+     * with none, the last one before it; with none at all, a whole read.
      */
     private fun anchor(): String? {
+        if (unchecked) return null
         val going = lastTurn()?.takeIf { running || runInfo[it]?.status == "running" }
         val finished = if (going != null) runs.subList(0, runs.indexOfFirst { it.first == going }) else runs
-        return finished.lastOrNull { it.second.isNotEmpty() }?.second?.last()
+        return finished.asReversed().firstNotNullOfOrNull { run -> run.second.asReversed().firstNotNullOfOrNull { messages[it]?.serverId } }
     }
 
     private suspend fun readHistory(): HistoryRead {
@@ -523,7 +529,7 @@ class Conversation(
             // A daemon that ignored `after` sent the newest page, anchor and all: that is a whole read.
             if (page.runs.any { run -> run.messages.any { it.id == anchor } }) return HistoryRead(page.runs, page.hasMore, null)
             runs += page.runs
-            val last = page.runs.lastOrNull { it.messages.isNotEmpty() }?.messages?.last()?.id
+            val last = page.runs.asReversed().firstNotNullOfOrNull { run -> run.messages.asReversed().firstNotNullOfOrNull { it.serverId } }
             if (!page.hasMore || last == null) return HistoryRead(runs, snapshot.hasMore, anchor)
             after = last
         }
@@ -546,6 +552,7 @@ class Conversation(
         kept ?: return
         // Something came in while the disk was read: that is newer than what was kept.
         if (runs.isNotEmpty() || pending.isNotEmpty()) return
+        unchecked = !kept.checked
         for (run in kept.runs) putRun(run)
         for (message in kept.pending) {
             messages[message.id] = message
@@ -563,6 +570,7 @@ class Conversation(
     }
 
     private fun adopt(start: Bootstrap, read: HistoryRead) {
+        if (read.anchor == null) unchecked = false
         agent = start.agent
         mode = picked ?: start.draft?.mode ?: start.mode ?: mode
         start.draft?.let { adoptDraft(it) }
@@ -635,6 +643,8 @@ class Conversation(
             agent = agent,
             mode = mode,
             slashCommands = snapshot.commands,
+            // Kept unchecked until the whole read has come, so a failed one is tried again next open.
+            checked = !unchecked,
             syncedAt = snapshot.syncedAt,
         )
         try {
@@ -693,7 +703,8 @@ class Conversation(
         val payload = event.payload
         when (event.type) {
             "message.created", "message.updated" -> {
-                val message = Message.parse(payload["message"]) ?: return
+                // One that fails the protocol's check is its placeholder; one with no ID to place it by comes with history.
+                val message = Message.decode(payload["message"], "").takeIf { it.id.isNotEmpty() } ?: return reconcileSoon()
                 messages[message.id] = message
                 outgoing.removeAll { it.id == message.id }
                 uploads.clear(message.id)
@@ -706,6 +717,8 @@ class Conversation(
                 val index = payload["blockIndex"].num?.toInt() ?: return
                 val append = payload["append"].str ?: return
                 val message = messages[id]
+                // A placeholder has no blocks to grow: the message's update is checked again.
+                if (message?.undisplayable != null) return
                 val grown = message?.let { grow(it, index, payload["offset"].num?.toInt(), append) }
                 if (grown == null) {
                     reconcileSoon()
