@@ -8,7 +8,7 @@ import com.slopus.happy.call.CallControl
 import androidx.compose.material3.FloatingActionButtonDefaults
 import com.slopus.happy.BuildConfig
 import androidx.compose.ui.platform.LocalContext
-import com.slopus.happy.ui.voice.rememberMicrophonePermission
+import com.slopus.happy.ui.call.rememberMicrophonePermission
 import com.slopus.happy.ui.call.CallFixtures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.ui.semantics.contentDescription
@@ -109,6 +109,11 @@ import com.slopus.happy.ui.chat.MessageLiftSpec
 import androidx.compose.ui.platform.LocalDensity
 import com.slopus.happy.agent.AgentFeed
 import com.slopus.happy.agent.AgentFeedRow
+import com.slopus.happy.agent.homePage
+import com.slopus.happy.ui.home.AccountAvatarButton
+import com.slopus.happy.ui.home.AccountMenuSpec
+import com.slopus.happy.ui.tablet.MainPanelTags
+import com.slopus.happy.ui.tablet.LocalMainPanel
 import com.slopus.happy.agent.AgentLinkStatus
 import com.slopus.happy.agent.TeamUser
 import com.slopus.happy.connection.LinkState
@@ -171,6 +176,7 @@ class AgentHomeActions(
     val onSignIn: () -> Unit = {},
     /** Opens new work with "+"'s sheet up, for its first message's picture. */
     val onComposeWithPicture: () -> Unit = onCompose,
+    val onOpenDocuments: () -> Unit = {},
     val onOpenTodos: () -> Unit = {},
     val onOpenPlugins: () -> Unit = {},
     val onOpenPipelines: () -> Unit = {},
@@ -272,6 +278,10 @@ fun AgentHomeScreen(
     // As the tablet's sidebar, home wears its chrome (iOS f3ac778cb): search is a field at the top of the list,
     // settings and compose a bar at its foot, and the bar holds the account and its name alone.
     val sidebar = LocalSidebarHome.current
+    // On a phone with the drawer (an agent connection's), the account, Settings and home's places are the drawer's:
+    // home is its bots, tasks and projects, and its bar's start is the drawer's button.
+    val drawer = sidebar == null && LocalMainPanel.current?.drawer == true
+    val shownFeed = remember(feed, drawer) { if (drawer) feed.withoutPlaces() else feed }
     var searching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     val focus = LocalFocusManager.current
@@ -295,7 +305,7 @@ fun AgentHomeScreen(
         if (atStart) listState.scrollToItem(0)
     }
 
-    val items = remember(feed) { agentHomeItems(feed) }
+    val items = remember(shownFeed) { agentHomeItems(shownFeed) }
     // New work takes the screen, so the search gives it back first (iOS); everything else leaves it for coming back.
     val compose = {
         closeSearch()
@@ -305,7 +315,8 @@ fun AgentHomeScreen(
     val untitled = stringResource(R.string.session_new_chat)
     val artifacts = stringResource(R.string.artifacts_title)
     val feedTitle = stringResource(R.string.feed_title)
-    val todos = stringResource(R.string.agent_search_todos)
+    val documents = stringResource(R.string.surface_lists_documents)
+    val todos = stringResource(R.string.surface_lists_todos)
     val plugins = stringResource(R.string.plugins_title)
     val pipelines = stringResource(R.string.pipelines_title)
     val words = rememberAgentSearchWords()
@@ -343,6 +354,7 @@ fun AgentHomeScreen(
                 AgentFeedRow.Plugins -> plugins
                 AgentFeedRow.Pipelines -> pipelines
                 is AgentFeedRow.Feed -> feedTitle
+                AgentFeedRow.Documents -> documents
                 AgentFeedRow.Todos -> todos
                 is AgentFeedRow.Section -> null
             }
@@ -361,7 +373,7 @@ fun AgentHomeScreen(
         !feed.loaded && !status.needsAction -> HomePhase.Loading
         !feed.loaded -> HomePhase.Unavailable
         // Fixed places alone are no home yet: the first chat is.
-        feed.rows.all { it is AgentFeedRow.Section || it == AgentFeedRow.Artifacts || it == AgentFeedRow.Plugins || it == AgentFeedRow.Pipelines || it is AgentFeedRow.Feed || it == AgentFeedRow.Todos } -> HomePhase.Empty
+        shownFeed.rows.all { it is AgentFeedRow.Section || it.homePage } -> HomePhase.Empty
         else -> HomePhase.List
     }
     val chatPreview = remember { ChatPreview() }
@@ -390,12 +402,22 @@ fun AgentHomeScreen(
                     AgentTopBar(
                         tag = AgentHomeTags.BAR,
                         container = ground,
-                        navigationIcon = { AccountMenuButton(accounts, actions.onSwitchAccount, actions.onAdd) },
+                        navigationIcon = {
+                            // With the drawer the account's picture stays, and opens the drawer, whose header switches.
+                            if (drawer) {
+                                val panel = LocalMainPanel.current
+                                Box(Modifier.padding(horizontal = AccountMenuSpec.buttonInset)) {
+                                    AccountAvatarButton(accounts, stringResource(R.string.drawer_open), MainPanelTags.DRAWER) { panel?.openDrawer() }
+                                }
+                            } else {
+                                AccountMenuButton(accounts, actions.onSwitchAccount, actions.onAdd)
+                            }
+                        },
                         title = { BarTitle(name, link, AgentHomeTags.TITLE, AgentHomeTags.STATUS) },
                         actions = {
                             if (sidebar == null) {
                                 BarIconButton(Ionicon.SearchOutline, stringResource(R.string.tools_names_search), { searching = true }, Modifier.testTag(AgentHomeTags.SEARCH))
-                                BarIconButton(Ionicon.SettingsOutline, stringResource(R.string.settings_title), actions.onSettings, Modifier.testTag(AgentHomeTags.SETTINGS))
+                                if (!drawer) BarIconButton(Ionicon.SettingsOutline, stringResource(R.string.settings_title), actions.onSettings, Modifier.testTag(AgentHomeTags.SETTINGS))
                             }
                         },
                         inset = HomeCardSpec.inset,
@@ -439,6 +461,7 @@ fun AgentHomeScreen(
                             onOpen = actions.onOpenConversation,
                             onOpenArtifacts = actions.onOpenArtifacts,
                             onOpenFeed = actions.onOpenFeed,
+                            onOpenDocuments = actions.onOpenDocuments,
                             onOpenTodos = actions.onOpenTodos,
                             onOpenPlugins = actions.onOpenPlugins,
                             onOpenPipelines = actions.onOpenPipelines,
@@ -516,6 +539,10 @@ fun AgentHomeScreen(
                         onOpenFeed = {
                             focus.clearFocus()
                             actions.onOpenFeed()
+                        },
+                        onOpenDocuments = {
+                            focus.clearFocus()
+                            actions.onOpenDocuments()
                         },
                         onOpenTodos = {
                             focus.clearFocus()
@@ -828,6 +855,7 @@ fun AgentHome(
     onOpenFeed: () -> Unit = {},
     /** Signs the team server at [server] in again ([AgentConnection.server]). */
     onSignIn: (server: String) -> Unit = {},
+    onOpenDocuments: () -> Unit = {},
     onOpenTodos: () -> Unit = {},
     onOpenPlugins: () -> Unit = {},
     onOpenPipelines: () -> Unit = {},
@@ -849,7 +877,7 @@ fun AgentHome(
         )
         return
     }
-    SignedInAgentHome(graph, id, agents, onOpenConversation, onCompose, onSettings, onSettingsRow, onComposeWithPicture, onOpenArtifacts, onOpenSurface, onOpenArtifact, onOpenFeed, onSignIn, onOpenTodos, onOpenPlugins, onOpenPipelines, onOpenVaultItem, onOpenPerson)
+    SignedInAgentHome(graph, id, agents, onOpenConversation, onCompose, onSettings, onSettingsRow, onComposeWithPicture, onOpenArtifacts, onOpenSurface, onOpenArtifact, onOpenFeed, onSignIn, onOpenDocuments, onOpenTodos, onOpenPlugins, onOpenPipelines, onOpenVaultItem, onOpenPerson)
 }
 
 /**
@@ -925,6 +953,7 @@ private fun SignedInAgentHome(
     onOpenArtifact: (ArtifactRef) -> Unit,
     onOpenFeed: () -> Unit,
     onSignIn: (server: String) -> Unit,
+    onOpenDocuments: () -> Unit,
     onOpenTodos: () -> Unit,
     onOpenPlugins: () -> Unit,
     onOpenPipelines: () -> Unit,
@@ -954,7 +983,7 @@ private fun SignedInAgentHome(
     val canCompose = permissions.canWrite
     val canAskChief = permissions.allows(com.slopus.happy.agent.Permission.BOTS_MANAGE)
     val providerSignIn by session.providerSignInAvailable.collectAsStateWithLifecycle()
-    val actions = remember(graph, session, onOpenConversation, onCompose, onComposeWithPicture, onSettings, onSettingsRow, onOpenArtifacts, onOpenSurface, onOpenArtifact, onOpenFeed, add, switchAccount, onSignIn, onOpenTodos, onOpenPlugins, onOpenPipelines, voice, onOpenVaultItem, onOpenPerson, canCompose, canAskChief, providerSignIn) {
+    val actions = remember(graph, session, onOpenConversation, onCompose, onComposeWithPicture, onSettings, onSettingsRow, onOpenArtifacts, onOpenSurface, onOpenArtifact, onOpenFeed, add, switchAccount, onSignIn, onOpenDocuments, onOpenTodos, onOpenPlugins, onOpenPipelines, voice, onOpenVaultItem, onOpenPerson, canCompose, canAskChief, providerSignIn) {
         AgentHomeActions(
             onOpenConversation = onOpenConversation,
             onCompose = onCompose,
@@ -964,6 +993,7 @@ private fun SignedInAgentHome(
             onSwitchAccount = switchAccount,
             onAdd = { add?.scan() },
             onOpenArtifacts = onOpenArtifacts,
+            onOpenDocuments = onOpenDocuments,
             onOpenTodos = onOpenTodos,
             onOpenPlugins = onOpenPlugins,
             onOpenPipelines = onOpenPipelines,

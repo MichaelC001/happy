@@ -258,6 +258,18 @@ extension AgentWire {
         public var avatar: Avatar?
         public var version: String?
         public var agent: Agent?
+        /// A Happy Cloud bot's: `shared` or `personal` (`BotKind`), nil
+        /// from a daemon. Independent of `isAdmin`: any kind may be admin.
+        public var kind: String?
+        public var isAdmin: Bool?
+        /// The reader may change its name, picture and instructions.
+        public var editable: Bool?
+        /// A personal bot's own instructions, sent only to those who may edit them.
+        public var instructions: String?
+        /// A personal bot's deployed definition, counting from 1.
+        public var revision: Int?
+
+        enum CodingKeys: String, CodingKey { case id, name, systemKey, status, avatar, version, agent, kind, isAdmin, editable, instructions, revision }
     }
 
     public struct Task: Equatable, Sendable, Codable {
@@ -1051,12 +1063,15 @@ extension AgentWire {
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             agent = try container.decode(Agent.self, forKey: .agent)
-            mode = try container.decodeIfPresent(Mode.self, forKey: .mode)
-            draft = try container.decodeIfPresent(Draft.self, forKey: .draft)
-            pending = try container.decodeIfPresent([Message].self, forKey: .pending).map { Message.localIds($0, at: "pending") }
-            cursor = try container.decodeIfPresent(String.self, forKey: .cursor)
-            subagents = try container.decodeIfPresent([Agent].self, forKey: .subagents)
-            context = try container.decodeIfPresent(ContextUsage.self, forKey: .context)
+            // Only the agent is needed to open its conversation: a part
+            // this build can't read is none, as Android's `Bootstrap.parse`
+            // has it, never a read that fails on every try.
+            mode = (try? container.decodeIfPresent(Mode.self, forKey: .mode)) ?? nil
+            draft = (try? container.decodeIfPresent(Draft.self, forKey: .draft)) ?? nil
+            pending = ((try? container.decodeIfPresent([Message].self, forKey: .pending)) ?? nil).map { Message.localIds($0, at: "pending") }
+            cursor = (try? container.decodeIfPresent(String.self, forKey: .cursor)) ?? nil
+            subagents = ((try? container.decodeIfPresent([Lossy<Agent>].self, forKey: .subagents)) ?? nil).map { $0.compactMap(\.value) }
+            context = (try? container.decodeIfPresent(ContextUsage.self, forKey: .context)) ?? nil
             // One command that can't be read never costs the conversation.
             slashCommands = SlashCommand.catalog(try container.decodeIfPresent(JSONValue.self, forKey: .slashCommands))
         }
